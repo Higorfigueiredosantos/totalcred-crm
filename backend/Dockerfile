@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y wget gnupg ca-certificates \
         google-chrome-stable \
         fonts-freefont-ttf \
         libxss1 \
+        ffmpeg \
         --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 

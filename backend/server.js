@@ -90,6 +90,33 @@ const MEDIA_DIR = path.join(__dirname, 'data', 'media')
 try { if (!fs.existsSync(MEDIA_DIR)) fs.mkdirSync(MEDIA_DIR, { recursive: true }) } catch {}
 app.use('/api/media/files', express.static(MEDIA_DIR, { maxAge: '1d' }))
 
+// Converte audio/webm → audio/ogg (Opus) para compatibilidade com Meta API
+app.post('/api/media/convert-audio', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Arquivo ausente' })
+  const { execFile } = require('child_process')
+  const os = require('os')
+  const inPath  = path.join(os.tmpdir(), `in_${Date.now()}.webm`)
+  const outPath = path.join(os.tmpdir(), `out_${Date.now()}.ogg`)
+  try {
+    fs.writeFileSync(inPath, req.file.buffer)
+    await new Promise((resolve, reject) => {
+      execFile('ffmpeg', ['-y', '-i', inPath, '-c:a', 'libopus', '-b:a', '64k', outPath], (err) => {
+        if (err) reject(err); else resolve(null)
+      })
+    })
+    const converted = fs.readFileSync(outPath)
+    res.setHeader('Content-Type', 'audio/ogg')
+    res.setHeader('Content-Disposition', 'attachment; filename="audio.ogg"')
+    res.end(converted)
+  } catch (e) {
+    console.error('[ConvertAudio]', e.message)
+    res.status(500).json({ error: 'Falha na conversão de áudio: ' + e.message })
+  } finally {
+    try { fs.unlinkSync(inPath) } catch (_) {}
+    try { fs.unlinkSync(outPath) } catch (_) {}
+  }
+})
+
 // Proxy para mídia da Meta API (images/audio/video recebidos nos canais oficiais)
 app.get('/api/media/meta', async (req, res) => {
   const { id, token, phoneId } = req.query

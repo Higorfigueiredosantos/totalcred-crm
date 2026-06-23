@@ -701,15 +701,17 @@ export default function Messages() {
         if (!r.ok) throw new Error(d.error || 'Erro ao enviar mídia via chip')
         updateMessage(msgId, { status: 'sent', wamid: d.msgId })
       } else if (activeChannel) {
-        // Meta API não aceita audio/webm — formatos válidos: ogg, aac, mp4, mpeg, amr
+        // Converte audio/webm para audio/ogg via backend (Meta não aceita webm)
         if (type === 'audio') {
           const mime = file.type.split(';')[0].trim()
           const metaAudioOk = ['audio/ogg','audio/aac','audio/mp4','audio/mpeg','audio/amr'].includes(mime)
           if (!metaAudioOk) {
-            throw new Error(
-              `Formato de áudio não suportado pela Meta API (${mime}). ` +
-              'Envie um arquivo .ogg, .aac, .mp4 ou .mp3.'
-            )
+            const formData = new FormData()
+            formData.append('file', file, 'audio.webm')
+            const convRes = await fetch('/api/media/convert-audio', { method: 'POST', body: formData })
+            if (!convRes.ok) throw new Error('Falha ao converter áudio para formato compatível com Meta')
+            const blob = await convRes.blob()
+            file = new File([blob], 'audio.ogg', { type: 'audio/ogg' })
           }
         }
         const mediaId = await uploadMedia(activeChannel.phoneNumberId, activeChannel.accessToken, file, activeChannel.proxy)
