@@ -185,20 +185,27 @@ export default function Messages() {
 
   // ── Meta API inbound ────────────────────────────────────────────────────────
   const handleMetaInbound = useCallback((payload: any) => {
-    const { value } = payload.entry?.[0]?.changes?.[0] ?? {}
+    for (const entry of payload.entry ?? []) {
+      for (const change of entry.changes ?? []) {
+        const value = change.value
+        if (!value) continue
+
     if (!value?.messages) {
       for (const status of value?.statuses ?? []) {
         const m = messages.find(m => m.wamid === status.id)
         if (m) updateMessage(m.id, { status: status.status })
       }
-      return
+      continue
     }
 
     for (const msg of value.messages) {
       const from = msg.from
-      const channelPhoneId = value.metadata.phone_number_id
-      const channel = channels.find(ch => ch.phoneNumberId === channelPhoneId)
-      if (!channel) continue
+      const channelPhoneId = value.metadata?.phone_number_id
+      const channel = channels.find(ch => String(ch.phoneNumberId).trim() === String(channelPhoneId).trim())
+      if (!channel) {
+        console.warn('[Meta] Canal não encontrado para phoneNumberId:', channelPhoneId, '| Canais cadastrados:', channels.map(c => c.phoneNumberId))
+        continue
+      }
 
       let contact = contacts.find(c => c.phone === `+${from}` || c.phone === from)
       if (!contact) {
@@ -270,6 +277,8 @@ export default function Messages() {
       const m = messages.find(m => m.wamid === status.id)
       if (m) updateMessage(m.id, { status: status.status })
     }
+      } // end for change
+    } // end for entry
   }, [channels, contacts, conversations, messages, activeConversationId,
       addContact, addConversation, addMessage, updateMessage, updateConversation, markRead])
 
