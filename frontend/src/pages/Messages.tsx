@@ -73,8 +73,8 @@ function MediaBubble({ msg, outbound }: { msg: Message; outbound: boolean }) {
       )
     case 'audio':
       return msg.mediaUrl ? (
-        <audio controls src={msg.mediaUrl} className="max-w-[220px] w-full h-9 my-1"
-          style={{ colorScheme: 'dark' }} />
+        <audio controls src={msg.mediaUrl} className="w-64 my-1"
+          style={{ colorScheme: 'dark', minHeight: '40px' }} />
       ) : (
         <div className={`flex items-center gap-2 py-1 ${cls}`}>
           <Mic size={18} />
