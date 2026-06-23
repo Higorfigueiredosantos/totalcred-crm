@@ -1995,21 +1995,16 @@ app.post('/api/chips/send-media', upload.single('file'), async (req, res) => {
     )
     let msg
     if (isAudio) {
-      // Converte WebM (gravado pelo browser) para OGG Opus (formato nativo do WhatsApp PTT)
-      const ffmpegBin = require('ffmpeg-static')
-      const { spawnSync } = require('child_process')
+      // Converte WebM para OGG Opus (formato nativo do WhatsApp PTT) usando ffmpeg do sistema
+      const { execFileSync } = require('child_process')
       const os = require('os')
       const tmpIn  = path.join(os.tmpdir(), `crm_in_${Date.now()}.webm`)
       const tmpOut = path.join(os.tmpdir(), `crm_out_${Date.now()}.ogg`)
       let sentAsPtt = false
       try {
         fs.writeFileSync(tmpIn, req.file.buffer)
-        const r = spawnSync(ffmpegBin, [
-          '-y', '-i', tmpIn,
-          '-c:a', 'libopus', '-b:a', '64k',
-          '-f', 'ogg', tmpOut
-        ], { timeout: 15000 })
-        if (r.status === 0 && fs.existsSync(tmpOut)) {
+        execFileSync('ffmpeg', ['-y', '-i', tmpIn, '-c:a', 'libopus', '-b:a', '64k', '-f', 'ogg', tmpOut], { timeout: 15000 })
+        if (fs.existsSync(tmpOut)) {
           const oggBase64 = fs.readFileSync(tmpOut).toString('base64')
           const pttMedia  = new MessageMedia('audio/ogg; codecs=opus', oggBase64, 'audio.ogg')
           msg = await session.client.sendMessage(chatId, pttMedia, { sendAudioAsVoice: true })
@@ -2023,9 +2018,8 @@ app.post('/api/chips/send-media', upload.single('file'), async (req, res) => {
         try { fs.unlinkSync(tmpOut) } catch {}
       }
       if (!sentAsPtt) {
-        // Fallback: envia como documento de áudio se a conversão falhar
-        msg = await session.client.sendMessage(chatId, media, { sendMediaAsDocument: true })
-        console.log('[Chip] Áudio enviado como documento (fallback)')
+        msg = await session.client.sendMessage(chatId, media, { sendAudioAsVoice: true })
+        console.log('[Chip] Áudio enviado sem conversão')
       }
     } else {
       const opts = {}
