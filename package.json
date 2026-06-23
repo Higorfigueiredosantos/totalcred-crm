@@ -1,0 +1,11 @@
+{
+  "name": "crm-whatsapp",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "start cmd /k \"cd backend && npm run dev\" && start cmd /k \"cd frontend && npm run dev\"",
+    "start:backend": "cd backend && node server.js",
+    "start:frontend": "cd frontend && npm run dev",
+    "install:all": "cd backend && npm install && cd ../frontend && npm install"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "fgts": {
+    "enabled": true,
+    "chipIds": [],
+    "channelIds": [],
+    "webhookEnabled": true,
+    "webhookUrl": ""
+  }
+}

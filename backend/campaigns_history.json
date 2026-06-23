@@ -1,0 +1,23 @@
+[
+  {
+    "id": "1782073166001",
+    "startedAt": 1782073166001,
+    "endedAt": 1782073166598,
+    "total": 1,
+    "success": 1,
+    "failed": 0,
+    "skipped": 0,
+    "results": [
+      {
+        "index": 0,
+        "number": "5535998722790",
+        "name": "5535998722790",
+        "status": "success",
+        "via": "chip2",
+        "message": "Boa tarde!\n\ntreste",
+        "ack": 1,
+        "sentAt": 1782073166598
+      }
+    ]
+  }
+]

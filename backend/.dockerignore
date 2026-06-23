@@ -1,0 +1,5 @@
+node_modules
+.wwa_sessions
+data/media
+*.log
+.env

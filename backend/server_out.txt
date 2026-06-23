@@ -1,0 +1,12 @@
+✅ CRM Backend running on http://localhost:3001
+📡 WebSocket ready on ws://localhost:3001/ws
+🔗 Webhook endpoint: http://localhost:3001/api/webhook
+[Chips] Restaurando 1 sessão(ões)...
+[ProxyRotator] Rotador em 127.0.0.1:9991 — 0 proxies no pool
+[Chip chip2] Usando Chrome em: C:\Program Files\Google\Chrome\Application\chrome.exe
+[Chip chip2] Inicializando Chrome...
+[WS] Client connected (1 total)
+[WS] Client connected (1 total)
+[WS] Client connected (1 total)
+[WS] Client connected (1 total)
+[WS] Client connected (1 total)
