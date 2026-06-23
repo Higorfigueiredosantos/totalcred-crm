@@ -83,9 +83,6 @@ const MEDIA_LABEL: Record<MediaHeaderFormat, string> = {
   DOCUMENT: 'Documento',
 }
 
-function templateHasImageHeader(t: Template) {
-  return getTemplateHeaderFormat(t) === 'IMAGE'
-}
 
 function getFirstName(full: string): string {
   return full.trim().split(/\s+/)[0] ?? ''
@@ -810,7 +807,6 @@ function BlastModal({ onClose, onSave }: { onClose: () => void; onSave: (b: Blas
 
   const selectedChannels = channels.filter(c => form.channelIds.includes(c.id))
   const selectedTemplate = templates.find(t => t.id === form.templateId)
-  const hasImageHeader = selectedTemplate ? templateHasImageHeader(selectedTemplate) : false
   const templateVars = selectedTemplate ? extractTemplateVars(selectedTemplate) : []
 
   function toggleChannel(id: string) {

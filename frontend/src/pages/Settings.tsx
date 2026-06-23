@@ -4,8 +4,8 @@ import {
   Save, Info, Plus, Trash2, Zap, Tag, Edit2, Check, X,
   Code2, SlidersHorizontal, Copy, Lock, Globe, Cpu,
   MessageSquare, Radio, AlertTriangle, ChevronDown, ChevronUp, MessagesSquare,
-  Webhook, RefreshCw, Send, ToggleLeft, ToggleRight,
-  Eye, EyeOff, KeyRound, Sun, Moon, Brain, Smartphone, User,
+  Webhook, RefreshCw, Send,
+  Eye, EyeOff, KeyRound, Sun, Moon, Brain, Smartphone,
 } from 'lucide-react'
 import { v4 as uuid } from '../utils/uuid'
 import type { QuickReply, Label, Channel } from '../types'
@@ -330,7 +330,7 @@ function Endpoint({ method, path, title, description, auth = true, pathParams, b
       >
         <span className={`shrink-0 font-mono text-[11px] font-bold px-2 py-0.5 rounded ${METHOD_BADGE[method]}`}>{method}</span>
         <code className="text-white text-sm font-mono flex-1 truncate">{path}</code>
-        {auth && <Lock size={11} className="text-amber-500/60 shrink-0" title="Protegido por API Key" />}
+        {auth && <Lock size={11} className="text-amber-500/60 shrink-0" />}
         <span className="text-xs text-gray-500 shrink-0 hidden sm:block">{title}</span>
         {open ? <ChevronUp size={14} className="text-gray-600 shrink-0" /> : <ChevronDown size={14} className="text-gray-600 shrink-0" />}
       </button>

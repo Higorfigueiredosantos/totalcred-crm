@@ -7,7 +7,7 @@ import { format } from 'date-fns'
 import {
   Send, Search, Check, CheckCheck, Clock, AlertCircle, Archive,
   Smartphone, Lock, Tag, User, Phone, Calendar, ChevronRight, ChevronLeft, X, Edit2,
-  Paperclip, FileText, Volume2, Image, Video, Users, Download, Mic,
+  Paperclip, FileText, Image, Video, Users, Download, Mic,
   Smile, StopCircle, Trash2,
 } from 'lucide-react'
 import { sendTextMessage, markMessageRead, uploadMedia, sendMediaMessage } from '../api/whatsapp'

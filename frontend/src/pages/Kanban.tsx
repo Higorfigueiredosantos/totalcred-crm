@@ -128,9 +128,8 @@ function KanbanColumnItem({ column, cards, contacts, onAddCard, onRemove, onSave
   return (
     <div
       ref={setNodeRef}
-      style={{ transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.45 : 1 }}
+      style={{ transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.45 : 1, height: 'calc(100vh - 160px)' }}
       className="w-64 shrink-0 bg-gray-900 border border-gray-800 rounded-xl flex flex-col"
-      style2={{ height: 'calc(100vh - 160px)' }}
     >
       <div className="flex items-center gap-1.5 p-3 border-b border-gray-800">
         <div
