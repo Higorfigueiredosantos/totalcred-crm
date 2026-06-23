@@ -722,7 +722,10 @@ export default function Messages() {
           type === 'audio' ? undefined : caption,
           activeChannel.proxy
         )
-        updateMessage(msgId, { status: 'sent', wamid, mediaId })
+        const proxyMediaUrl = type === 'audio' || type === 'image' || type === 'video' || type === 'document'
+          ? `/api/media/meta?id=${encodeURIComponent(mediaId)}&token=${encodeURIComponent(activeChannel.accessToken)}&phoneId=${encodeURIComponent(activeChannel.phoneNumberId)}`
+          : undefined
+        updateMessage(msgId, { status: 'sent', wamid, mediaId, ...(proxyMediaUrl ? { mediaUrl: proxyMediaUrl } : {}) })
       } else {
         throw new Error('Nenhum canal disponível para envio')
       }
