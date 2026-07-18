@@ -206,10 +206,12 @@ function broadcast(type, payload) {
   wsClients.forEach((ws) => {
     if (ws.readyState === 1) { ws.send(msg); sent = true }
   })
-  // Nenhum browser conectado: guarda na fila (apenas mensagens, não status)
-  if (!sent && (type === 'chip_message' || type === 'whatsapp' || type === 'chip_ack')) {
+  // Nenhum browser conectado: guarda na fila (apenas mensagens, não status/ack —
+  // chip_ack não tem consumidor no processamento da fila offline no frontend,
+  // então enfileirá-lo só ocupava espaço e expulsava mensagens reais do limite)
+  if (!sent && (type === 'chip_message' || type === 'whatsapp')) {
     offlineQueue.push({ type, payload })
-    if (offlineQueue.length > 1000) offlineQueue = offlineQueue.slice(-1000)
+    if (offlineQueue.length > 3000) offlineQueue = offlineQueue.slice(-3000)
     saveOfflineQueue()
   }
 }
