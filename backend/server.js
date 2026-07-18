@@ -907,7 +907,6 @@ async function initChip(chipId) {
     })
 
     client.on('message', (msg) => {
-      console.log(`[Chip ${chipId}] DEBUG message event: fromMe=${msg.fromMe} from=${msg.from} author=${msg.author} id=${extractMsgId(msg)} body="${(msg.body || '').slice(0, 30)}"`)
       handleIncomingChipMessage(client, msg, chipId).catch(e => console.error('[Autobot] Error:', e.message))
     })
 
@@ -992,29 +991,53 @@ function getNextReadyChipFrom(allowedIds, lastUsedId) {
 
 // ── Send helpers ──────────────────────────────────────────────────────────────
 
-// Extrai o id serializado de uma mensagem do whatsapp-web.js. Em algumas
-// versões/eventos da lib, msg.id já vem como a própria string serializada
-// (sem o wrapper { _serialized }) — cobre os dois formatos.
+// Extrai o id serializado de uma mensagem do whatsapp-web.js. Dependendo da
+// versão/formato da sessão (ex: contas com LID), msg.id pode vir como:
+// - a própria string serializada (sem wrapper)
+// - um objeto com _serialized já pronto
+// - um objeto só com { fromMe, remote, id } (sem _serialized) — nesse caso
+//   remonta manualmente no mesmo formato que o WhatsApp usa: "fromMe_remote_id"
+function idPartsToSerialized(idObj) {
+  if (!idObj || typeof idObj.fromMe !== 'boolean' || !idObj.remote || !idObj.id) return null
+  return `${idObj.fromMe}_${idObj.remote}_${idObj.id}`
+}
 function extractMsgId(msg) {
   const id = msg?.id
   if (typeof id === 'string') return id
   if (id?._serialized) return id._serialized
+  const fromParts = idPartsToSerialized(id)
+  if (fromParts) return fromParts
   const dataId = msg?._data?.id
   if (typeof dataId === 'string') return dataId
   if (dataId?._serialized) return dataId._serialized
-  return null
+  return idPartsToSerialized(dataId)
 }
 
 async function sendChipText(client, chatId, text) {
   for (let i = 0; i < 3; i++) {
     try {
-      return await client.sendMessage(chatId, text)
+      const result = await client.sendMessage(chatId, text)
+      if (result) return result
+      // sendMessage às vezes resolve sem devolver o objeto da mensagem
+      // (observado em sessões com LID) — busca a mensagem recém-enviada
+      // direto no chat como alternativa, pra não perder o id.
+      return await fetchLastSentMessage(client, chatId)
     } catch (e) {
       const msg = (e.message || '').toLowerCase()
       const retry = msg.includes('timeout') || msg.includes('detached frame') || msg.includes('target closed') || msg.includes('session closed') || msg === 't'
       if (retry && i < 2) { await sleep(4000); continue }
       throw e
     }
+  }
+}
+
+async function fetchLastSentMessage(client, chatId) {
+  try {
+    const chat = await client.getChatById(chatId)
+    const recent = await chat.fetchMessages({ limit: 5 })
+    return [...recent].reverse().find(m => m.fromMe) || null
+  } catch (_) {
+    return null
   }
 }
 
@@ -2230,7 +2253,6 @@ app.post('/api/send-message', async (req, res) => {
 
 app.post('/api/chips/send', async (req, res) => {
   const { chipId, to, message } = req.body
-  console.log(`[Chip ${chipId}] DEBUG /api/chips/send chamado to=${to} message="${(message || '').slice(0, 30)}"`)
   if (!chipId || !to || !message) return res.status(400).json({ error: 'chipId, to e message são obrigatórios' })
   const session = chipSessions[chipId]
   if (!session?.isReady || !session.client) return res.status(400).json({ error: `Chip "${chipId}" não está conectado` })
@@ -2305,6 +2327,7 @@ app.post('/api/chips/send-media', upload.single('file'), async (req, res) => {
       if (caption) opts.caption = caption
       msg = await session.client.sendMessage(chatId, media, opts)
     }
+    if (!msg) msg = await fetchLastSentMessage(session.client, chatId)
     const msgId = extractMsgId(msg)
     const outType = isAudio ? 'audio' : req.file.mimetype.startsWith('image/') ? 'image' : req.file.mimetype.startsWith('video/') ? 'video' : 'document'
     const convId = getConvId(chipId, chatId)
