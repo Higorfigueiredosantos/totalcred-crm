@@ -200,6 +200,16 @@ app.get('/api/offline_queue', (_req, res) => {
   res.json(queue)
 })
 
+// Webhook da Meta dispara tanto para mensagens recebidas quanto para status
+// (enviado/entregue/lido) de mensagens enviadas. Só nos interessa reter na
+// fila offline quando há mensagem de fato — status puro não deve competir
+// por espaço com conteúdo real.
+function metaWebhookHasInboundMessage(body) {
+  return (body?.entry || []).some(entry =>
+    (entry.changes || []).some(change => (change.value?.messages || []).length > 0)
+  )
+}
+
 function broadcast(type, payload) {
   const msg = JSON.stringify({ type, payload })
   let sent = false
@@ -207,9 +217,13 @@ function broadcast(type, payload) {
     if (ws.readyState === 1) { ws.send(msg); sent = true }
   })
   // Nenhum browser conectado: guarda na fila (apenas mensagens, não status/ack —
-  // chip_ack não tem consumidor no processamento da fila offline no frontend,
-  // então enfileirá-lo só ocupava espaço e expulsava mensagens reais do limite)
-  if (!sent && (type === 'chip_message' || type === 'whatsapp')) {
+  // chip_ack não tem consumidor no processamento da fila offline no frontend, e
+  // webhooks da Meta que são só status também não devem ocupar espaço da fila,
+  // já que enfileirá-los só expulsava mensagens reais do limite)
+  const shouldQueue =
+    type === 'chip_message' ||
+    (type === 'whatsapp' && metaWebhookHasInboundMessage(payload))
+  if (!sent && shouldQueue) {
     offlineQueue.push({ type, payload })
     if (offlineQueue.length > 3000) offlineQueue = offlineQueue.slice(-3000)
     saveOfflineQueue()
