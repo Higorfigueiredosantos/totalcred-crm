@@ -665,27 +665,6 @@ export default function Channels() {
                     </div>
                   </div>
 
-                  {/* Details */}
-                  <div className="flex flex-col gap-1.5 text-[10px]">
-                    <div className="bg-gray-900/60 rounded-lg px-2.5 py-1.5">
-                      <p className="text-gray-500 mb-0.5">Phone Number ID</p>
-                      <p className="text-gray-300 font-mono truncate">{ch.phoneNumberId || '—'}</p>
-                    </div>
-                    <div className="bg-gray-900/60 rounded-lg px-2.5 py-1.5">
-                      <p className="text-gray-500 mb-0.5">WABA ID</p>
-                      <p className="text-gray-300 font-mono truncate">{ch.wabaId || '—'}</p>
-                    </div>
-                    <div className="bg-gray-900/60 rounded-lg px-2.5 py-1.5">
-                      <p className="text-gray-500 mb-0.5">Webhook URL <span className="text-yellow-500">(precisa ser pública)</span></p>
-                      <p className="text-yellow-400 font-mono truncate text-[9px]">https://seu-dominio.com/api/webhook</p>
-                      <p className="text-gray-600 text-[9px] mt-0.5">Use ngrok http 3001 para desenvolvimento local</p>
-                    </div>
-                    <div className="bg-gray-900/60 rounded-lg px-2.5 py-1.5">
-                      <p className="text-gray-500 mb-0.5">Verify Token</p>
-                      <p className="text-gray-300 font-mono truncate">{ch.webhookVerifyToken || '—'}</p>
-                    </div>
-                  </div>
-
                   {/* Action buttons */}
                   <div className="flex flex-col gap-1.5 mt-auto">
                     <button
