@@ -403,13 +403,25 @@ export default function Messages() {
 
   // ── Chip outbound (enviado via API externa ou pela UI) ──────────────────────
   useEffect(() => onWSMessage('chip_outbound', (payload: any) => {
-    const { chipId, to, message, msgId, type, mediaFileName, caption, timestamp } = payload
+    const { chipId, to, message, msgId, type, mediaFileName, caption, timestamp, conversationId } = payload
     if (!chipId || !to) return
 
-    // Se o wamid já existe na store, foi enviado pela UI — apenas confirma status
+    // Se o wamid já existe na store, foi enviado pela UI — apenas confirma status.
+    // Esse broadcast chega ~300ms depois da resposta HTTP do envio (para avisar
+    // outras abas/integrações externas); se ele vencer a corrida antes da própria
+    // aba que enviou processar a resposta e gravar o wamid, cai no fallback abaixo:
+    // casa com a mensagem otimista ainda "sending" da mesma conversa (sem depender
+    // de timing), evitando duplicar a mensagem e garantindo que o wamid seja
+    // gravado para os ✓✓ de entrega/leitura funcionarem.
     if (msgId) {
-      const existing = messagesRef.current.find(m => m.wamid === msgId)
-      if (existing) { updateMessage(existing.id, { status: 'sent' }); return }
+      let existing = messagesRef.current.find(m => m.wamid === msgId)
+      if (!existing) {
+        existing = messagesRef.current.find(m =>
+          m.direction === 'outbound' && !m.wamid && m.status === 'sending' &&
+          (conversationId ? m.conversationId === conversationId : m.channelId === CHIP_PREFIX + chipId)
+        )
+      }
+      if (existing) { updateMessage(existing.id, { status: 'sent', wamid: msgId }); return }
     }
 
     const channelId = CHIP_PREFIX + chipId
