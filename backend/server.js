@@ -1030,14 +1030,27 @@ async function sendChipText(client, chatId, text) {
 // verdade, só não temos o id na hora. Como fallback, esperamos pelo próprio
 // evento message_ack dessa conversa (que sempre chega com o id certo, ~200-
 // 300ms depois) em vez de tentar buscar de volta no chat.
+//
+// Importante: o ack pode chegar muito rápido — mais rápido do que o tempo
+// entre o sendMessage() resolver e o código chamar a espera. Por isso a
+// escuta precisa ser registrada ANTES de enviar (registerPendingAck), não
+// depois de descobrir que o id veio vazio.
 const pendingSendAcks = new Map() // `${chipId}:${chatId}` -> resolve(msgId)
 
-function waitForSendAck(chipId, chatId, timeoutMs = 4000) {
-  return new Promise(resolve => {
-    const key = `${chipId}:${chatId}`
-    const timer = setTimeout(() => { pendingSendAcks.delete(key); resolve(null) }, timeoutMs)
-    pendingSendAcks.set(key, (id) => { clearTimeout(timer); pendingSendAcks.delete(key); resolve(id) })
-  })
+function registerPendingAck(chipId, chatId, timeoutMs = 4000) {
+  const key = `${chipId}:${chatId}`
+  let resolveFn
+  const promise = new Promise(resolve => { resolveFn = resolve })
+  const timer = setTimeout(() => {
+    if (pendingSendAcks.get(key) === entry) pendingSendAcks.delete(key)
+    resolveFn(null)
+  }, timeoutMs)
+  const entry = (id) => { clearTimeout(timer); pendingSendAcks.delete(key); resolveFn(id) }
+  pendingSendAcks.set(key, entry)
+  return {
+    promise,
+    cancel: () => { clearTimeout(timer); if (pendingSendAcks.get(key) === entry) pendingSendAcks.delete(key) },
+  }
 }
 
 function resolveSendAck(chipId, chatId, msgId) {
@@ -2222,8 +2235,10 @@ app.post('/api/send-message', async (req, res) => {
     try {
       let chatId = to.includes('@') ? to : formatNumber(to)
       const convId = conversationId || getConvId(id, chatId)
+      const pendingAck = registerPendingAck(id, chatId)
       const msg = await sendChipText(session.client, chatId, message)
-      const msgId = extractMsgId(msg) || await waitForSendAck(id, chatId)
+      let msgId = extractMsgId(msg)
+      if (msgId) pendingAck.cancel(); else msgId = await pendingAck.promise
       fireWebhooks('message_sent', { chipId: id, to: chatId, message, msgId, conversationId: convId })
       res.json({ ok: true, msgId })
       setTimeout(() => broadcast('chip_outbound', { chipId: id, to: chatId, message, msgId, type: 'text', timestamp: Date.now(), conversationId: convId }), 300)
@@ -2267,8 +2282,10 @@ app.post('/api/chips/send', async (req, res) => {
     // Only reformat if it's a plain phone number without domain.
     let chatId = to.includes('@') ? to : formatNumber(to)
     const convId = getConvId(chipId, chatId)
+    const pendingAck = registerPendingAck(chipId, chatId)
     const msg = await sendChipText(session.client, chatId, message)
-    const msgId = extractMsgId(msg) || await waitForSendAck(chipId, chatId)
+    let msgId = extractMsgId(msg)
+    if (msgId) pendingAck.cancel(); else msgId = await pendingAck.promise
     fireWebhooks('message_sent', { chipId, to: chatId, message, msgId, conversationId: convId })
     res.json({ ok: true, msgId })
     // Broadcast após resposta HTTP para o frontend exibir a mensagem enviada externamente
@@ -2296,6 +2313,7 @@ app.post('/api/chips/send-media', upload.single('file'), async (req, res) => {
       req.file.originalname || (isAudio ? 'audio.webm' : 'arquivo')
     )
     let msg
+    let pendingAck = null
     if (isAudio) {
       // Converte WebM para OGG Opus (formato nativo do WhatsApp PTT) usando ffmpeg do sistema
       const { execFileSync } = require('child_process')
@@ -2309,6 +2327,7 @@ app.post('/api/chips/send-media', upload.single('file'), async (req, res) => {
         if (fs.existsSync(tmpOut)) {
           const oggBase64 = fs.readFileSync(tmpOut).toString('base64')
           const pttMedia  = new MessageMedia('audio/ogg; codecs=opus', oggBase64, 'audio.ogg')
+          pendingAck = registerPendingAck(chipId, chatId)
           msg = await session.client.sendMessage(chatId, pttMedia, { sendAudioAsVoice: true })
           sentAsPtt = true
           console.log('[Chip] Áudio enviado como nota de voz PTT (OGG Opus)')
@@ -2320,15 +2339,18 @@ app.post('/api/chips/send-media', upload.single('file'), async (req, res) => {
         try { fs.unlinkSync(tmpOut) } catch {}
       }
       if (!sentAsPtt) {
+        pendingAck = registerPendingAck(chipId, chatId)
         msg = await session.client.sendMessage(chatId, media, { sendAudioAsVoice: true })
         console.log('[Chip] Áudio enviado sem conversão')
       }
     } else {
       const opts = {}
       if (caption) opts.caption = caption
+      pendingAck = registerPendingAck(chipId, chatId)
       msg = await session.client.sendMessage(chatId, media, opts)
     }
-    const msgId = extractMsgId(msg) || await waitForSendAck(chipId, chatId)
+    let msgId = extractMsgId(msg)
+    if (msgId) pendingAck?.cancel(); else msgId = await pendingAck?.promise
     const outType = isAudio ? 'audio' : req.file.mimetype.startsWith('image/') ? 'image' : req.file.mimetype.startsWith('video/') ? 'video' : 'document'
     const convId = getConvId(chipId, chatId)
     fireWebhooks('message_sent', { chipId, to: chatId, msgId, conversationId: convId })
