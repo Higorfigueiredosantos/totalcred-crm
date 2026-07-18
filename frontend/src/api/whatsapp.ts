@@ -25,17 +25,23 @@ async function graphPost(
   accessToken: string,
   proxy?: ProxyConfig
 ): Promise<any> {
-  if (proxy?.enabled) {
-    const res = await backendPost('/send', {
-      phoneNumberId: urlPath.split('/')[1],
-      accessToken,
-      payload,
-      proxy,
-    })
+  try {
+    if (proxy?.enabled) {
+      const res = await backendPost('/send', {
+        phoneNumberId: urlPath.split('/')[1],
+        accessToken,
+        payload,
+        proxy,
+      })
+      return res.data
+    }
+    const res = await directGraph(accessToken).post(urlPath, payload)
     return res.data
+  } catch (err: any) {
+    const apiErr = err?.response?.data?.error
+    const msg = apiErr?.message || err?.message || 'Erro desconhecido'
+    throw new Error(msg)
   }
-  const res = await directGraph(accessToken).post(urlPath, payload)
-  return res.data
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────

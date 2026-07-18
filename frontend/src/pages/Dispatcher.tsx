@@ -5,9 +5,10 @@ import { v4 as uuid } from '../utils/uuid'
 import {
   Send, Play, RefreshCw, Upload, Image, Flame, Zap,
   X, ChevronDown, ChevronUp, Info, AlertTriangle, FileText, Users, Check,
-  BarChart2, Hash, List, Video, File as FileIcon,
+  BarChart2, Hash, List, Video, File as FileIcon, Globe, Loader2,
 } from 'lucide-react'
 import { getTemplates, sendTextMessage, sendTemplateMessage, uploadMedia, getTemplateAnalytics } from '../api/whatsapp'
+import { onWSMessage } from '../api/websocket'
 import { format } from 'date-fns'
 import { ptBR } from 'date-fns/locale'
 
@@ -507,16 +508,19 @@ function MessagePreview({
 // ═══════════════════════════════════════════════════════════════════
 
 function BlastReport({
-  blast, channels, templates, onClose, onUpdate,
+  blast, channels, contacts, templates, onClose, onUpdate,
 }: {
   blast: Blast
   channels: ReturnType<typeof useStore.getState>['channels']
+  contacts: ReturnType<typeof useStore.getState>['contacts']
   templates: Template[]
   onClose: () => void
   onUpdate: (stats: Blast['stats']) => void
 }) {
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState('')
+  const [engagementLoading, setEngagementLoading] = useState(false)
+  const [engagementResult, setEngagementResult] = useState<{ engaged: number; total: number; rate: string; engagedPhones: string[] } | null>(null)
 
   const s = blast.stats
   const total = s.total || 1
@@ -565,6 +569,44 @@ function BlastReport({
       setError(e.response?.data?.error?.message ?? e.message ?? 'Erro ao buscar métricas')
     } finally {
       setRefreshing(false)
+    }
+  }
+
+  async function fetchEngagement() {
+    setEngagementLoading(true)
+    setError('')
+    try {
+      const sentAt = blast.sentAt ? new Date(blast.sentAt).getTime() : 0
+      // Build recipients list from CSV (blast.recipients) or CRM (blast.contacts)
+      let recipients: { phone: string; sentAt: number }[] = []
+      if (blast.recipients && blast.recipients.length > 0) {
+        recipients = blast.recipients.map(r => ({ phone: normalizePhone(r.phone), sentAt }))
+      } else if (blast.contacts && blast.contacts.length > 0) {
+        recipients = blast.contacts
+          .map(id => contacts.find(c => c.id === id))
+          .filter(Boolean)
+          .map(c => ({ phone: normalizePhone(c!.phone), sentAt }))
+      }
+      if (recipients.length === 0) {
+        setError('Nenhum destinatário encontrado para calcular engajamento.')
+        return
+      }
+      const res = await fetch('/api/blast/engagement', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recipients, sentAt }),
+      })
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
+        throw new Error(errData.error || `HTTP ${res.status}`)
+      }
+      const data = await res.json()
+      setEngagementResult(data)
+      onUpdate({ ...blast.stats, engaged: data.engaged })
+    } catch (e: any) {
+      setError(e.message || 'Erro ao calcular engajamento')
+    } finally {
+      setEngagementLoading(false)
     }
   }
 
@@ -661,12 +703,59 @@ function BlastReport({
             {/* Side stats */}
             <div className="p-5 space-y-5">
               {/* Engagement */}
-              <div className="text-center">
-                <p className={`text-4xl font-bold ${engagementRate >= 10 ? 'text-green-400' : 'text-amber-400'}`}>
-                  {engagementRate}%
-                </p>
-                <p className="text-sm text-gray-300 mt-1">Taxa de Engajamento</p>
-                <p className="text-xs text-gray-500">{s.engaged ?? 0} de {s.sent} engajaram</p>
+              <div className="space-y-3">
+                <div className="text-center">
+                  <p className={`text-4xl font-bold ${engagementRate >= 10 ? 'text-green-400' : 'text-amber-400'}`}>
+                    {engagementRate}%
+                  </p>
+                  <p className="text-sm text-gray-300 mt-1">Taxa de Engajamento</p>
+                  <p className="text-xs text-gray-500">{s.engaged ?? 0} de {s.sent} engajaram</p>
+                </div>
+
+                {/* Engagement via messages */}
+                <div className="bg-gray-800 rounded-xl p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] text-gray-400 font-medium">Engajamento via respostas</span>
+                    <button
+                      onClick={fetchEngagement}
+                      disabled={engagementLoading}
+                      className="flex items-center gap-1 text-[11px] bg-orange-800 hover:bg-orange-700 disabled:opacity-50 text-white px-2 py-1 rounded-md transition-colors">
+                      {engagementLoading
+                        ? <><Loader2 size={10} className="animate-spin" /> Calculando…</>
+                        : <><RefreshCw size={10} /> Calcular</>}
+                    </button>
+                  </div>
+                  {engagementResult ? (
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-gray-500">Responderam ou clicaram</span>
+                        <span className="text-orange-400 font-bold">{engagementResult.engaged} ({engagementResult.rate})</span>
+                      </div>
+                      <div className="w-full bg-gray-700 rounded-full h-1">
+                        <div className="bg-orange-500 h-1 rounded-full"
+                          style={{ width: `${engagementResult.total > 0 ? (engagementResult.engaged / engagementResult.total * 100) : 0}%` }} />
+                      </div>
+                      <p className="text-[10px] text-gray-600">Conta mensagens + cliques de botão após o disparo</p>
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-gray-600">Clique em Calcular para verificar quem respondeu ou clicou em botões</p>
+                  )}
+                </div>
+
+                {/* Button clicks breakdown */}
+                {buttonClicks.length > 0 && (
+                  <div className="bg-gray-800 rounded-xl p-3">
+                    <p className="text-[11px] text-gray-500 font-medium mb-2">Cliques por botão (Meta Analytics):</p>
+                    <div className="space-y-1.5">
+                      {buttonClicks.map(([label, count]) => (
+                        <div key={label} className="flex items-center justify-between">
+                          <span className="text-[11px] font-mono text-gray-200 truncate max-w-[120px]">{label}</span>
+                          <span className="text-[11px] text-green-400 font-semibold shrink-0">{count} ({s.sent > 0 ? Math.round(count / s.sent * 100) : 0}%)</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="h-px bg-gray-800" />
@@ -679,31 +768,6 @@ function BlastReport({
                 <p className="text-sm text-gray-300 mt-1">Taxa de Entrega</p>
                 <p className="text-xs text-gray-500">{s.delivered} de {s.sent} entregues</p>
               </div>
-
-              {/* Button clicks */}
-              {buttonClicks.length > 0 && (
-                <>
-                  <div className="h-px bg-gray-800" />
-                  <div>
-                    <p className="text-xs text-gray-500 font-medium mb-2">Cliques por botão (Meta Analytics):</p>
-                    <div className="space-y-2">
-                      {buttonClicks.map(([label, count]) => (
-                        <div key={label} className="flex items-center justify-between">
-                          <span className="text-xs font-mono font-bold text-gray-200">{label}</span>
-                          <div className="text-right">
-                            <span className="text-xs text-green-400 font-semibold">{count} cliques</span>
-                            <span className="text-[10px] text-gray-600 ml-1">({s.sent > 0 ? Math.round(count / s.sent * 100) : 0}% dos enviados)</span>
-                          </div>
-                        </div>
-                      ))}
-                      <div className="pt-1 border-t border-gray-800 flex justify-between">
-                        <span className="text-xs text-gray-500">Total de cliques</span>
-                        <span className="text-xs font-bold text-green-400">{s.engaged ?? 0}</span>
-                      </div>
-                    </div>
-                  </div>
-                </>
-              )}
 
               {/* Meta info */}
               {blast.sentAt && (
@@ -777,6 +841,12 @@ function BlastModal({ onClose, onSave }: { onClose: () => void; onSave: (b: Blas
   const [loadingTemplates, setLoadingTemplates] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const csvInputRef = useRef<HTMLInputElement>(null)
+
+  // WA filter state
+  const [csvDups, setCsvDups] = useState(0)
+  const [waFilterState, setWaFilterState] = useState<'idle' | 'running' | 'done'>('idle')
+  const [waFilterProgress, setWaFilterProgress] = useState({ checked: 0, total: 0, hasWa: 0, noWa: 0 })
+  const [noWaIndices, setNoWaIndices] = useState<Set<number>>(new Set())
 
   const [form, setForm] = useState<FormState>({
     name: '',
@@ -885,6 +955,30 @@ function BlastModal({ onClose, onSave }: { onClose: () => void; onSave: (b: Blas
     })))
   }, [form.templateId])
 
+  useEffect(() => {
+    const offs = [
+      onWSMessage('wa_filter_progress', (p: any) => {
+        setWaFilterProgress({ checked: p.checked, total: p.total, hasWa: p.hasWa, noWa: p.noWa })
+      }),
+      onWSMessage('wa_filter_done', (p: any) => {
+        setWaFilterState('done')
+        if (p.error) { alert(`Erro no filtro: ${p.error}`); setWaFilterState('idle'); return }
+        // Map results back to row indices using phone column
+        const badNums = new Set<string>(
+          (p.results as { number: string; hasWhatsapp: boolean }[]).filter(r => !r.hasWhatsapp).map(r => r.number)
+        )
+        const badIndices = new Set<number>()
+        form.csvRows.forEach((row, i) => {
+          const phone = (row[form.phoneColumn] ?? '').replace(/\D/g, '')
+          if (badNums.has(phone)) badIndices.add(i)
+        })
+        setNoWaIndices(badIndices)
+        setWaFilterProgress(prev => ({ ...prev, hasWa: p.hasWa ?? prev.hasWa, noWa: p.noWa ?? prev.noWa }))
+      }),
+    ]
+    return () => offs.forEach(f => f())
+  }, [form.csvRows, form.phoneColumn])
+
   function handleCsvUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]; if (!file) return
     const reader = new FileReader()
@@ -894,6 +988,19 @@ function BlastModal({ onClose, onSave }: { onClose: () => void; onSave: (b: Blas
       if (headers.length === 0) return alert('CSV inválido ou vazio.')
       const phoneGuess = headers.find(h => /telefon|phone|cel|whats|mobile|fone/i.test(h)) ?? ''
       const nameGuess = headers.find(h => /nome|name/i.test(h)) ?? ''
+      let dups = 0
+      if (phoneGuess) {
+        const seen = new Map<string, number>()
+        rows.forEach(row => {
+          const phone = (row[phoneGuess] ?? '').replace(/\D/g, '')
+          if (!phone) return
+          seen.set(phone, (seen.get(phone) ?? 0) + 1)
+        })
+        dups = [...seen.values()].filter(c => c > 1).length
+      }
+      setCsvDups(dups)
+      setWaFilterState('idle')
+      setNoWaIndices(new Set())
       setForm(f => ({
         ...f,
         csvHeaders: headers,
@@ -905,6 +1012,52 @@ function BlastModal({ onClose, onSave }: { onClose: () => void; onSave: (b: Blas
       }))
     }
     reader.readAsText(file, 'UTF-8')
+  }
+
+  function removeDuplicatesDispatcher() {
+    if (!form.phoneColumn) return
+    const seen = new Set<string>()
+    const toExclude = new Set<number>(form.excludedRows)
+    form.csvRows.forEach((row, i) => {
+      const phone = (row[form.phoneColumn] ?? '').replace(/\D/g, '')
+      if (!phone) return
+      if (seen.has(phone)) { toExclude.add(i) } else { seen.add(phone) }
+    })
+    setForm(f => ({ ...f, excludedRows: toExclude, dupGroups: [] }))
+    setCsvDups(0)
+  }
+
+  async function startWaFilterDispatcher() {
+    if (!form.phoneColumn) return alert('Selecione a coluna de telefone primeiro.')
+    const numbers = form.csvRows
+      .filter((_, i) => !form.excludedRows.has(i))
+      .map(row => (row[form.phoneColumn] ?? '').replace(/\D/g, ''))
+      .filter(n => n.length >= 10)
+    if (numbers.length === 0) return alert('Nenhum número válido na base.')
+    setWaFilterState('running')
+    setWaFilterProgress({ checked: 0, total: numbers.length, hasWa: 0, noWa: 0 })
+    setNoWaIndices(new Set())
+    try {
+      const res = await fetch('/api/tools/wa-filter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ numbers }),
+      })
+      if (!res.ok) {
+        const err = await res.json()
+        alert(err.error || 'Erro ao iniciar filtro')
+        setWaFilterState('idle')
+      }
+    } catch {
+      alert('Erro de conexão ao iniciar filtro')
+      setWaFilterState('idle')
+    }
+  }
+
+  function removeNoWaDispatcher() {
+    setForm(f => ({ ...f, excludedRows: new Set([...f.excludedRows, ...noWaIndices]) }))
+    setNoWaIndices(new Set())
+    setWaFilterState('idle')
   }
 
   function detectDuplicates() {
@@ -999,6 +1152,10 @@ function BlastModal({ onClose, onSave }: { onClose: () => void; onSave: (b: Blas
   }
 
   const previewRows = validCsvRows.slice(0, 3)
+  const previewRowsWithIdx = form.csvRows
+    .map((row, i) => ({ row, i }))
+    .filter(({ i }) => !form.excludedRows.has(i))
+    .slice(0, 3)
   const firstCsvRow = validCsvRows[0] ?? {}
 
   return (
@@ -1318,6 +1475,45 @@ function BlastModal({ onClose, onSave }: { onClose: () => void; onSave: (b: Blas
                         )}
                       </div>
 
+                      {csvDups > 0 && (
+                        <div className="flex items-center gap-3 bg-amber-900/20 border border-amber-700/40 rounded-lg px-3 py-2">
+                          <AlertTriangle size={14} className="text-amber-400 shrink-0" />
+                          <span className="text-xs text-amber-300">{csvDups} número{csvDups > 1 ? 's' : ''} duplicado{csvDups > 1 ? 's' : ''} detectado{csvDups > 1 ? 's' : ''} automaticamente</span>
+                          <button onClick={removeDuplicatesDispatcher}
+                            className="ml-auto text-xs bg-amber-700 hover:bg-amber-600 text-white px-3 py-1 rounded shrink-0">
+                            Remover duplicados
+                          </button>
+                        </div>
+                      )}
+
+                      <div className="flex flex-wrap items-center gap-3">
+                        <button
+                          onClick={startWaFilterDispatcher}
+                          disabled={waFilterState === 'running' || !form.phoneColumn}
+                          className="flex items-center gap-2 px-4 py-2 bg-indigo-700 hover:bg-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed text-sm text-white rounded-lg">
+                          {waFilterState === 'running'
+                            ? <><Loader2 size={14} className="animate-spin" /> Verificando...</>
+                            : <><Globe size={14} /> Verificar WhatsApp</>}
+                        </button>
+                        {waFilterState === 'running' && (
+                          <span className="text-xs text-gray-400">
+                            {waFilterProgress.checked}/{waFilterProgress.total} — ✅ {waFilterProgress.hasWa} · ❌ {waFilterProgress.noWa}
+                          </span>
+                        )}
+                        {waFilterState === 'done' && noWaIndices.size > 0 && (
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-red-400">{noWaIndices.size} sem WhatsApp</span>
+                            <button onClick={removeNoWaDispatcher}
+                              className="text-xs bg-red-700 hover:bg-red-600 text-white px-3 py-1 rounded">
+                              Remover inválidos
+                            </button>
+                          </div>
+                        )}
+                        {waFilterState === 'done' && noWaIndices.size === 0 && (
+                          <span className="text-xs text-green-400">✅ Todos com WhatsApp!</span>
+                        )}
+                      </div>
+
                       {/* Variable mapping */}
                       {form.type === 'template' && templateVars.length > 0 && (
                         <div>
@@ -1363,14 +1559,20 @@ function BlastModal({ onClose, onSave }: { onClose: () => void; onSave: (b: Blas
                                 </tr>
                               </thead>
                               <tbody>
-                                {previewRows.map((row, i) => (
-                                  <tr key={i} className="border-b border-gray-800 hover:bg-gray-800/30">
-                                    <td className="px-3 py-2 font-mono text-green-400">{normalizePhone(row[form.phoneColumn] ?? '—')}</td>
-                                    {form.columnMappings.map(m => (
-                                      <td key={m.variable} className="px-3 py-2 text-indigo-300">{computeParam(m, row) || '—'}</td>
-                                    ))}
-                                  </tr>
-                                ))}
+                                {previewRowsWithIdx.map(({ row, i }) => {
+                                  const isNoWa = noWaIndices.has(i)
+                                  return (
+                                    <tr key={i} className={`border-b border-gray-800 hover:bg-gray-800/30 ${isNoWa ? 'opacity-50' : ''}`}>
+                                      <td className={`px-3 py-2 font-mono ${isNoWa ? 'text-red-400 line-through' : 'text-green-400'}`}>
+                                        {normalizePhone(row[form.phoneColumn] ?? '—')}
+                                        {isNoWa && <span className="ml-2 text-[10px] no-underline">sem WA</span>}
+                                      </td>
+                                      {form.columnMappings.map(m => (
+                                        <td key={m.variable} className="px-3 py-2 text-indigo-300">{computeParam(m, row) || '—'}</td>
+                                      ))}
+                                    </tr>
+                                  )
+                                })}
                               </tbody>
                             </table>
                           </div>
@@ -1762,6 +1964,7 @@ export default function Dispatcher() {
         <BlastReport
           blast={reportBlast}
           channels={channels}
+          contacts={contacts}
           templates={templates}
           onClose={() => setReportBlastId(null)}
           onUpdate={stats => updateBlast(reportBlast.id, { stats })}

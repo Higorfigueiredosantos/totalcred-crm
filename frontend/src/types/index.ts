@@ -271,6 +271,7 @@ export interface ChipCampaignSettings {
   tone: 'amigavel' | 'profissional' | 'casual'
   force?: boolean
   greetings?: string[]
+  selectedChipIds?: string[]
   batchDelay?: {
     enabled: boolean
     everyMin: number

@@ -9,6 +9,7 @@ services:
     volumes:
       - /opt/totalcred/backend/data:/app/data
       - /opt/totalcred/backend/.wwa_sessions:/app/.wwa_sessions
+      - /opt/totalcred/backend/.env:/app/.env:ro
     networks:
       - crm-internal
     deploy:

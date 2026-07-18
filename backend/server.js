@@ -47,6 +47,20 @@ function saveStoredApiKey(key) {
   } catch (e) { console.error('[ApiKey] Erro ao salvar:', e.message) }
 }
 
+// ── Conversation map: conversaId estável por canal+contato ────────────────────
+const CONV_MAP_FILE = path.join(__dirname, 'data', 'conv_map.json')
+let convMap = {}
+try { convMap = JSON.parse(fs.readFileSync(CONV_MAP_FILE, 'utf8')) } catch {}
+
+function getConvId(channel, contact) {
+  const id = crypto.createHash('md5').update(`${channel}:${contact}`).digest('hex').slice(0, 16)
+  if (!convMap[id]) {
+    convMap[id] = { channel, contact }
+    try { fs.writeFileSync(CONV_MAP_FILE, JSON.stringify(convMap, null, 2)) } catch {}
+  }
+  return id
+}
+
 function generateApiKey() {
   return 'crm_' + crypto.randomBytes(32).toString('hex')
 }
@@ -64,7 +78,7 @@ app.use((req, res, next) => {
   // Chave ativa: arquivo local (prioritário) ou variável de ambiente
   const configured = storedApiKey || process.env.API_KEY
   if (!configured) return next()
-  const protectedPrefixes = ['/api/chips/send', '/api/crm/']
+  const protectedPrefixes = ['/api/chips/send', '/api/send-message', '/api/crm/']
   if (!protectedPrefixes.some(p => req.path.startsWith(p))) return next()
   const token = req.headers['x-api-token']
     || req.headers['apikey']
@@ -143,22 +157,61 @@ app.get('/api/media/meta', async (req, res) => {
   }
 })
 
-// ── WebSocket broadcast ──────────────────────────────────────────────────────
+// ── WebSocket broadcast + fila offline ───────────────────────────────────────
 const wsClients = new Set()
+
+const OFFLINE_QUEUE_FILE = path.join(__dirname, 'data', 'offline_queue.json')
+let offlineQueue = []
+try {
+  if (fs.existsSync(OFFLINE_QUEUE_FILE))
+    offlineQueue = JSON.parse(fs.readFileSync(OFFLINE_QUEUE_FILE, 'utf8')) || []
+} catch (_) { offlineQueue = [] }
+
+function saveOfflineQueue() {
+  try { fs.writeFileSync(OFFLINE_QUEUE_FILE, JSON.stringify(offlineQueue)) } catch (_) {}
+}
+
 wss.on('connection', (ws) => {
+  ws.isAlive = true
+  ws.on('pong', () => { ws.isAlive = true })
   wsClients.add(ws)
-  ws.on('close', () => wsClients.delete(ws))
-  ws.on('error', () => wsClients.delete(ws))
-  console.log(`[WS] Client connected (${wsClients.size} total)`)
-  // Send current chip status on connect
+  ws.on('close', () => { wsClients.delete(ws); console.log(`[WS] Client desconectado (${wsClients.size} restantes)`) })
+  ws.on('error', () => { wsClients.delete(ws) })
+  console.log(`[WS] Client conectado (${wsClients.size} total)`)
   ws.send(JSON.stringify({ type: 'chips_status', payload: getChipsList() }))
+})
+
+// Detecta conexões mortas a cada 20s e remove do Set
+const wsHeartbeat = setInterval(() => {
+  wsClients.forEach((ws) => {
+    if (!ws.isAlive) { console.log('[WS] Removendo conexão morta'); ws.terminate(); return }
+    ws.isAlive = false
+    ws.ping()
+  })
+}, 20000)
+wss.on('close', () => clearInterval(wsHeartbeat))
+
+// Endpoint HTTP para o frontend buscar a fila offline após montar
+app.get('/api/offline_queue', (_req, res) => {
+  const queue = [...offlineQueue]
+  offlineQueue = []
+  saveOfflineQueue()
+  if (queue.length > 0) console.log(`[OfflineQueue] Entregue ${queue.length} msgs pendentes`)
+  res.json(queue)
 })
 
 function broadcast(type, payload) {
   const msg = JSON.stringify({ type, payload })
+  let sent = false
   wsClients.forEach((ws) => {
-    if (ws.readyState === 1) ws.send(msg)
+    if (ws.readyState === 1) { ws.send(msg); sent = true }
   })
+  // Nenhum browser conectado: guarda na fila (apenas mensagens, não status)
+  if (!sent && (type === 'chip_message' || type === 'whatsapp' || type === 'chip_ack')) {
+    offlineQueue.push({ type, payload })
+    if (offlineQueue.length > 1000) offlineQueue = offlineQueue.slice(-1000)
+    saveOfflineQueue()
+  }
 }
 
 // ── Webhook storage & fire ────────────────────────────────────────────────────
@@ -228,20 +281,32 @@ app.post('/api/webhook', (req, res) => {
   console.log('[Webhook] Event received:', JSON.stringify(body, null, 2).slice(0, 500))
   broadcast('whatsapp', body)
 
-  // Disparo de webhook IA para canais Meta conectados à IA
+  // Disparo de webhook IA e fireWebhooks para canais Meta
   try {
     const fgts = (loadIAConfig().fgts) || {}
-    if (fgts.webhookEnabled && fgts.webhookUrl && Array.isArray(fgts.channelIds) && fgts.channelIds.length) {
-      for (const entry of body.entry || []) {
-        for (const change of entry.changes || []) {
-          const value = change.value
-          const phoneNumberId = value?.metadata?.phone_number_id
-          if (!phoneNumberId || !fgts.channelIds.includes(phoneNumberId)) continue
-          for (const msg of value.messages || []) {
-            const from = String(msg.from || '')
-            const message = msg.text?.body || msg.type || ''
-            const name = value.contacts?.[0]?.profile?.name || from
-            axios.post(fgts.webhookUrl, { chipId: phoneNumberId, from, message, name },
+    for (const entry of body.entry || []) {
+      for (const change of entry.changes || []) {
+        const value = change.value
+        const phoneNumberId = value?.metadata?.phone_number_id
+        if (!phoneNumberId) continue
+        for (const msg of value.messages || []) {
+          const from = String(msg.from || '')
+          const message = msg.text?.body || msg.type || ''
+          const name = value.contacts?.[0]?.profile?.name || from
+          const convId = getConvId(phoneNumberId, from)
+          // Track Meta inbound for blast engagement (text + button replies + any type)
+          metaResponseStats.responses.push({ from, timestamp: Date.now(), type: msg.type || 'text' })
+          if (metaResponseStats.responses.length > 5000) metaResponseStats.responses.shift()
+          // fireWebhooks para sistemas externos
+          fireWebhooks('message_created', {
+            channelId: phoneNumberId, from, body: message,
+            timestamp: msg.timestamp, pushname: name,
+            msgType: msg.type || 'text',
+            conversationId: convId,
+          })
+          // IA webhook (apenas canais configurados)
+          if (fgts.webhookEnabled && fgts.webhookUrl && Array.isArray(fgts.channelIds) && fgts.channelIds.includes(phoneNumberId)) {
+            axios.post(fgts.webhookUrl, { chipId: phoneNumberId, from, message, name, conversationId: convId },
               { timeout: 8000, headers: { 'Content-Type': 'application/json' } }
             ).catch(e => console.error('[IA Webhook Meta]', e.message))
           }
@@ -645,6 +710,7 @@ function saveAutoBotData(data) {
 let autoBotData = loadAutoBotData()
 const contactBotState = {}
 const responseStats = { totalResponses: 0, responses: [], lastResponseAt: null }
+const metaResponseStats = { responses: [] }  // Meta inbound msgs for blast engagement
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -721,6 +787,13 @@ async function initChip(chipId) {
   }
   broadcastChipsStatus()
 
+  // Remove TODOS os locks do Chrome antes de iniciar (evita erro de singleton após reinício)
+  try {
+    const { execSync } = require('child_process')
+    execSync('find /app/.wwa_sessions -name "Singleton*" -delete 2>/dev/null || true', { stdio: 'ignore' })
+    console.log(`[Chip ${chipId}] Locks do Chrome removidos`)
+  } catch (_) {}
+
   const chromePath = findChromePath()
   const puppeteerArgs = {
     headless: true,
@@ -731,6 +804,7 @@ async function initChip(chipId) {
       '--disable-gpu',
       '--no-first-run',
       '--no-zygote',
+      '--disable-single-instance',
       '--disable-blink-features=AutomationControlled',
       '--disable-features=site-per-process',
       '--window-size=1280,720',
@@ -870,13 +944,26 @@ function scheduleChipReconnect(chipId) {
 }
 
 // ── Round-robin chip selector ─────────────────────────────────────────────────
+// Rotação estrita: nunca usa o mesmo chip duas vezes seguidas.
+// allowedIds: chips selecionados para esta campanha (em ordem fixa).
+// lastUsedId: ID do chip usado no envio anterior — será pulado.
 
-function getNextReadyChip() {
-  const readyIds = Object.keys(chipSessions).filter(id => chipSessions[id].isReady && chipSessions[id].client)
+function getNextReadyChipFrom(allowedIds, lastUsedId) {
+  // Filtra apenas chips prontos dentro da lista permitida
+  const readyIds = allowedIds.filter(id => chipSessions[id]?.isReady && chipSessions[id]?.client)
   if (readyIds.length === 0) return null
-  chipCampaignState.rrIndex = (chipCampaignState.rrIndex + 1) % readyIds.length
-  const id = readyIds[chipCampaignState.rrIndex]
-  return { id, client: chipSessions[id].client }
+
+  // Com apenas 1 chip disponível, usa ele independentemente
+  if (readyIds.length === 1) {
+    const id = readyIds[0]
+    return { id, client: chipSessions[id].client, proxy: chipSessions[id].proxy || null }
+  }
+
+  // Avança para o próximo chip após o último usado (nunca repete)
+  const lastIdx = lastUsedId != null ? readyIds.indexOf(lastUsedId) : -1
+  const nextIdx = (lastIdx + 1) % readyIds.length
+  const id = readyIds[nextIdx]
+  return { id, client: chipSessions[id].client, proxy: chipSessions[id].proxy || null }
 }
 
 // ── Send helpers ──────────────────────────────────────────────────────────────
@@ -953,6 +1040,13 @@ async function runChipCampaign(data) {
   let success = 0, failed = 0
   const campaignStartedAt = Date.now()
 
+  // Chips selecionados para esta campanha (fallback: todos os chips)
+  const allChipIds = Object.keys(chipSessions)
+  const selectedChipIds = Array.isArray(settings.selectedChipIds) && settings.selectedChipIds.length > 0
+    ? settings.selectedChipIds.filter(id => allChipIds.includes(id))
+    : allChipIds
+  let lastUsedChipId = null
+
   // Batch delay state
   const bd = settings.batchDelay
   const batchEnabled = bd?.enabled && bd.everyMin > 0 && bd.pauseMin > 0
@@ -960,6 +1054,14 @@ async function runChipCampaign(data) {
   let nextBatchAt = batchEnabled
     ? Math.floor(Math.random() * (Math.max(bd.everyMax, bd.everyMin) - bd.everyMin + 1)) + bd.everyMin
     : Infinity
+
+  // Informa quais chips serão usados
+  const readySelected = selectedChipIds.filter(id => chipSessions[id]?.isReady && chipSessions[id]?.client)
+  broadcast('chip_campaign', {
+    type: 'started',
+    chips: readySelected,
+    total: contacts.length,
+  })
 
   for (let i = 0; i < contacts.length; i++) {
     if (chipCampaignState.stopped) break
@@ -990,8 +1092,10 @@ async function runChipCampaign(data) {
         throw new Error('Pausa protetiva: risco crítico de ban')
       }
 
-      const activeChip = getNextReadyChip()
-      if (!activeChip) throw new Error('Nenhum chip conectado')
+      // Rotação estrita: nunca repete o mesmo chip em disparos consecutivos
+      const activeChip = getNextReadyChipFrom(selectedChipIds, lastUsedChipId)
+      if (!activeChip) throw new Error('Nenhum chip selecionado disponível')
+      lastUsedChipId = activeChip.id
       result.via = activeChip.id
 
       let text = settings.useAIHumanize
@@ -1049,7 +1153,9 @@ async function runChipCampaign(data) {
       // Delay regular entre mensagens
       const risk = chipCampaignState.tickMonitor.getBanRiskLevel()
       const delay = chipCampaignState.delayCalc.getDelay(risk, settings.delayMin || 3, settings.delayMax || 8)
-      broadcast('chip_campaign', { type: 'waiting', delay, risk, next: i + 2 })
+      // Próximo chip na rotação (apenas para preview no log, não altera lastUsedChipId ainda)
+      const nextChipPreview = getNextReadyChipFrom(selectedChipIds, lastUsedChipId)
+      broadcast('chip_campaign', { type: 'waiting', delay, risk, next: i + 2, nextChip: nextChipPreview?.id || null })
       await sleep(delay * 1000)
     }
   }
@@ -1133,6 +1239,9 @@ async function handleIncomingChipMessage(client, msg, chipId) {
   if (!msg.from || msg.fromMe) return
 
   const isGroup = msg.from.endsWith('@g.us')
+    || (msg.id?.remote ?? '').endsWith('@g.us')
+    || !!(msg.author && msg.author !== msg.from)
+  const chatId = isGroup ? (msg.id?.remote || msg.from) : msg.from
   const author = isGroup ? (msg.author || msg.from) : msg.from
 
   // Track response stats
@@ -1217,9 +1326,10 @@ async function handleIncomingChipMessage(client, msg, chipId) {
     }
   }
 
+  const convId = getConvId(chipId, chatId)
   broadcast('chip_message', {
     chipId,
-    from: msg.from,
+    from: chatId,
     author,
     body: msg.body || '',
     timestamp: msg.timestamp,
@@ -1230,11 +1340,13 @@ async function handleIncomingChipMessage(client, msg, chipId) {
     msgType,
     mediaUrl,
     mediaFileName,
+    conversationId: convId,
   })
   fireWebhooks('message_created', {
     chipId, from: msg.from, body: msg.body,
     timestamp: msg.timestamp, isGroup, groupName, pushname, contactNumber,
     msgType, mediaUrl, mediaFileName,
+    conversationId: convId,
   })
 
   // Disparo de webhook IA para chips conectados à IA
@@ -1302,23 +1414,72 @@ async function handleIncomingChipMessage(client, msg, chipId) {
 
 // ── Number filter ─────────────────────────────────────────────────────────────
 
+async function checkNumberWa(client, raw) {
+  // Tenta o número direto + variantes brasileiras (8/9 dígitos)
+  if (await client.isRegisteredUser(`${raw}@c.us`)) return true
+  if (raw.startsWith('55') && raw.length === 12) { // sem o 9 → tenta com 9
+    if (await client.isRegisteredUser(`55${raw.slice(2,4)}9${raw.slice(4)}@c.us`)) return true
+  } else if (raw.startsWith('55') && raw.length === 13) { // com o 9 → tenta sem 9
+    if (await client.isRegisteredUser(`55${raw.slice(2,4)}${raw.slice(5)}@c.us`)) return true
+  }
+  return false
+}
+
 async function filterNumbersBulk(numbers) {
   const readyIds = Object.keys(chipSessions).filter(id => chipSessions[id].isReady && chipSessions[id].client)
-  if (readyIds.length === 0) return numbers.map(n => ({ number: n, hasWhatsapp: null, error: 'Nenhum chip conectado' }))
+  if (readyIds.length === 0) return numbers.map(n => ({ number: String(n).replace(/\D/g,''), hasWhatsapp: null, error: 'Nenhum chip conectado' }))
   const client = chipSessions[readyIds[0]].client
   const results = []
   for (const number of numbers) {
-    const formatted = String(number).replace(/\D/g, '')
-    try {
-      const isWA = await client.isRegisteredUser(`${formatted}@c.us`)
-      results.push({ number: formatted, hasWhatsapp: !!isWA })
-    } catch (e) {
-      results.push({ number: formatted, hasWhatsapp: null, error: e.message })
-    }
-    await sleep(300)
+    const raw = String(number).replace(/\D/g, '')
+    let hasWhatsapp = false
+    try { hasWhatsapp = await checkNumberWa(client, raw) } catch (_) {}
+    results.push({ number: raw, hasWhatsapp })
+    await sleep(250)
   }
   return results
 }
+
+// Filtro assíncrono com progresso via WebSocket
+let waFilterRunning = false
+
+async function runWaFilterAsync(numbers) {
+  const readyIds = Object.keys(chipSessions).filter(id => chipSessions[id].isReady && chipSessions[id].client)
+  if (readyIds.length === 0) {
+    broadcast('wa_filter_done', { error: 'Nenhum chip conectado. Conecte pelo menos um chip antes de filtrar.', results: [] })
+    return
+  }
+  const client = chipSessions[readyIds[0]].client
+  const results = []
+  let hasWa = 0, noWa = 0
+
+  broadcast('wa_filter_progress', { checked: 0, total: numbers.length, hasWa: 0, noWa: 0 })
+
+  for (let i = 0; i < numbers.length; i++) {
+    const raw = String(numbers[i]).replace(/\D/g, '')
+    let found = false
+    try { found = await checkNumberWa(client, raw) } catch (_) {}
+    results.push({ number: raw, hasWhatsapp: found })
+    found ? hasWa++ : noWa++
+    // Envia progresso a cada 5 verificações ou no final
+    if ((i + 1) % 5 === 0 || i === numbers.length - 1)
+      broadcast('wa_filter_progress', { checked: i + 1, total: numbers.length, hasWa, noWa })
+    await sleep(250)
+  }
+
+  broadcast('wa_filter_done', { results, hasWa, noWa, total: numbers.length })
+}
+
+app.post('/api/tools/wa-filter', (req, res) => {
+  const { numbers } = req.body
+  if (!Array.isArray(numbers) || numbers.length === 0) return res.status(400).json({ error: 'numbers obrigatório' })
+  if (waFilterRunning) return res.status(409).json({ error: 'Filtro já em andamento. Aguarde terminar.' })
+  waFilterRunning = true
+  runWaFilterAsync(numbers)
+    .catch(e => broadcast('wa_filter_done', { error: e.message, results: [] }))
+    .finally(() => { waFilterRunning = false })
+  res.json({ ok: true, total: numbers.length })
+})
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CHIP API ROUTES
@@ -1565,10 +1726,15 @@ app.post('/api/tools/groups/search', async (req, res) => {
 
     function findChrome() {
       const candidates = [
+        process.env.PUPPETEER_EXECUTABLE_PATH,
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/google-chrome',
+        '/usr/bin/chromium',
+        '/usr/bin/chromium-browser',
         'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
         'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
         (process.env.LOCALAPPDATA || '') + '\\Google\\Chrome\\Application\\chrome.exe',
-      ]
+      ].filter(Boolean)
       for (const p of candidates) {
         try { if (fse.existsSync(p)) return p } catch (_) {}
       }
@@ -1957,6 +2123,72 @@ app.post('/api/webhooks/:id/test', (req, res) => {
     .catch(e => res.status(502).json({ error: e.message }))
 })
 
+// ── Lista de conversas com seus conversationIds ───────────────────────────────
+
+app.get('/api/conversations', (req, res) => {
+  const list = Object.entries(convMap).map(([conversationId, { channel, contact }]) => ({
+    conversationId,
+    channel,
+    contact,
+  }))
+  res.json(list)
+})
+
+// ── Envio unificado (chip ou canal oficial Meta) ──────────────────────────────
+
+app.post('/api/send-message', async (req, res) => {
+  let { chipId, channelId, to, message, conversationId } = req.body
+
+  // conversationId recebido do webhook → resolve canal e contato
+  if (conversationId && !to) {
+    const entry = convMap[conversationId]
+    if (!entry) return res.status(404).json({ error: `conversaId "${conversationId}" não encontrado. O ID deve vir do payload do webhook (campo data.conversationId) de uma mensagem recebida.` })
+    chipId = chipId || entry.channel
+    to = entry.contact
+  }
+
+  const id = chipId || channelId
+  if (!id || !to || !message) return res.status(400).json({ error: 'Informe conversationId+message (para responder) ou chipId+to+message (para nova conversa)' })
+
+  // 1. Tenta como chip
+  const session = chipSessions[id]
+  if (session?.isReady && session.client) {
+    try {
+      let chatId = to.includes('@') ? to : formatNumber(to)
+      const convId = conversationId || getConvId(id, chatId)
+      const msg = await sendChipText(session.client, chatId, message)
+      const msgId = msg?.id?._serialized || null
+      fireWebhooks('message_sent', { chipId: id, to: chatId, message, msgId, conversationId: convId })
+      res.json({ ok: true, msgId })
+      setTimeout(() => broadcast('chip_outbound', { chipId: id, to: chatId, message, msgId, type: 'text', timestamp: Date.now(), conversationId: convId }), 300)
+    } catch (e) { res.status(500).json({ error: e.message }) }
+    return
+  }
+
+  // 2. Tenta como canal oficial (busca credenciais salvas no backend)
+  const channels = loadChannels()
+  const channel = channels.find(c =>
+    c.id === id || c.name === id || String(c.phoneNumberId) === String(id)
+  )
+  if (!channel) return res.status(404).json({ error: `Canal ou chip "${id}" não encontrado. Verifique o nome em Configurações.` })
+
+  try {
+    const toDigits = String(to).replace(/\D/g, '')
+    const convId = conversationId || getConvId(channel.phoneNumberId, toDigits)
+    const resp = await axios.post(
+      `https://graph.facebook.com/v20.0/${channel.phoneNumberId}/messages`,
+      { messaging_product: 'whatsapp', to: toDigits, type: 'text', text: { body: message } },
+      { headers: { Authorization: `Bearer ${channel.accessToken}`, 'Content-Type': 'application/json' } }
+    )
+    const msgId = resp.data?.messages?.[0]?.id || null
+    fireWebhooks('message_sent', { channelId: channel.id, channelName: channel.name, to: toDigits, message, msgId, conversationId: convId })
+    res.json({ ok: true, msgId })
+  } catch (e) {
+    const apiErr = e?.response?.data?.error
+    res.status(500).json({ error: apiErr?.message || e.message })
+  }
+})
+
 // ── Chip direct send ─────────────────────────────────────────────────────────
 
 app.post('/api/chips/send', async (req, res) => {
@@ -1968,9 +2200,13 @@ app.post('/api/chips/send', async (req, res) => {
     // If 'to' already contains '@' (e.g. '5511@c.us' or '123@lid'), use it directly.
     // Only reformat if it's a plain phone number without domain.
     let chatId = to.includes('@') ? to : formatNumber(to)
+    const convId = getConvId(chipId, chatId)
     const msg = await sendChipText(session.client, chatId, message)
-    fireWebhooks('message_sent', { chipId, to: chatId, message, msgId: msg?.id?._serialized || null })
-    res.json({ ok: true, msgId: msg?.id?._serialized || null })
+    const msgId = msg?.id?._serialized || null
+    fireWebhooks('message_sent', { chipId, to: chatId, message, msgId, conversationId: convId })
+    res.json({ ok: true, msgId })
+    // Broadcast após resposta HTTP para o frontend exibir a mensagem enviada externamente
+    setTimeout(() => broadcast('chip_outbound', { chipId, to: chatId, message, msgId, type: 'text', timestamp: Date.now(), conversationId: convId }), 300)
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
@@ -2026,8 +2262,12 @@ app.post('/api/chips/send-media', upload.single('file'), async (req, res) => {
       if (caption) opts.caption = caption
       msg = await session.client.sendMessage(chatId, media, opts)
     }
-    fireWebhooks('message_sent', { chipId, to: chatId, msgId: msg?.id?._serialized || null })
-    res.json({ ok: true, msgId: msg?.id?._serialized || null })
+    const msgId = msg?.id?._serialized || null
+    const outType = isAudio ? 'audio' : req.file.mimetype.startsWith('image/') ? 'image' : req.file.mimetype.startsWith('video/') ? 'video' : 'document'
+    const convId = getConvId(chipId, chatId)
+    fireWebhooks('message_sent', { chipId, to: chatId, msgId, conversationId: convId })
+    res.json({ ok: true, msgId })
+    setTimeout(() => broadcast('chip_outbound', { chipId, to: chatId, msgId, type: outType, mediaFileName: req.file.originalname || null, caption: caption || null, timestamp: Date.now(), conversationId: convId }), 300)
   } catch (e) {
     console.error('[Chip send-media]', e.message)
     res.status(500).json({ error: e.message })
@@ -2094,6 +2334,30 @@ app.post('/api/chip-campaign/interaction-rate', (req, res) => {
   })
 })
 
+// ── Blast engagement — cross-reference Meta inbound msgs with recipient list ────
+app.post('/api/blast/engagement', (req, res) => {
+  const { recipients, sentAt: blastSentAt } = req.body
+  // recipients: [{phone, sentAt?}]  sentAt in ms
+  if (!Array.isArray(recipients) || recipients.length === 0) {
+    return res.json({ engaged: 0, total: 0, rate: '0%', engagedPhones: [] })
+  }
+  const engagedPhones = []
+  for (const { phone, sentAt } of recipients) {
+    const threshold = sentAt || blastSentAt || 0
+    const clean = String(phone).replace(/\D/g, '')
+    const short = clean.startsWith('55') ? clean.slice(2) : clean
+    const responded = metaResponseStats.responses.some(r => {
+      if (threshold && r.timestamp < threshold) return false
+      const rClean = String(r.from || '').replace(/\D/g, '').replace(/^55/, '')
+      return rClean === clean || rClean === short || rClean.endsWith(short) || short.endsWith(rClean)
+    })
+    if (responded) engagedPhones.push(phone)
+  }
+  const total = recipients.length
+  const engaged = engagedPhones.length
+  res.json({ engaged, total, rate: total > 0 ? ((engaged / total) * 100).toFixed(1) + '%' : '0%', engagedPhones })
+})
+
 app.get('/api/chip-campaign/history', (_req, res) => {
   res.json(loadCampaigns())
 })
@@ -2154,6 +2418,302 @@ app.post('/api/ai/humanize', async (req, res) => {
   }
 })
 
+// ── FGTS Simulation Routes ────────────────────────────────────────────────────
+
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://hfgpwmgqtjjmbtpzbghs.supabase.co/rest/v1'
+const SUPABASE_KEY = process.env.SUPABASE_KEY
+
+let _v8TokenCache = null
+let _v8TokenExpAt = 0
+
+async function getV8Token() {
+  if (_v8TokenCache && Date.now() / 1000 < _v8TokenExpAt - 300) return _v8TokenCache
+  const res = await axios.get(`${SUPABASE_URL}/v8_TOKEN_duplicate?id=eq.1&limit=1`, {
+    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+    timeout: 10000,
+  })
+  const rows = res.data
+  if (!rows?.length) throw new Error('Token V8 não encontrado no Supabase')
+  const token = rows[0].token
+  try {
+    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString())
+    _v8TokenExpAt = payload.exp || 0
+  } catch { _v8TokenExpAt = 0 }
+  _v8TokenCache = token
+  console.log('[FGTS] Token V8 carregado do Supabase, exp:', new Date(_v8TokenExpAt * 1000).toISOString())
+  return token
+}
+
+const FGTS_PROXIES = [
+  '104.252.20.145:6077:wlzjsmwz:db8o122f230k',
+  '104.252.92.91:6025:wlzjsmwz:db8o122f230k',
+  '85.198.47.128:6396:wlzjsmwz:db8o122f230k',
+  '108.165.53.166:6905:wlzjsmwz:db8o122f230k',
+  '104.253.91.39:6472:wlzjsmwz:db8o122f230k',
+  '85.198.47.215:6483:wlzjsmwz:db8o122f230k',
+  '108.165.205.189:5426:wlzjsmwz:db8o122f230k',
+  '92.112.171.67:6035:wlzjsmwz:db8o122f230k',
+  '92.112.175.219:6492:wlzjsmwz:db8o122f230k',
+  '92.112.171.228:6196:wlzjsmwz:db8o122f230k',
+]
+let fgtsProxyIdx = 0
+
+function getFgtsProxyAgent() {
+  const entry = FGTS_PROXIES[fgtsProxyIdx % FGTS_PROXIES.length]
+  fgtsProxyIdx++
+  const [host, port, user, pass] = entry.split(':')
+  return new HttpsProxyAgent(`http://${user}:${pass}@${host}:${port}`)
+}
+
+const QUERYBUSCAS_COOKIE = 'auth_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MjU5LCJ1c2VybmFtZSI6Iml6YWx0aW5hMjAyNmZlcnJlaXJhQGdtYWlsLmNvbSIsInBsYW5vIjoibWVuc2FsIiwiZGlhcyI6MzAsInRpcG8iOiJjbGllbnRlIiwic2Vzc2lvblRva2VuIjoiZmE3NmEzYjZlNDlkODhiMjc4NThlMjQ1ODE2NjllZGQ2NTk1NzNjN2FhNTVjYjNkYWQ0YTg1NWEzMzI3MmEyNiIsImlhdCI6MTc4MjcwNTE0MiwiZXhwIjoxNzgzMzA5OTQyfQ.KmAvuxnrr1tRLuOcdPrYFZmdxjlrj38Of-b7CHLjIsY'
+
+function padCpf(cpf) {
+  return String(cpf).replace(/\D/g, '').padStart(11, '0')
+}
+
+// Faz UMA chamada ao balance bms. Retorna o rawData ou null.
+async function callBalance(cpf, token) {
+  const res = await axios.post('https://bff.v8sistema.com/fgts/balance', {
+    documentNumber: padCpf(cpf), provider: 'bms',
+  }, { headers: { Authorization: `Bearer ${token}` }, timeout: 25000 })
+  console.log('[FGTS] balance status=', res.status, 'data=', JSON.stringify(res.data)?.slice(0, 400))
+  return res.data ?? null
+}
+
+// Extrai item com id de várias estruturas de resposta
+function extractBalanceItem(rawData) {
+  if (!rawData) return null
+  const candidates = [
+    rawData,
+    rawData?.data,
+    Array.isArray(rawData?.data) ? rawData.data[0] : null,
+    Array.isArray(rawData) ? rawData[0] : null,
+  ]
+  return candidates.find(c => c?.id) ?? null
+}
+
+// FASE 1 — CONSULTA SALDO: poll até null (autorizado) ou item com id
+// FASE 2 — CONSULTA V8: quando null, tenta UMA vez mais para obter o item com id
+async function queryFgtsBalance(cpf, token) {
+  const docNumber = padCpf(cpf)
+
+  // Fase 1: poll até não ser 400/429
+  let gotNull = false
+  for (let i = 0; i < 16; i++) {
+    try {
+      const raw = await callBalance(docNumber, token)
+      if (raw === null) {
+        console.log(`[FGTS] Fase1 t${i+1}: null → autorizado`)
+        gotNull = true
+        break
+      }
+      const item = extractBalanceItem(raw)
+      if (item?.id) {
+        console.log(`[FGTS] Fase1 t${i+1}: id=${item.id}`)
+        return item
+      }
+      console.log(`[FGTS] Fase1 t${i+1}: sem id, aguardando...`)
+      await new Promise(r => setTimeout(r, 5000))
+    } catch (err) {
+      const status = err.response?.status
+      const detail = typeof err.response?.data === 'string' ? err.response.data
+        : (err.response?.data?.detail || err.response?.data?.message || '')
+      const retry = status === 400 || status === 429 ||
+        (typeof detail === 'string' && (detail.includes('Tente novamente') || detail.includes('Try spacing')))
+      if (!retry) throw err
+      console.log(`[FGTS] Fase1 t${i+1}: retry status=${status}`)
+      await new Promise(r => setTimeout(r, 5000))
+    }
+  }
+
+  if (!gotNull) throw new Error('Tempo limite excedido aguardando autorização FGTS')
+
+  // Fase 2 (CONSULTA V8): null confirmou autorização — tenta de novo para pegar o item com id
+  console.log('[FGTS] Fase2: null confirmado, aguardando 3s e consultando de novo...')
+  await new Promise(r => setTimeout(r, 3000))
+  for (let j = 0; j < 5; j++) {
+    try {
+      const raw2 = await callBalance(docNumber, token)
+      if (raw2 !== null) {
+        const item2 = extractBalanceItem(raw2)
+        if (item2?.id) {
+          console.log(`[FGTS] Fase2 t${j+1}: id=${item2.id}`)
+          return item2
+        }
+      }
+      console.log(`[FGTS] Fase2 t${j+1}: ainda null/sem id, aguardando 3s...`)
+      await new Promise(r => setTimeout(r, 3000))
+    } catch (err) {
+      const status = err.response?.status
+      const detail = typeof err.response?.data === 'string' ? err.response.data
+        : (err.response?.data?.detail || err.response?.data?.message || '')
+      const retry = status === 400 || status === 429 ||
+        (typeof detail === 'string' && (detail.includes('Tente novamente') || detail.includes('Try spacing')))
+      if (!retry) break
+      await new Promise(r => setTimeout(r, 3000))
+    }
+  }
+
+  // Fase 2 também retornou null — retorna null mesmo (autorizado, sem registro)
+  console.log('[FGTS] Fase2: sem id obtido, retornando null')
+  return null
+}
+
+app.post('/api/fgts/consultar', async (req, res) => {
+  const { cpf, tabelaId } = req.body
+  if (!cpf || !tabelaId) return res.status(400).json({ error: 'CPF e tabela são obrigatórios' })
+  const cpfPad = padCpf(cpf)
+  let token
+  try { token = await getV8Token() } catch (e) { return res.status(500).json({ error: `Erro ao obter token V8: ${e.message}` }) }
+
+  // 1. DELETE cache
+  try {
+    await axios.delete(
+      `https://v8-bff-prod.yellowisland-b252a8a0.eastus.azurecontainerapps.io/fgts/balance/cache/${cpfPad}`,
+      { headers: { Authorization: `Bearer ${token}` }, timeout: 15000 }
+    )
+    console.log('[FGTS] Cache deletado, aguardando 8s para V8 iniciar o fetch...')
+  } catch (e) {
+    console.log('[FGTS] Cache delete falhou (continuando):', e.response?.status, e.message)
+  }
+  // Aguarda V8 iniciar o processamento assíncrono antes de pollar
+  await new Promise(r => setTimeout(r, 8000))
+
+  // 2. Consulta balance (bms) — duas fases
+  let balanceItem = null
+  try {
+    balanceItem = await queryFgtsBalance(cpfPad, token)
+    console.log('[FGTS] balance final:', balanceItem ? `id=${balanceItem.id}` : 'null')
+  } catch (e) {
+    const msg = e.response?.data?.detail || e.response?.data?.message || e.message
+    return res.status(e.response?.status || 500).json({ error: `Erro ao consultar saldo: ${typeof msg === 'string' ? msg : JSON.stringify(msg)}` })
+  }
+
+  if (!balanceItem) {
+    return res.status(422).json({ error: 'FGTS não encontrado para este CPF. Verifique se o CPF está no Saque-Aniversário.' })
+  }
+
+  // 3. Simulação
+  const currentYear = new Date().getFullYear()
+  const desiredInstallments = Array.from({ length: 10 }, (_, i) => {
+    const y = currentYear + i
+    return { year: y, totalAmount: 0, dueDate: `${y}-03-31` }
+  })
+  const balanceId = balanceItem.id
+  const simBody = {
+    simulationFeesId: tabelaId,
+    balanceId,
+    targetAmount: 0,
+    documentNumber: balanceItem?.documentNumber || cpfPad,
+    isInsured: true,
+    desiredInstallments,
+    provider: 'bms',
+  }
+  console.log('[FGTS] Simulação body:', JSON.stringify(simBody))
+  try {
+    const simRes = await axios.post('https://bff.v8sistema.com/fgts/simulations', simBody,
+      { headers: { Authorization: `Bearer ${token}` }, timeout: 30000 })
+    return res.json({ balance: balanceItem, simulation: simRes.data })
+  } catch (e) {
+    console.log('[FGTS] Simulação erro status=', e.response?.status, 'data=', JSON.stringify(e.response?.data)?.slice(0, 800))
+    const d = e.response?.data
+    const msg = (typeof d === 'string' ? d : d?.detail || d?.message || d?.error || JSON.stringify(d)) || e.message
+    return res.status(e.response?.status || 500).json({ error: `Erro na simulação: ${msg}` })
+  }
+})
+
+app.post('/api/fgts/proposta', async (req, res) => {
+  const { cpf, tabelaId, pixKey, pixKeyType, simulationId, fgtsProposalsPeriods } = req.body
+  if (!cpf || !pixKey || !simulationId) return res.status(400).json({ error: 'Campos obrigatórios ausentes' })
+  const cpfPad = padCpf(cpf)
+  let token
+  try { token = await getV8Token() } catch (e) { return res.status(500).json({ error: `Erro ao obter token V8: ${e.message}` }) }
+
+  // 1. Fetch CPF data from querybuscas
+  let pessoaData = {}
+  try {
+    const proxyAgent = getFgtsProxyAgent()
+    const r = await axios.get(`https://querybuscas.com/api/consultas/cpf/${cpfPad}`, {
+      headers: { cookie: QUERYBUSCAS_COOKIE },
+      httpsAgent: proxyAgent, httpAgent: proxyAgent,
+      timeout: 20000
+    })
+    pessoaData = r.data || {}
+    console.log('[FGTS] querybuscas OK para', cpfPad)
+  } catch (e) {
+    console.log('[FGTS] querybuscas falhou:', e.message)
+  }
+
+  // Extract pessoa fields
+  const nome = pessoaData.nome || pessoaData.name || 'NOME NAO ENCONTRADO'
+  const nomeMae = pessoaData.nomeMae || pessoaData.nome_mae || pessoaData.mother_name || 'MARINA DA SILVA'
+  const dataNasc = (() => {
+    const raw = pessoaData.dataNascimento || pessoaData.data_nascimento || pessoaData.nascimento || ''
+    if (!raw) return ''
+    const s = String(raw).trim()
+    if (s.includes('T')) return s.split('T')[0]
+    if (s.includes('/')) { const [d, m, y] = s.split('/'); return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}` }
+    return s
+  })()
+  const end = pessoaData.endereco || {}
+  const cep = (pessoaData.cep || end.cep || '').replace(/\D/g, '') || '89240000'
+  const estado = pessoaData.uf || pessoaData.estado || end.uf || end.estado || 'SP'
+  const bairro = pessoaData.bairro || end.bairro || 'CENTRO'
+  const numero = pessoaData.numero || end.numero || '1'
+  const cidade = pessoaData.cidade || pessoaData.municipio || end.cidade || end.municipio || 'SAO PAULO'
+  const rua = pessoaData.logradouro || pessoaData.endereco_rua || end.logradouro || 'RUA UM'
+  const tel = String(pessoaData.telefone || pessoaData.celular || pessoaData.phone || '').replace(/\D/g, '')
+  const ddd = tel.length >= 11 ? tel.slice(0, 2) : '11'
+  const phoneNum = tel.length >= 9 ? tel.slice(-9) : '998765449'
+
+  // Random email from name
+  const parts = nome.toLowerCase().trim().split(/\s+/).filter(Boolean)
+  const emailBase = (parts[0] || '') + (parts[parts.length - 1] || '')
+  const email = emailBase + (Math.floor(Math.random() * 1000) + 1) + (Math.random() > 0.5 ? '@gmail.com' : '@hotmail.com')
+
+  // Shuffle first 6 digits of CPF → documentIdentificationNumber
+  const cpfArr = cpfPad.slice(0, 6).split('')
+  for (let i = cpfArr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [cpfArr[i], cpfArr[j]] = [cpfArr[j], cpfArr[i]]
+  }
+
+  try {
+    const propRes = await axios.post('https://bff.v8sistema.com/fgts/proposal', {
+      simulationFeesId: tabelaId,
+      name: nome,
+      individualDocumentNumber: cpfPad,
+      documentIdentificationNumber: cpfArr.join(''),
+      motherName: nomeMae,
+      nationality: 'Brasileiro(a)',
+      isPEP: false,
+      email,
+      birthDate: dataNasc,
+      personType: 'natural',
+      phone: phoneNum,
+      phoneCountryCode: '55',
+      phoneRegionCode: ddd,
+      postalCode: cep,
+      state: estado,
+      neighborhood: bairro,
+      addressNumber: numero,
+      city: cidade,
+      street: typeof rua === 'string' ? rua : 'RUA UM',
+      complement: 'CASA',
+      formalizationLink: '',
+      maritalStatus: 'single',
+      payment: { type: 'pix', data: { pix: pixKey, pix_key_type: pixKeyType } },
+      fgtsProposalsPeriods: fgtsProposalsPeriods || [],
+      fgtsSimulationId: simulationId,
+      provider: 'bms'
+    }, { headers: { Authorization: `Bearer ${token}` }, timeout: 60000 })
+    res.json({ ok: true, proposal: propRes.data, pessoa: { nome, nomeMae, dataNasc } })
+  } catch (e) {
+    const msg = e.response?.data?.detail || e.response?.data?.message || e.response?.data?.title || e.message
+    res.status(e.response?.status || 500).json({ error: typeof msg === 'string' ? msg : JSON.stringify(msg) })
+  }
+})
+
 // ── Server startup: restore saved chip sessions ───────────────────────────────
 
 function restoreChipSessions() {
@@ -2166,6 +2726,12 @@ function restoreChipSessions() {
     })
   }
 }
+
+// Garante que qualquer erro não tratado retorne JSON, nunca HTML
+app.use((err, req, res, next) => {
+  console.error('[Express error]', err)
+  if (!res.headersSent) res.status(500).json({ error: err?.message || 'Erro interno do servidor' })
+})
 
 const PORT = process.env.PORT ?? 3001
 server.listen(PORT, () => {

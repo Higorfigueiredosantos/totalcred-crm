@@ -182,9 +182,14 @@ x-crm-event: message_created
     "from": "5511999998888@c.us",
     "body": "Olá! Gostaria de saber mais.",
     "pushname": "João Silva",
-    "contactNumber": "5511999998888"
+    "contactNumber": "5511999998888",
+    "conversationId": "a3f2b8c1d4e5f6a7"   ← use este para responder
   }
-}`}</pre>
+}
+
+// conversationId é único e estável por conversa (um por contato/canal).
+// Toda vez que esse contato enviar mensagem, chegará sempre o mesmo ID.
+// Use-o no campo conversationId do POST /api/send-message para responder.`}</pre>
       </div>
 
       {/* Add Modal */}
@@ -580,40 +585,66 @@ URL: http://localhost:3001/api/chips`}
       <SectionDivider><MessageSquare size={11} /> Mensagens</SectionDivider>
 
       <Endpoint
+        method="GET"
+        path="/api/conversations"
+        title="Listar conversas"
+        auth={false}
+        description="Retorna todas as conversas registradas no CRM com seus respectivos conversationIds. Use para descobrir o conversationId de um contato específico antes de enviar uma mensagem proativa."
+        response={`[
+  {
+    "conversationId": "a3f2b8c1d4e5f6a7",
+    "channel": "chip_1",
+    "contact": "5511999998888@c.us"
+  },
+  {
+    "conversationId": "b9c3d2e1f0a8b7c6",
+    "channel": "123456789012345",
+    "contact": "5521988887777"
+  }
+]`}
+        curl={`curl http://localhost:3001/api/conversations`}
+        n8n={`Method: GET
+URL: http://localhost:3001/api/conversations`}
+      />
+
+      <Endpoint
         method="POST"
-        path="/api/chips/send"
+        path="/api/send-message"
         title="Enviar mensagem de texto"
-        description="Envia uma mensagem de texto via uma instância WhatsApp conectada. O número destino deve estar em formato E.164 sem o símbolo + (somente dígitos). Use GET /api/chips para listar chips disponíveis e obter um chipId com status ready."
-        bodyDesc="O campo chipId deve ser o ID de um chip com status ready. O campo to aceita somente dígitos no formato internacional."
-        bodyExample={`{
+        description="Envia mensagem via Chip (WhatsApp Web) ou Canal Oficial (Meta API). O campo conversationId vem do webhook (data.conversationId) quando o contato envia uma mensagem — cada contato tem um ID único e estável por canal. Use conversationId para responder. Para iniciar uma conversa nova (sem mensagem recebida antes), use chipId + to."
+        bodyDesc="conversationId: ID único da conversa recebido pelo webhook — use para responder a um contato específico. Alternativa: chipId + to + message para nova conversa. message: texto da mensagem."
+        bodyExample={`// RESPONDER — use o conversationId recebido no webhook:
+{
+  "conversationId": "a3f2b8c1d4e5f6a7",
+  "message": "Olá! Como posso ajudar?"
+}
+
+// NOVA CONVERSA — quando não há mensagem recebida ainda:
+{
   "chipId": "chip_1",
   "to": "5511999998888",
-  "message": "Olá! Como posso ajudar?"
+  "message": "Olá! Tudo bem?"
 }`}
-        response={`{
-  "ok": true,
-  "messageId": "true_5511999998888@c.us_3EB01234ABCD"
-}`}
-        curl={`curl -X POST http://localhost:3001/api/chips/send \\
+        response={`{ "ok": true, "msgId": "true_5511999998888@c.us_3EB01234ABCD" }`}
+        curl={`# Responder usando conversationId do webhook:
+curl -X POST http://localhost:3001/api/send-message \\
   -H "Content-Type: application/json" \\
   -H "x-api-token: sua-chave-secreta" \\
   -d '{
-    "chipId": "chip_1",
-    "to": "5511999998888",
+    "conversationId": "a3f2b8c1d4e5f6a7",
     "message": "Olá! Como posso ajudar?"
   }'`}
         n8n={`Method: POST
-URL: http://localhost:3001/api/chips/send
+URL: http://localhost:3001/api/send-message
 
 Headers:
   x-api-token: {{ $env.CRM_API_KEY }}
   Content-Type: application/json
 
-Body (JSON):
+Body (JSON) — conversationId vem do nó anterior (webhook):
 {
-  "chipId": "chip_1",
-  "to": "{{ $json.phone }}",
-  "message": "{{ $json.message }}"
+  "conversationId": "{{ $json.data.conversationId }}",
+  "message": "{{ $json.resposta }}"
 }`}
       />
 

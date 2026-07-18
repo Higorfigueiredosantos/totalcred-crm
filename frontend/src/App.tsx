@@ -25,6 +25,7 @@ import Settings from './pages/Settings'
 import Chips from './pages/Chips'
 import Ferramentas from './pages/Ferramentas'
 import Autobot from './pages/Autobot'
+import Simulacao from './pages/Simulacao'
 
 export default function App() {
   const theme = useStore(s => s.settings.theme ?? 'dark')
@@ -62,6 +63,7 @@ export default function App() {
           <Route path="/chips" element={<Chips />} />
           <Route path="/ferramentas" element={<Ferramentas />} />
           <Route path="/autobot" element={<Autobot />} />
+          <Route path="/simulacao" element={<Simulacao />} />
           <Route path="/admin" element={<Admin />} />
         </Route>
       </Routes>

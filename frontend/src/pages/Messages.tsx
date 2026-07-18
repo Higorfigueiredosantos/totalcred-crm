@@ -1,14 +1,15 @@
-import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
+import { Fragment, useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { useStore } from '../store'
 import { useAuthStore } from '../store/auth'
 import type { Message } from '../types'
 import { v4 as uuid } from '../utils/uuid'
-import { format } from 'date-fns'
+import { format, isToday, isYesterday, isSameDay } from 'date-fns'
+import { ptBR } from 'date-fns/locale'
 import {
   Send, Search, Check, CheckCheck, Clock, AlertCircle, Archive,
   Smartphone, Lock, Tag, User, Phone, Calendar, ChevronRight, ChevronLeft, X, Edit2,
   Paperclip, FileText, Image, Video, Users, Download, Mic,
-  Smile, StopCircle, Trash2,
+  Smile, StopCircle, Trash2, MoreVertical,
 } from 'lucide-react'
 import { sendTextMessage, markMessageRead, uploadMedia, sendMediaMessage } from '../api/whatsapp'
 import { onWSMessage, connectWS } from '../api/websocket'
@@ -35,6 +36,12 @@ function statusIcon(status: string) {
   if (status === 'read')      return <CheckCheck size={13} className="text-sky-300" />
   if (status === 'failed')    return <AlertCircle size={13} className="text-red-300" />
   return null
+}
+
+function dayLabel(date: Date) {
+  if (isToday(date)) return 'Hoje'
+  if (isYesterday(date)) return 'Ontem'
+  return format(date, "d 'de' MMMM 'de' yyyy", { locale: ptBR })
 }
 
 function getMediaType(file: File): 'image' | 'audio' | 'video' | 'document' {
@@ -73,8 +80,8 @@ function MediaBubble({ msg, outbound }: { msg: Message; outbound: boolean }) {
       )
     case 'audio':
       return msg.mediaUrl ? (
-        <audio controls src={msg.mediaUrl} className="w-64 my-1"
-          style={{ colorScheme: 'dark', minHeight: '40px' }} />
+        <audio controls src={msg.mediaUrl}
+          style={{ display: 'block', width: '240px', height: '54px', colorScheme: 'dark' }} />
       ) : (
         <div className={`flex items-center gap-2 py-1 ${cls}`}>
           <Mic size={18} />
@@ -135,9 +142,15 @@ export default function Messages() {
   const [isRecording, setIsRecording]     = useState(false)
   const [recordingSecs, setRecordingSecs] = useState(0)
   const [showEmoji, setShowEmoji]         = useState(false)
+  const [groupMsgMenu, setGroupMsgMenu]   = useState<{ msgId: string; sender: string } | null>(null)
 
   const messagesRef       = useRef(messages)
   useEffect(() => { messagesRef.current = messages }, [messages])
+
+  const contactsRef       = useRef(contacts)
+  useEffect(() => { contactsRef.current = contacts }, [contacts])
+  const conversationsRef  = useRef(conversations)
+  useEffect(() => { conversationsRef.current = conversations }, [conversations])
 
   const kanbanCardsRef   = useRef(kanbanCards)
   useEffect(() => { kanbanCardsRef.current = kanbanCards }, [kanbanCards])
@@ -207,28 +220,32 @@ export default function Messages() {
         continue
       }
 
-      let contact = contacts.find(c => c.phone === `+${from}` || c.phone === from)
+      let contact = contactsRef.current.find(c => c.phone === `+${from}` || c.phone === from)
       if (!contact) {
         contact = {
           id: uuid(), name: value.contacts?.[0]?.profile?.name ?? from,
           phone: `+${from}`, tags: [], channelId: channel.id, createdAt: new Date().toISOString(),
         }
+        contactsRef.current = [...contactsRef.current, contact]
         addContact(contact)
       }
 
-      let conv = conversations.find(c => c.contactId === contact!.id && c.channelId === channel.id)
+      let conv = conversationsRef.current.find(c => c.contactId === contact!.id && c.channelId === channel.id)
       if (!conv) {
         conv = {
           id: uuid(), contactId: contact.id, channelId: channel.id,
           status: 'open', unreadCount: 1, lastMessageAt: new Date().toISOString(), tags: [],
         }
+        conversationsRef.current = [...conversationsRef.current, conv]
         addConversation(conv)
         addToLeads(conv.id, contact.id, value.contacts?.[0]?.profile?.name ?? from)
       }
 
       const rawType = msg.type ?? 'text'
-      // sticker → image para compatibilidade com MediaBubble
-      const msgType: Message['type'] = rawType === 'sticker' ? 'image' : rawType
+      // button/interactive → text para exibir como mensagem normal
+      const msgType: Message['type'] = rawType === 'sticker' ? 'image'
+        : (rawType === 'button' || rawType === 'interactive') ? 'text'
+        : rawType as Message['type']
 
       // Proxy para baixar mídia da Meta (imagem, vídeo, áudio, doc) via backend
       const metaMediaId = msg.image?.id || msg.audio?.id || msg.video?.id
@@ -237,7 +254,11 @@ export default function Messages() {
         ? `/api/media/meta?id=${encodeURIComponent(metaMediaId)}&token=${encodeURIComponent(channel.accessToken)}&phoneId=${encodeURIComponent(channel.phoneNumberId)}`
         : undefined
 
+      // Extrai texto de todos os tipos: texto, botão clicado, lista selecionada, mídia
       const textContent = msg.text?.body
+        || msg.button?.text
+        || msg.interactive?.button_reply?.title
+        || msg.interactive?.list_reply?.title
         || msg.image?.caption || msg.video?.caption
         || msg.document?.caption || msg.document?.filename
         || undefined
@@ -314,7 +335,7 @@ export default function Messages() {
       ? (groupName || fromUser)
       : (pushname || cleanNumber || fromUser)
 
-    let contact = contacts.find(c => c.phone === chatId)
+    let contact = contactsRef.current.find(c => c.phone === chatId)
     if (!contact) {
       contact = {
         id: uuid(), name: displayName,
@@ -322,6 +343,7 @@ export default function Messages() {
         ...(cleanNumber ? { waNumber: cleanNumber } : {}),
         tags: [], channelId, createdAt: new Date().toISOString(),
       }
+      contactsRef.current = [...contactsRef.current, contact]
       addContact(contact)
     } else {
       const updates: Record<string, any> = {}
@@ -331,12 +353,13 @@ export default function Messages() {
       if (Object.keys(updates).length) updateContact(contact.id, updates)
     }
 
-    let conv = conversations.find(c => c.contactId === contact!.id && c.channelId === channelId)
+    let conv = conversationsRef.current.find(c => c.contactId === contact!.id && c.channelId === channelId)
     if (!conv) {
       conv = {
         id: uuid(), contactId: contact.id, channelId,
         status: 'open', unreadCount: 1, lastMessageAt: new Date().toISOString(), tags: [],
       }
+      conversationsRef.current = [...conversationsRef.current, conv]
       addConversation(conv)
       if (!isGroup) addToLeads(conv.id, contact.id, displayName)
     }
@@ -377,6 +400,103 @@ export default function Messages() {
 
   useEffect(() => onWSMessage('whatsapp', handleMetaInbound), [handleMetaInbound])
   useEffect(() => onWSMessage('chip_message', handleChipInbound), [handleChipInbound])
+
+  // ── Chip outbound (enviado via API externa ou pela UI) ──────────────────────
+  useEffect(() => onWSMessage('chip_outbound', (payload: any) => {
+    const { chipId, to, message, msgId, type, mediaFileName, caption, timestamp } = payload
+    if (!chipId || !to) return
+
+    // Se o wamid já existe na store, foi enviado pela UI — apenas confirma status
+    if (msgId) {
+      const existing = messagesRef.current.find(m => m.wamid === msgId)
+      if (existing) { updateMessage(existing.id, { status: 'sent' }); return }
+    }
+
+    const channelId = CHIP_PREFIX + chipId
+    const ts = timestamp
+      ? new Date(typeof timestamp === 'number' && timestamp < 1e12 ? timestamp * 1000 : timestamp).toISOString()
+      : new Date().toISOString()
+    const msgType = (type as Message['type']) || 'text'
+    const textBody = message || caption || undefined
+
+    // Garante que o contato existe (busca normalizada, suporta formato 8/9 dígitos BR)
+    const phoneDigits = (p: string) => p.replace(/@.*$/, '').replace(/\D/g, '')
+    const phoneVariants = (d: string): string[] => {
+      const vs = [d]
+      if (d.startsWith('55') && d.length === 12) vs.push('55' + d.slice(2, 4) + '9' + d.slice(4))
+      if (d.startsWith('55') && d.length === 13) vs.push('55' + d.slice(2, 4) + d.slice(5))
+      return vs
+    }
+    const toDigits = phoneDigits(to)
+    const toVariants = phoneVariants(toDigits)
+    let contact = contactsRef.current.find(c => {
+      if (c.phone === to) return true
+      const cd = phoneDigits(c.phone)
+      if (toVariants.includes(cd)) return true
+      if (c.waNumber) {
+        const wd = phoneDigits(c.waNumber)
+        if (toVariants.includes(wd)) return true
+      }
+      return false
+    })
+    if (!contact) {
+      const num = to.replace(/@.*$/, '')
+      contact = {
+        id: uuid(), name: `+${num}`, phone: to,
+        tags: [], channelId, createdAt: new Date().toISOString(),
+      }
+      contactsRef.current = [...contactsRef.current, contact]
+      addContact(contact)
+    }
+
+    // Garante que a conversa existe
+    let conv = conversationsRef.current.find(c => c.contactId === contact!.id && c.channelId === channelId)
+    if (!conv) {
+      conv = {
+        id: uuid(), contactId: contact.id, channelId,
+        status: 'open', unreadCount: 0, lastMessageAt: ts, tags: [],
+      }
+      conversationsRef.current = [...conversationsRef.current, conv]
+      addConversation(conv)
+    }
+
+    const newMsg: Message = {
+      id: uuid(), wamid: msgId || undefined,
+      conversationId: conv.id, contactId: contact.id, channelId,
+      direction: 'outbound', type: msgType,
+      text: textBody, fileName: mediaFileName || undefined,
+      status: 'sent', timestamp: ts,
+    }
+    addMessage(newMsg)
+    updateConversation(conv.id, {
+      lastMessage: textBody || `[${msgType}]`,
+      lastMessageAt: ts,
+    })
+  }), [updateMessage, addMessage, addContact, addConversation, updateConversation])
+
+  // Refs sempre atualizados para uso na fila offline
+  const handleChipInboundRef = useRef(handleChipInbound)
+  useEffect(() => { handleChipInboundRef.current = handleChipInbound }, [handleChipInbound])
+  const handleMetaInboundRef = useRef(handleMetaInbound)
+  useEffect(() => { handleMetaInboundRef.current = handleMetaInbound }, [handleMetaInbound])
+
+  // ── Busca fila offline ao montar (mensagens recebidas com browser fechado) ───
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      fetch('/api/offline_queue')
+        .then(r => r.json())
+        .then((queue: { type: string; payload: any }[]) => {
+          if (!Array.isArray(queue) || queue.length === 0) return
+          console.log(`[OfflineQueue] Processando ${queue.length} msgs pendentes`)
+          queue.forEach(({ type, payload }) => {
+            if (type === 'chip_message') handleChipInboundRef.current(payload)
+            else if (type === 'whatsapp') handleMetaInboundRef.current(payload)
+          })
+        })
+        .catch(() => {})
+    }, 1000)
+    return () => clearTimeout(timer)
+  }, [])
 
   // Atualiza status da mensagem (✓ enviado / ✓✓ entregue / ✓✓ azul lido)
   // Usa ref para sempre ler as mensagens atuais sem re-registrar o listener
@@ -547,12 +667,31 @@ export default function Messages() {
   const activeChipId  = activeConv && isChipConv(activeConv.channelId) ? chipIdFromChannelId(activeConv.channelId) : null
   const isGroupConv   = activeContact?.phone?.endsWith('@g.us') ?? false
 
+  // ── Start private conversation from a group message sender ──────────────────
+  const startPrivateConv = useCallback((senderNum: string) => {
+    setGroupMsgMenu(null)
+    if (!activeChipId) return
+    const phone = `${senderNum}@c.us`
+    const channelId = CHIP_PREFIX + activeChipId
+    let contact = contacts.find(c => c.phone === phone)
+    if (!contact) {
+      contact = { id: uuid(), name: `+${senderNum}`, phone, tags: [], channelId, createdAt: new Date().toISOString() }
+      addContact(contact)
+    }
+    let conv = conversations.find(c => c.contactId === contact!.id && c.channelId === channelId)
+    if (!conv) {
+      conv = { id: uuid(), contactId: contact.id, channelId, status: 'open', unreadCount: 0, lastMessageAt: new Date().toISOString(), tags: [] }
+      addConversation(conv)
+    }
+    setActiveConversation(conv.id)
+  }, [activeChipId, contacts, conversations, addContact, addConversation, setActiveConversation])
+
   const convMessages = useMemo(() =>
     messages.filter(m => m.conversationId === activeConversationId)
       .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()),
     [messages, activeConversationId])
 
-  // ── Phone formatting ────────────────────────────────────────────────────────
+// ── Phone formatting ────────────────────────────────────────────────────────
   function formatWaNumber(raw: string | null | undefined): string {
     if (!raw) return '—'
     const num = raw.replace(/@.*$/, '').trim()
@@ -970,21 +1109,37 @@ export default function Messages() {
               </div>
             </div>
 
-            {/* ── Messages ───────────────────────────────────────────────── */}
+{/* ── Messages ───────────────────────────────────────────────── */}
+            {groupMsgMenu && <div className="fixed inset-0 z-10" onClick={() => setGroupMsgMenu(null)} />}
             <div className="flex-1 overflow-y-auto p-4 space-y-2 bg-gray-950">
-              {convMessages.map(msg => {
+              {convMessages.map((msg, idx) => {
+                const msgDate = new Date(msg.timestamp)
+                const prevDate = idx > 0 ? new Date(convMessages[idx - 1].timestamp) : null
+                const showDateSeparator = !prevDate || !isSameDay(msgDate, prevDate)
+
+                const dateSeparator = showDateSeparator && (
+                  <div key={`sep-${msg.id}`} className="flex justify-center my-2">
+                    <span className="text-[11px] text-gray-400 bg-gray-800/80 px-3 py-1 rounded-full">
+                      {dayLabel(msgDate)}
+                    </span>
+                  </div>
+                )
+
                 if (msg.private) {
                   return (
-                    <div key={msg.id} className="flex justify-center">
-                      <div className="max-w-xs lg:max-w-md rounded-xl px-3 py-2 bg-amber-950/60 border border-amber-800/50">
-                        <div className="flex items-center gap-1.5 mb-1">
-                          <Lock size={10} className="text-amber-400" />
-                          <span className="text-[10px] text-amber-400 font-medium">Nota privada</span>
+                    <Fragment key={msg.id}>
+                      {dateSeparator}
+                      <div className="flex justify-center">
+                        <div className="max-w-xs lg:max-w-md rounded-xl px-3 py-2 bg-amber-950/60 border border-amber-800/50">
+                          <div className="flex items-center gap-1.5 mb-1">
+                            <Lock size={10} className="text-amber-400" />
+                            <span className="text-[10px] text-amber-400 font-medium">Nota privada</span>
+                          </div>
+                          <p className="text-sm text-amber-100 whitespace-pre-wrap break-words">{msg.text}</p>
+                          <p className="text-[10px] text-amber-700 mt-1 text-right">{format(new Date(msg.timestamp), 'HH:mm')}</p>
                         </div>
-                        <p className="text-sm text-amber-100 whitespace-pre-wrap break-words">{msg.text}</p>
-                        <p className="text-[10px] text-amber-700 mt-1 text-right">{format(new Date(msg.timestamp), 'HH:mm')}</p>
                       </div>
-                    </div>
+                    </Fragment>
                   )
                 }
 
@@ -993,15 +1148,35 @@ export default function Messages() {
                 const isMedia = msg.type !== 'text' && msg.type !== 'template' && msg.type !== 'interactive'
 
                 return (
-                  <div key={msg.id} className={`flex ${isOut ? 'justify-end' : 'justify-start'}`}>
+                  <Fragment key={msg.id}>
+                    {dateSeparator}
+                    <div className={`flex ${isOut ? 'justify-end' : 'justify-start'}`}>
                     <div className={`max-w-xs lg:max-w-md rounded-xl px-3 py-2 ${
                       isOut
                         ? 'bg-indigo-600 text-white rounded-br-sm'
                         : 'bg-gray-800 text-gray-100 rounded-bl-sm'
                     }`}>
-                      {/* Group sender name */}
+                      {/* Group sender name + 3-dot menu */}
                       {parsed && (
-                        <p className="text-[10px] font-semibold text-emerald-400 mb-0.5">+{parsed.sender}</p>
+                        <div className="relative flex items-center justify-between gap-1 mb-0.5">
+                          <p className="text-[10px] font-semibold text-emerald-400">+{parsed.sender}</p>
+                          <button
+                            onClick={e => { e.stopPropagation(); setGroupMsgMenu(prev => prev?.msgId === msg.id ? null : { msgId: msg.id, sender: parsed.sender }) }}
+                            className="p-0.5 rounded hover:bg-white/10 text-gray-400 hover:text-gray-200"
+                          >
+                            <MoreVertical size={11} />
+                          </button>
+                          {groupMsgMenu?.msgId === msg.id && (
+                            <div className="absolute right-0 top-5 bg-gray-900 border border-gray-700 rounded-lg shadow-xl z-20 py-1 min-w-[160px]">
+                              <button
+                                onClick={() => startPrivateConv(parsed.sender)}
+                                className="w-full text-left px-3 py-2 text-xs text-white hover:bg-gray-800 flex items-center gap-2"
+                              >
+                                <User size={12} /> Iniciar conversa privada
+                              </button>
+                            </div>
+                          )}
+                        </div>
                       )}
 
                       {/* Media or text content */}
@@ -1027,6 +1202,7 @@ export default function Messages() {
                       )}
                     </div>
                   </div>
+                  </Fragment>
                 )
               })}
               <div ref={messagesEndRef} />

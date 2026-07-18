@@ -3,13 +3,16 @@ import { NavLink } from 'react-router-dom'
 import {
   MessageSquare, Users, Kanban, Send, Settings,
   Radio, BarChart2, Smartphone, Wrench, ChevronLeft, ChevronRight,
-  Shield, LogOut
+  Shield, LogOut, ChevronDown, ChevronUp, Calculator
 } from 'lucide-react'
 import logoTotalCred from '../assets/logo-totalcred.png'
 import { useAuthStore } from '../store/auth'
 
 export default function Sidebar() {
   const [collapsed, setCollapsed] = useState(false)
+  const [officialOpen, setOfficialOpen] = useState(true)
+  const [unofficialOpen, setUnofficialOpen] = useState(true)
+  const [simOpen, setSimOpen] = useState(true)
   const { user, logout, isAdmin, can } = useAuthStore()
 
   const linkClass = (isActive: boolean) =>
@@ -18,6 +21,34 @@ export default function Sidebar() {
         ? 'bg-gray-800 text-white font-medium'
         : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/50'
     } ${collapsed ? 'justify-center px-2' : ''}`
+
+  function GroupHeader({
+    label,
+    open,
+    onToggle,
+  }: {
+    label: string
+    open: boolean
+    onToggle: () => void
+  }) {
+    if (collapsed) {
+      return <div className="my-2 border-t border-gray-800" />
+    }
+    return (
+      <button
+        onClick={onToggle}
+        className="w-full flex items-center justify-between px-3 py-1.5 mt-1 mb-0.5 rounded-lg hover:bg-gray-800/40 transition-colors group"
+      >
+        <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider group-hover:text-gray-400 transition-colors">
+          {label}
+        </span>
+        {open
+          ? <ChevronUp size={11} className="text-gray-600 group-hover:text-gray-400" />
+          : <ChevronDown size={11} className="text-gray-600 group-hover:text-gray-400" />
+        }
+      </button>
+    )
+  }
 
   return (
     <aside className={`${collapsed ? 'w-14' : 'w-56'} bg-gray-900 border-r border-gray-800 flex flex-col h-full shrink-0 transition-all duration-200`}>
@@ -43,29 +74,48 @@ export default function Sidebar() {
           <Kanban size={16} />{!collapsed && 'Pipeline'}
         </NavLink>
 
-        <div className="my-2 border-t border-gray-800" />
-        {!collapsed && <p className="text-[10px] font-semibold text-gray-600 uppercase tracking-wider px-3 pb-1.5">API Oficial</p>}
+        <GroupHeader label="API Oficial" open={officialOpen} onToggle={() => setOfficialOpen(v => !v)} />
 
-        {can('dispatcher') && (
-          <NavLink to="/dispatcher" className={({ isActive }) => linkClass(isActive)} title={collapsed ? 'Disparador' : undefined}>
-            <Send size={16} />{!collapsed && 'Disparador'}
-          </NavLink>
+        {(collapsed || officialOpen) && (
+          <>
+            {can('dispatcher') && (
+              <NavLink to="/dispatcher" className={({ isActive }) => linkClass(isActive)} title={collapsed ? 'Disparador' : undefined}>
+                <Send size={16} />{!collapsed && 'Disparador'}
+              </NavLink>
+            )}
+            <NavLink to="/channels" className={({ isActive }) => linkClass(isActive)} title={collapsed ? 'Canais' : undefined}>
+              <Radio size={16} />{!collapsed && 'Canais'}
+            </NavLink>
+          </>
         )}
-        <NavLink to="/channels" className={({ isActive }) => linkClass(isActive)} title={collapsed ? 'Canais' : undefined}>
-          <Radio size={16} />{!collapsed && 'Canais'}
-        </NavLink>
 
-        <div className="my-2 border-t border-gray-800" />
-        {!collapsed && <p className="text-[10px] font-semibold text-gray-600 uppercase tracking-wider px-3 pb-1.5">API Não Oficial</p>}
+        <GroupHeader label="API Não Oficial" open={unofficialOpen} onToggle={() => setUnofficialOpen(v => !v)} />
 
-        {can('chipsPage') && (
-          <NavLink to="/chips" className={({ isActive }) => linkClass(isActive)} title={collapsed ? 'Chips' : undefined}>
-            <Smartphone size={16} />{!collapsed && 'Chips'}
-          </NavLink>
+        {(collapsed || unofficialOpen) && (
+          <>
+            {can('chipsPage') && (
+              <NavLink to="/chips" className={({ isActive }) => linkClass(isActive)} title={collapsed ? 'Chips' : undefined}>
+                <Smartphone size={16} />{!collapsed && 'Chips'}
+              </NavLink>
+            )}
+            <NavLink to="/ferramentas" className={({ isActive }) => linkClass(isActive)} title={collapsed ? 'Ferramentas' : undefined}>
+              <Wrench size={16} />{!collapsed && 'Ferramentas'}
+            </NavLink>
+          </>
         )}
-        <NavLink to="/ferramentas" className={({ isActive }) => linkClass(isActive)} title={collapsed ? 'Ferramentas' : undefined}>
-          <Wrench size={16} />{!collapsed && 'Ferramentas'}
-        </NavLink>
+
+        <GroupHeader label="Simulação" open={simOpen} onToggle={() => setSimOpen(v => !v)} />
+
+        {(collapsed || simOpen) && (
+          <>
+            <NavLink to="/simulacao?t=fgts" className={({ isActive }) => linkClass(isActive)} title={collapsed ? 'FGTS' : undefined}>
+              <Calculator size={16} />{!collapsed && 'FGTS'}
+            </NavLink>
+            <NavLink to="/simulacao?t=clt" className={({ isActive }) => linkClass(isActive)} title={collapsed ? 'CLT' : undefined}>
+              <Calculator size={16} />{!collapsed && 'CLT'}
+            </NavLink>
+          </>
+        )}
       </nav>
 
       <div className="p-2 border-t border-gray-800 space-y-1">
