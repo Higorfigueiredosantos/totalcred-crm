@@ -886,13 +886,7 @@ async function initChip(chipId) {
     })
 
     client.on('message_ack', (msg, ack) => {
-      // Em algumas versões/eventos do whatsapp-web.js, msg.id já vem como a
-      // própria string serializada (sem o wrapper { _serialized }) — cobre os
-      // dois formatos para não perder o id do ack.
-      const msgId =
-        (typeof msg?.id === 'string' ? msg.id : msg?.id?._serialized) ||
-        (typeof msg?._data?.id === 'string' ? msg._data.id : msg?._data?.id?._serialized) ||
-        null
+      const msgId = extractMsgId(msg)
 
       chipCampaignState.tickMonitor.recordAck(ack)
       const summary = chipCampaignState.tickMonitor.getSummary()
@@ -991,6 +985,19 @@ function getNextReadyChipFrom(allowedIds, lastUsedId) {
 }
 
 // ── Send helpers ──────────────────────────────────────────────────────────────
+
+// Extrai o id serializado de uma mensagem do whatsapp-web.js. Em algumas
+// versões/eventos da lib, msg.id já vem como a própria string serializada
+// (sem o wrapper { _serialized }) — cobre os dois formatos.
+function extractMsgId(msg) {
+  const id = msg?.id
+  if (typeof id === 'string') return id
+  if (id?._serialized) return id._serialized
+  const dataId = msg?._data?.id
+  if (typeof dataId === 'string') return dataId
+  if (dataId?._serialized) return dataId._serialized
+  return null
+}
 
 async function sendChipText(client, chatId, text) {
   for (let i = 0; i < 3; i++) {
@@ -2181,7 +2188,7 @@ app.post('/api/send-message', async (req, res) => {
       let chatId = to.includes('@') ? to : formatNumber(to)
       const convId = conversationId || getConvId(id, chatId)
       const msg = await sendChipText(session.client, chatId, message)
-      const msgId = msg?.id?._serialized || null
+      const msgId = extractMsgId(msg)
       fireWebhooks('message_sent', { chipId: id, to: chatId, message, msgId, conversationId: convId })
       res.json({ ok: true, msgId })
       setTimeout(() => broadcast('chip_outbound', { chipId: id, to: chatId, message, msgId, type: 'text', timestamp: Date.now(), conversationId: convId }), 300)
@@ -2226,7 +2233,7 @@ app.post('/api/chips/send', async (req, res) => {
     let chatId = to.includes('@') ? to : formatNumber(to)
     const convId = getConvId(chipId, chatId)
     const msg = await sendChipText(session.client, chatId, message)
-    const msgId = msg?.id?._serialized || null
+    const msgId = extractMsgId(msg)
     fireWebhooks('message_sent', { chipId, to: chatId, message, msgId, conversationId: convId })
     res.json({ ok: true, msgId })
     // Broadcast após resposta HTTP para o frontend exibir a mensagem enviada externamente
@@ -2286,7 +2293,7 @@ app.post('/api/chips/send-media', upload.single('file'), async (req, res) => {
       if (caption) opts.caption = caption
       msg = await session.client.sendMessage(chatId, media, opts)
     }
-    const msgId = msg?.id?._serialized || null
+    const msgId = extractMsgId(msg)
     const outType = isAudio ? 'audio' : req.file.mimetype.startsWith('image/') ? 'image' : req.file.mimetype.startsWith('video/') ? 'video' : 'document'
     const convId = getConvId(chipId, chatId)
     fireWebhooks('message_sent', { chipId, to: chatId, msgId, conversationId: convId })
