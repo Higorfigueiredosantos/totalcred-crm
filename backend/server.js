@@ -887,6 +887,11 @@ async function initChip(chipId) {
 
     client.on('message_ack', (msg, ack) => {
       const msgId = extractMsgId(msg)
+      if (!msgId) {
+        try {
+          console.log(`[Chip ${chipId}] DEBUG raw msg.id=${JSON.stringify(msg.id)} keys=${Object.keys(msg || {}).join(',')} _data.id=${JSON.stringify(msg._data?.id)}`)
+        } catch (e) { console.log(`[Chip ${chipId}] DEBUG dump falhou:`, e.message) }
+      }
 
       chipCampaignState.tickMonitor.recordAck(ack)
       const summary = chipCampaignState.tickMonitor.getSummary()
@@ -2236,6 +2241,11 @@ app.post('/api/chips/send', async (req, res) => {
     const convId = getConvId(chipId, chatId)
     const msg = await sendChipText(session.client, chatId, message)
     const msgId = extractMsgId(msg)
+    if (!msgId) {
+      try {
+        console.log(`[Chip ${chipId}] DEBUG send raw msg.id=${JSON.stringify(msg?.id)} keys=${Object.keys(msg || {}).join(',')} _data.id=${JSON.stringify(msg?._data?.id)}`)
+      } catch (e) { console.log(`[Chip ${chipId}] DEBUG send dump falhou:`, e.message) }
+    }
     fireWebhooks('message_sent', { chipId, to: chatId, message, msgId, conversationId: convId })
     res.json({ ok: true, msgId })
     // Broadcast após resposta HTTP para o frontend exibir a mensagem enviada externamente
