@@ -1401,7 +1401,7 @@ async function handleIncomingChipMessage(client, msg, chipId) {
         console.log(`[Chip] Mídia salva: ${fname} (${msgType})`)
       }
     } catch (e) {
-      console.error('[Chip] Erro ao baixar mídia:', e.message)
+      console.error('[Chip] Erro ao baixar mídia:', e.message, '| name:', e.name, '| stack:', (e.stack || '').split('\n').slice(0, 3).join(' / '))
     }
   }
 
