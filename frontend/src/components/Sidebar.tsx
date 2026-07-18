@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import {
   MessageSquare, Users, Kanban, Send, Settings,
-  Radio, BarChart2, Smartphone, Wrench, ChevronLeft, ChevronRight,
+  Radio, BarChart2, Wrench, ChevronLeft, ChevronRight,
   Shield, LogOut, ChevronDown, ChevronUp, Calculator
 } from 'lucide-react'
 import logoTotalCred from '../assets/logo-totalcred.png'
@@ -10,8 +10,6 @@ import { useAuthStore } from '../store/auth'
 
 export default function Sidebar() {
   const [collapsed, setCollapsed] = useState(false)
-  const [officialOpen, setOfficialOpen] = useState(true)
-  const [unofficialOpen, setUnofficialOpen] = useState(true)
   const [simOpen, setSimOpen] = useState(true)
   const { user, logout, isAdmin, can } = useAuthStore()
 
@@ -74,35 +72,17 @@ export default function Sidebar() {
           <Kanban size={16} />{!collapsed && 'Pipeline'}
         </NavLink>
 
-        <GroupHeader label="API Oficial" open={officialOpen} onToggle={() => setOfficialOpen(v => !v)} />
-
-        {(collapsed || officialOpen) && (
-          <>
-            {can('dispatcher') && (
-              <NavLink to="/dispatcher" className={({ isActive }) => linkClass(isActive)} title={collapsed ? 'Disparador' : undefined}>
-                <Send size={16} />{!collapsed && 'Disparador'}
-              </NavLink>
-            )}
-            <NavLink to="/channels" className={({ isActive }) => linkClass(isActive)} title={collapsed ? 'Canais' : undefined}>
-              <Radio size={16} />{!collapsed && 'Canais'}
-            </NavLink>
-          </>
+        {can('dispatcher') && (
+          <NavLink to="/dispatcher" className={({ isActive }) => linkClass(isActive)} title={collapsed ? 'Disparador' : undefined}>
+            <Send size={16} />{!collapsed && 'Disparador'}
+          </NavLink>
         )}
-
-        <GroupHeader label="API Não Oficial" open={unofficialOpen} onToggle={() => setUnofficialOpen(v => !v)} />
-
-        {(collapsed || unofficialOpen) && (
-          <>
-            {can('chipsPage') && (
-              <NavLink to="/chips" className={({ isActive }) => linkClass(isActive)} title={collapsed ? 'Chips' : undefined}>
-                <Smartphone size={16} />{!collapsed && 'Chips'}
-              </NavLink>
-            )}
-            <NavLink to="/ferramentas" className={({ isActive }) => linkClass(isActive)} title={collapsed ? 'Ferramentas' : undefined}>
-              <Wrench size={16} />{!collapsed && 'Ferramentas'}
-            </NavLink>
-          </>
-        )}
+        <NavLink to="/channels" className={({ isActive }) => linkClass(isActive)} title={collapsed ? 'Canais' : undefined}>
+          <Radio size={16} />{!collapsed && 'Canais'}
+        </NavLink>
+        <NavLink to="/ferramentas" className={({ isActive }) => linkClass(isActive)} title={collapsed ? 'Ferramentas' : undefined}>
+          <Wrench size={16} />{!collapsed && 'Ferramentas'}
+        </NavLink>
 
         <GroupHeader label="Simulação" open={simOpen} onToggle={() => setSimOpen(v => !v)} />
 

@@ -22,7 +22,6 @@ import Kanban from './pages/Kanban'
 import Dispatcher from './pages/Dispatcher'
 import Channels from './pages/Channels'
 import Settings from './pages/Settings'
-import Chips from './pages/Chips'
 import Ferramentas from './pages/Ferramentas'
 import Autobot from './pages/Autobot'
 import Simulacao from './pages/Simulacao'
@@ -60,7 +59,6 @@ export default function App() {
           <Route path="/dispatcher" element={<Dispatcher />} />
           <Route path="/channels" element={<Channels />} />
           <Route path="/settings" element={<Settings />} />
-          <Route path="/chips" element={<Chips />} />
           <Route path="/ferramentas" element={<Ferramentas />} />
           <Route path="/autobot" element={<Autobot />} />
           <Route path="/simulacao" element={<Simulacao />} />

@@ -1,16 +1,18 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useStore } from '../store'
+import { useAuthStore } from '../store/auth'
 import type { Blast, BlastMode, BlastRecipient, ColumnMapping, ColumnMappingMode, Template } from '../types'
 import { v4 as uuid } from '../utils/uuid'
 import {
   Send, Play, RefreshCw, Upload, Image, Flame, Zap,
   X, ChevronDown, ChevronUp, Info, AlertTriangle, FileText, Users, Check,
-  BarChart2, Hash, List, Video, File as FileIcon, Globe, Loader2,
+  BarChart2, Hash, List, Video, File as FileIcon, Globe, Loader2, Smartphone,
 } from 'lucide-react'
 import { getTemplates, sendTextMessage, sendTemplateMessage, uploadMedia, getTemplateAnalytics } from '../api/whatsapp'
 import { onWSMessage } from '../api/websocket'
 import { format } from 'date-fns'
 import { ptBR } from 'date-fns/locale'
+import ChipCampaignPanel, { type ChipCampaignPanelHandle } from './dispatcher/ChipCampaignPanel'
 
 // ═══════════════════════════════════════════════════════════════════
 // UTILITIES
@@ -1779,11 +1781,57 @@ async function executeBlast(
 // DISPATCHER PAGE
 // ═══════════════════════════════════════════════════════════════════
 
+// ── Type chooser (Oficial vs Não Oficial) ──────────────────────────────────────
+
+function CampaignTypeChooser({
+  showUnofficial, onClose, onPickOfficial, onPickUnofficial,
+}: { showUnofficial: boolean; onClose: () => void; onPickOfficial: () => void; onPickUnofficial: () => void }) {
+  return (
+    <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+      <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-md">
+        <div className="flex items-center justify-between p-5 border-b border-gray-800">
+          <h2 className="font-semibold text-white">Nova Campanha</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-white"><X size={16} /></button>
+        </div>
+        <div className="p-5 space-y-3">
+          <p className="text-xs text-gray-400 mb-1">Escolha por qual API disparar:</p>
+          <button onClick={onPickOfficial}
+            className="w-full flex items-start gap-3 p-4 bg-gray-800 hover:bg-gray-750 border border-gray-700 hover:border-indigo-600 rounded-xl text-left transition-colors">
+            <div className="w-9 h-9 rounded-lg bg-indigo-900/50 flex items-center justify-center shrink-0">
+              <Globe size={16} className="text-indigo-400" />
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-white">API Oficial (Meta Cloud API)</p>
+              <p className="text-xs text-gray-400 mt-0.5">Campanha com CSV, mapeamento de variáveis e templates aprovados.</p>
+            </div>
+          </button>
+          {showUnofficial && (
+            <button onClick={onPickUnofficial}
+              className="w-full flex items-start gap-3 p-4 bg-gray-800 hover:bg-gray-750 border border-gray-700 hover:border-green-600 rounded-xl text-left transition-colors">
+              <div className="w-9 h-9 rounded-lg bg-green-900/50 flex items-center justify-center shrink-0">
+                <Smartphone size={16} className="text-green-400" />
+              </div>
+              <div>
+                <p className="text-sm font-semibold text-white">API Não Oficial (Chips)</p>
+                <p className="text-xs text-gray-400 mt-0.5">Disparo em massa via chips conectados por QR Code, com rotação e proxies.</p>
+              </div>
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function Dispatcher() {
   const { blasts, addBlast, updateBlast, channels, contacts, templates } = useStore()
+  const { can } = useAuthStore()
   const [modal, setModal] = useState(false)
   const [reportBlastId, setReportBlastId] = useState<string | null>(null)
   const [expandedLog, setExpandedLog] = useState<string | null>(null)
+  const [chooserOpen, setChooserOpen] = useState(false)
+  const chipCampaignRef = useRef<ChipCampaignPanelHandle>(null)
+  const canUnofficial = can('chipsPage')
 
   const reportBlast = blasts.find(b => b.id === reportBlastId)
 
@@ -1838,7 +1886,7 @@ export default function Dispatcher() {
           <h1 className="text-xl font-semibold text-white">Disparador em Massa</h1>
           <p className="text-sm text-gray-400 mt-1">CSV, mapeamento de variáveis, deduplicação e delay inteligente</p>
         </div>
-        <button onClick={() => setModal(true)}
+        <button onClick={() => setChooserOpen(true)}
           className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-sm text-white rounded-lg">
           <Send size={15} /> Nova Campanha
         </button>
@@ -1848,7 +1896,7 @@ export default function Dispatcher() {
         <div className="border-2 border-dashed border-gray-800 rounded-xl p-12 text-center">
           <Send size={32} className="text-gray-700 mx-auto mb-3" />
           <p className="text-gray-400 mb-4">Nenhuma campanha criada</p>
-          <button onClick={() => setModal(true)} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-sm text-white rounded-lg">
+          <button onClick={() => setChooserOpen(true)} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-sm text-white rounded-lg">
             Criar Campanha
           </button>
         </div>
@@ -1956,6 +2004,21 @@ export default function Dispatcher() {
             )
           })}
         </div>
+      )}
+
+      {canUnofficial && (
+        <div className="mt-10 pt-8 border-t border-gray-800">
+          <ChipCampaignPanel ref={chipCampaignRef} />
+        </div>
+      )}
+
+      {chooserOpen && (
+        <CampaignTypeChooser
+          showUnofficial={canUnofficial}
+          onClose={() => setChooserOpen(false)}
+          onPickOfficial={() => { setChooserOpen(false); setModal(true) }}
+          onPickUnofficial={() => { setChooserOpen(false); chipCampaignRef.current?.open() }}
+        />
       )}
 
       {modal && <BlastModal onClose={() => setModal(false)} onSave={b => { addBlast(b); setModal(false) }} />}

@@ -1,11 +1,13 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useStore } from '../store'
+import { useAuthStore } from '../store/auth'
 import type { Channel, ProxyConfig } from '../types'
 import {
   Plus, Trash2, RefreshCw, Copy, CheckCircle, XCircle, Edit2, Shield,
-  ChevronDown, ChevronUp, Loader2, Download, Zap, X
+  ChevronDown, ChevronUp, Loader2, Download, Zap, X, Smartphone, Globe
 } from 'lucide-react'
 import { v4 as uuid } from '../utils/uuid'
+import ChipConnections, { type ChipConnectionsHandle } from './channels/ChipConnections'
 
 const defaultProxy: ProxyConfig = {
   enabled: false, type: 'http', host: '', port: 8080, username: '', password: '',
@@ -98,6 +100,48 @@ function ProxySection({ proxy, onChange }: { proxy: ProxyConfig; onChange: (p: P
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+// ── Type chooser (Oficial vs Não Oficial) ──────────────────────────────────────
+
+function ChannelTypeChooser({
+  showUnofficial, onClose, onPickOfficial, onPickUnofficial,
+}: { showUnofficial: boolean; onClose: () => void; onPickOfficial: () => void; onPickUnofficial: () => void }) {
+  return (
+    <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+      <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-md">
+        <div className="flex items-center justify-between p-5 border-b border-gray-800">
+          <h2 className="font-semibold text-white">Novo Canal</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-white"><X size={16} /></button>
+        </div>
+        <div className="p-5 space-y-3">
+          <p className="text-xs text-gray-400 mb-1">Escolha como este canal vai se conectar:</p>
+          <button onClick={onPickOfficial}
+            className="w-full flex items-start gap-3 p-4 bg-gray-800 hover:bg-gray-750 border border-gray-700 hover:border-indigo-600 rounded-xl text-left transition-colors">
+            <div className="w-9 h-9 rounded-lg bg-indigo-900/50 flex items-center justify-center shrink-0">
+              <Globe size={16} className="text-indigo-400" />
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-white">API Oficial (Meta Cloud API)</p>
+              <p className="text-xs text-gray-400 mt-0.5">Conecta via Phone Number ID, WABA e Access Token da Meta.</p>
+            </div>
+          </button>
+          {showUnofficial && (
+            <button onClick={onPickUnofficial}
+              className="w-full flex items-start gap-3 p-4 bg-gray-800 hover:bg-gray-750 border border-gray-700 hover:border-green-600 rounded-xl text-left transition-colors">
+              <div className="w-9 h-9 rounded-lg bg-green-900/50 flex items-center justify-center shrink-0">
+                <Smartphone size={16} className="text-green-400" />
+              </div>
+              <div>
+                <p className="text-sm font-semibold text-white">API Não Oficial (QR Code)</p>
+                <p className="text-xs text-gray-400 mt-0.5">Conecta um número via WhatsApp Web, escaneando um QR Code.</p>
+              </div>
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   )
 }
@@ -473,12 +517,16 @@ function ImportWabaModal({
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export default function Channels() {
-  const { channels, addChannel, updateChannel, removeChannel } = useStore()
+  const { channels, addChannel, updateChannel, removeChannel, removeChipData } = useStore()
+  const { can } = useAuthStore()
   const [modal, setModal] = useState<{ open: boolean; ch?: Channel }>({ open: false })
   const [verifyingId, setVerifyingId] = useState<string | null>(null)
   const [qualityMap, setQualityMap] = useState<Record<string, string>>({})
   const [registerCh, setRegisterCh] = useState<Channel | null>(null)
   const [importCh, setImportCh] = useState<Channel | null>(null)
+  const [chooserOpen, setChooserOpen] = useState(false)
+  const chipConnectionsRef = useRef<ChipConnectionsHandle>(null)
+  const canUnofficial = can('chipsPage')
 
   // Sync channels to backend so IATab and other backend-fetchers always see the latest
   useEffect(() => {
@@ -548,7 +596,7 @@ export default function Channels() {
           <h1 className="text-xl font-semibold text-white">Canais WhatsApp</h1>
           <p className="text-sm text-gray-400 mt-1">Gerencie suas contas WhatsApp Business API</p>
         </div>
-        <button onClick={() => setModal({ open: true })}
+        <button onClick={() => setChooserOpen(true)}
           className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-sm text-white rounded-lg">
           <Plus size={16} /> Novo Canal
         </button>
@@ -557,7 +605,7 @@ export default function Channels() {
       {channels.length === 0 ? (
         <div className="border-2 border-dashed border-gray-800 rounded-xl p-12 text-center">
           <p className="text-gray-400 mb-2">Nenhum canal configurado</p>
-          <button onClick={() => setModal({ open: true })}
+          <button onClick={() => setChooserOpen(true)}
             className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-sm text-white rounded-lg">
             Adicionar Canal
           </button>
@@ -664,6 +712,21 @@ export default function Channels() {
             )
           })}
         </div>
+      )}
+
+      {canUnofficial && (
+        <div className="mt-10 pt-8 border-t border-gray-800">
+          <ChipConnections ref={chipConnectionsRef} removeChipData={removeChipData} />
+        </div>
+      )}
+
+      {chooserOpen && (
+        <ChannelTypeChooser
+          showUnofficial={canUnofficial}
+          onClose={() => setChooserOpen(false)}
+          onPickOfficial={() => { setChooserOpen(false); setModal({ open: true }) }}
+          onPickUnofficial={() => { setChooserOpen(false); chipConnectionsRef.current?.openAddModal() }}
+        />
       )}
 
       {modal.open && (
