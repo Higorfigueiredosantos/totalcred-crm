@@ -886,17 +886,25 @@ async function initChip(chipId) {
     })
 
     client.on('message_ack', (msg, ack) => {
+      // Em algumas versões/eventos do whatsapp-web.js, msg.id já vem como a
+      // própria string serializada (sem o wrapper { _serialized }) — cobre os
+      // dois formatos para não perder o id do ack.
+      const msgId =
+        (typeof msg?.id === 'string' ? msg.id : msg?.id?._serialized) ||
+        (typeof msg?._data?.id === 'string' ? msg._data.id : msg?._data?.id?._serialized) ||
+        null
+
       chipCampaignState.tickMonitor.recordAck(ack)
       const summary = chipCampaignState.tickMonitor.getSummary()
-      broadcast('tick_update', { ack, msgId: msg.id._serialized, ...summary })
+      broadcast('tick_update', { ack, msgId, ...summary })
       if (summary.riskLevel === 'CRITICO') {
         broadcast('ban_alert', { level: 'CRITICO', message: '⚠️ RISCO CRÍTICO! Taxa de entrega baixíssima. Pause a campanha!' })
       }
       // Atualiza status visual da mensagem no CRM
       const ackStatusMap = { '-1': 'failed', '1': 'sent', '2': 'delivered', '3': 'read' }
       const status = ackStatusMap[String(ack)]
-      console.log(`[Chip ${chipId}] message_ack ack=${ack} status=${status} id=${msg.id._serialized}`)
-      if (status) broadcast('chip_ack', { msgId: msg.id._serialized, status })
+      console.log(`[Chip ${chipId}] message_ack ack=${ack} status=${status} id=${msgId}`)
+      if (status && msgId) broadcast('chip_ack', { msgId, status })
     })
 
     client.on('message', (msg) => {
