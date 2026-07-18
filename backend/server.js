@@ -902,6 +902,7 @@ async function initChip(chipId) {
     })
 
     client.on('message', (msg) => {
+      console.log(`[Chip ${chipId}] DEBUG message event: fromMe=${msg.fromMe} from=${msg.from} author=${msg.author} id=${extractMsgId(msg)} body="${(msg.body || '').slice(0, 30)}"`)
       handleIncomingChipMessage(client, msg, chipId).catch(e => console.error('[Autobot] Error:', e.message))
     })
 
@@ -2224,6 +2225,7 @@ app.post('/api/send-message', async (req, res) => {
 
 app.post('/api/chips/send', async (req, res) => {
   const { chipId, to, message } = req.body
+  console.log(`[Chip ${chipId}] DEBUG /api/chips/send chamado to=${to} message="${(message || '').slice(0, 30)}"`)
   if (!chipId || !to || !message) return res.status(400).json({ error: 'chipId, to e message são obrigatórios' })
   const session = chipSessions[chipId]
   if (!session?.isReady || !session.client) return res.status(400).json({ error: `Chip "${chipId}" não está conectado` })
