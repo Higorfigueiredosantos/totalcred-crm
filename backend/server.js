@@ -887,10 +887,9 @@ async function initChip(chipId) {
 
     client.on('message_ack', (msg, ack) => {
       const msgId = extractMsgId(msg)
-      if (!msgId) {
-        try {
-          console.log(`[Chip ${chipId}] DEBUG raw msg.id=${JSON.stringify(msg.id)} keys=${Object.keys(msg || {}).join(',')} _data.id=${JSON.stringify(msg._data?.id)}`)
-        } catch (e) { console.log(`[Chip ${chipId}] DEBUG dump falhou:`, e.message) }
+      if (msg.fromMe && msgId) {
+        const remote = (typeof msg?.id === 'object' ? msg.id.remote : null) || msg?.to || null
+        resolveSendAck(chipId, remote, msgId)
       }
 
       chipCampaignState.tickMonitor.recordAck(ack)
@@ -1016,12 +1015,7 @@ function extractMsgId(msg) {
 async function sendChipText(client, chatId, text) {
   for (let i = 0; i < 3; i++) {
     try {
-      const result = await client.sendMessage(chatId, text)
-      if (result) return result
-      // sendMessage às vezes resolve sem devolver o objeto da mensagem
-      // (observado em sessões com LID) — busca a mensagem recém-enviada
-      // direto no chat como alternativa, pra não perder o id.
-      return await fetchLastSentMessage(client, chatId)
+      return await client.sendMessage(chatId, text)
     } catch (e) {
       const msg = (e.message || '').toLowerCase()
       const retry = msg.includes('timeout') || msg.includes('detached frame') || msg.includes('target closed') || msg.includes('session closed') || msg === 't'
@@ -1031,14 +1025,26 @@ async function sendChipText(client, chatId, text) {
   }
 }
 
-async function fetchLastSentMessage(client, chatId) {
-  try {
-    const chat = await client.getChatById(chatId)
-    const recent = await chat.fetchMessages({ limit: 5 })
-    return [...recent].reverse().find(m => m.fromMe) || null
-  } catch (_) {
-    return null
-  }
+// client.sendMessage() às vezes resolve sem devolver o objeto da mensagem
+// (observado em sessões com LID), sem lançar erro — a mensagem é enviada de
+// verdade, só não temos o id na hora. Como fallback, esperamos pelo próprio
+// evento message_ack dessa conversa (que sempre chega com o id certo, ~200-
+// 300ms depois) em vez de tentar buscar de volta no chat.
+const pendingSendAcks = new Map() // `${chipId}:${chatId}` -> resolve(msgId)
+
+function waitForSendAck(chipId, chatId, timeoutMs = 4000) {
+  return new Promise(resolve => {
+    const key = `${chipId}:${chatId}`
+    const timer = setTimeout(() => { pendingSendAcks.delete(key); resolve(null) }, timeoutMs)
+    pendingSendAcks.set(key, (id) => { clearTimeout(timer); pendingSendAcks.delete(key); resolve(id) })
+  })
+}
+
+function resolveSendAck(chipId, chatId, msgId) {
+  if (!chatId || !msgId) return
+  const key = `${chipId}:${chatId}`
+  const resolve = pendingSendAcks.get(key)
+  if (resolve) resolve(msgId)
 }
 
 // ── Humanization ──────────────────────────────────────────────────────────────
@@ -2217,7 +2223,7 @@ app.post('/api/send-message', async (req, res) => {
       let chatId = to.includes('@') ? to : formatNumber(to)
       const convId = conversationId || getConvId(id, chatId)
       const msg = await sendChipText(session.client, chatId, message)
-      const msgId = extractMsgId(msg)
+      const msgId = extractMsgId(msg) || await waitForSendAck(id, chatId)
       fireWebhooks('message_sent', { chipId: id, to: chatId, message, msgId, conversationId: convId })
       res.json({ ok: true, msgId })
       setTimeout(() => broadcast('chip_outbound', { chipId: id, to: chatId, message, msgId, type: 'text', timestamp: Date.now(), conversationId: convId }), 300)
@@ -2262,12 +2268,7 @@ app.post('/api/chips/send', async (req, res) => {
     let chatId = to.includes('@') ? to : formatNumber(to)
     const convId = getConvId(chipId, chatId)
     const msg = await sendChipText(session.client, chatId, message)
-    const msgId = extractMsgId(msg)
-    if (!msgId) {
-      try {
-        console.log(`[Chip ${chipId}] DEBUG send raw msg.id=${JSON.stringify(msg?.id)} keys=${Object.keys(msg || {}).join(',')} _data.id=${JSON.stringify(msg?._data?.id)}`)
-      } catch (e) { console.log(`[Chip ${chipId}] DEBUG send dump falhou:`, e.message) }
-    }
+    const msgId = extractMsgId(msg) || await waitForSendAck(chipId, chatId)
     fireWebhooks('message_sent', { chipId, to: chatId, message, msgId, conversationId: convId })
     res.json({ ok: true, msgId })
     // Broadcast após resposta HTTP para o frontend exibir a mensagem enviada externamente
@@ -2327,8 +2328,7 @@ app.post('/api/chips/send-media', upload.single('file'), async (req, res) => {
       if (caption) opts.caption = caption
       msg = await session.client.sendMessage(chatId, media, opts)
     }
-    if (!msg) msg = await fetchLastSentMessage(session.client, chatId)
-    const msgId = extractMsgId(msg)
+    const msgId = extractMsgId(msg) || await waitForSendAck(chipId, chatId)
     const outType = isAudio ? 'audio' : req.file.mimetype.startsWith('image/') ? 'image' : req.file.mimetype.startsWith('video/') ? 'video' : 'document'
     const convId = getConvId(chipId, chatId)
     fireWebhooks('message_sent', { chipId, to: chatId, msgId, conversationId: convId })
