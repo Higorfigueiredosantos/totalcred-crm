@@ -1376,7 +1376,19 @@ async function handleIncomingChipMessage(client, msg, chipId) {
 
   if (msg.hasMedia) {
     try {
-      const mediaData = await msg.downloadMedia()
+      // downloadMedia() ocasionalmente falha com um erro passageiro do
+      // contexto da página (ExecutionContext.evaluate) — tenta mais 2 vezes
+      // com um pequeno intervalo antes de desistir.
+      let mediaData = null
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          mediaData = await msg.downloadMedia()
+          break
+        } catch (e) {
+          if (attempt === 3) throw e
+          await sleep(1500)
+        }
+      }
       if (mediaData?.data) {
         const rawMime = mediaData.mimetype || 'application/octet-stream'
         const mime    = rawMime.split(';')[0].trim()
