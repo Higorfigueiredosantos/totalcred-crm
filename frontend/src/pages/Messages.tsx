@@ -406,13 +406,15 @@ export default function Messages() {
     const { chipId, to, message, msgId, type, mediaFileName, caption, timestamp, conversationId } = payload
     if (!chipId || !to) return
 
-    // Se o wamid já existe na store, foi enviado pela UI — apenas confirma status.
-    // Esse broadcast chega ~300ms depois da resposta HTTP do envio (para avisar
-    // outras abas/integrações externas); se ele vencer a corrida antes da própria
-    // aba que enviou processar a resposta e gravar o wamid, cai no fallback abaixo:
-    // casa com a mensagem otimista ainda "sending" da mesma conversa (sem depender
-    // de timing), evitando duplicar a mensagem e garantindo que o wamid seja
-    // gravado para os ✓✓ de entrega/leitura funcionarem.
+    // Se o wamid já existe na store, foi enviado pela UI — só garante que o
+    // wamid fique gravado (nunca mexe no status: esse broadcast chega ~300ms
+    // depois da resposta HTTP, de propósito, pra avisar outras abas/
+    // integrações externas — por essa mesma demora, os eventos de entrega/
+    // leitura (chip_ack) costumam chegar primeiro, e sobrescrever o status
+    // aqui apagaria esse progresso, voltando a mensagem pra "enviado").
+    // Se ainda não existir localmente, cai no fallback: casa com a mensagem
+    // otimista ainda "sending" da mesma conversa (sem depender de timing),
+    // evitando duplicar a mensagem.
     if (msgId) {
       let existing = messagesRef.current.find(m => m.wamid === msgId)
       if (!existing) {
@@ -421,7 +423,10 @@ export default function Messages() {
           (conversationId ? m.conversationId === conversationId : m.channelId === CHIP_PREFIX + chipId)
         )
       }
-      if (existing) { updateMessage(existing.id, { status: 'sent', wamid: msgId }); return }
+      if (existing) {
+        if (!existing.wamid) updateMessage(existing.id, { wamid: msgId })
+        return
+      }
     }
 
     const channelId = CHIP_PREFIX + chipId
