@@ -7,12 +7,15 @@ import {
   Send, Play, RefreshCw, Upload, Image, Flame, Zap,
   X, ChevronDown, ChevronUp, Info, AlertTriangle, FileText, Users, Check,
   BarChart2, Hash, List, Video, File as FileIcon, Globe, Loader2, Smartphone,
+  Pause, Square,
 } from 'lucide-react'
 import { getTemplates, sendTextMessage, sendTemplateMessage, uploadMedia, getTemplateAnalytics } from '../api/whatsapp'
 import { onWSMessage } from '../api/websocket'
 import { format } from 'date-fns'
 import { ptBR } from 'date-fns/locale'
-import ChipCampaignPanel, { type ChipCampaignPanelHandle } from './dispatcher/ChipCampaignPanel'
+import { useChipCampaigns } from './dispatcher/useChipCampaigns'
+import ChipCampaignWizardModal from './dispatcher/ChipCampaignWizardModal'
+import ChipCampaignReport from './dispatcher/ChipCampaignReport'
 
 // ═══════════════════════════════════════════════════════════════════
 // UTILITIES
@@ -1830,10 +1833,13 @@ export default function Dispatcher() {
   const [reportBlastId, setReportBlastId] = useState<string | null>(null)
   const [expandedLog, setExpandedLog] = useState<string | null>(null)
   const [chooserOpen, setChooserOpen] = useState(false)
-  const chipCampaignRef = useRef<ChipCampaignPanelHandle>(null)
+  const [chipWizardOpen, setChipWizardOpen] = useState(false)
+  const [chipReportItemId, setChipReportItemId] = useState<string | null>(null)
   const canUnofficial = can('chipsPage')
+  const chipCampaigns = useChipCampaigns()
 
   const reportBlast = blasts.find(b => b.id === reportBlastId)
+  const reportChipItem = chipCampaigns.items.find(i => i.id === chipReportItemId)
 
   async function runBlast(blast: Blast) {
     if (runningBlasts.has(blast.id)) return
@@ -1892,7 +1898,7 @@ export default function Dispatcher() {
         </button>
       </div>
 
-      {blasts.length === 0 ? (
+      {blasts.length === 0 && chipCampaigns.items.length === 0 ? (
         <div className="border-2 border-dashed border-gray-800 rounded-xl p-12 text-center">
           <Send size={32} className="text-gray-700 mx-auto mb-3" />
           <p className="text-gray-400 mb-4">Nenhuma campanha criada</p>
@@ -1902,6 +1908,99 @@ export default function Dispatcher() {
         </div>
       ) : (
         <div className="space-y-3">
+          {chipCampaigns.items.map(item => {
+            const isRunning = item.status === 'running'
+            const progress = item.stats.total > 0
+              ? Math.round(((item.stats.success + item.stats.failed) / item.stats.total) * 100)
+              : 0
+
+            return (
+              <div key={item.id} className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+                <div className="p-5">
+                  <div className="flex items-start justify-between mb-4">
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <p className="font-medium text-white">{item.name}</p>
+                        <span className="flex items-center gap-1 text-xs px-2 py-0.5 bg-green-900/30 text-green-400 rounded-full">
+                          <Smartphone size={10} /> Via Chips
+                        </span>
+                        {isRunning && item.paused && (
+                          <span className="text-xs px-2 py-0.5 bg-yellow-900/30 text-yellow-400 rounded-full">Pausado</span>
+                        )}
+                      </div>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        {item.chipIds.length > 0 ? `${item.chipIds.length} chip(s)` : 'Chips em rotação'}
+                        {` · ${new Date(item.createdAt).toLocaleString('pt-BR')}`}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className={`text-xs px-2 py-1 rounded-full font-medium ${isRunning ? statusStyle.running : statusStyle.done}`}>
+                        {isRunning ? 'Executando' : 'Concluído'}
+                      </span>
+                      <button onClick={() => setChipReportItemId(item.id)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-xs text-gray-300 rounded-lg border border-gray-700"
+                        title="Relatório detalhado">
+                        <BarChart2 size={12} /> Relatório
+                      </button>
+                      {isRunning && (
+                        <>
+                          <button onClick={chipCampaigns.togglePause}
+                            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs text-white rounded-lg ${item.paused ? 'bg-green-700 hover:bg-green-600' : 'bg-yellow-700 hover:bg-yellow-600'}`}>
+                            {item.paused ? <><Play size={12} /> Retomar</> : <><Pause size={12} /> Pausar</>}
+                          </button>
+                          <button onClick={chipCampaigns.stop}
+                            className="flex items-center gap-1.5 px-3 py-1.5 bg-red-800 hover:bg-red-700 text-xs text-white rounded-lg">
+                            <Square size={12} /> Parar
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-4 sm:grid-cols-8 gap-2 mb-3">
+                    {[
+                      { label: 'Total',     value: item.stats.total,   color: 'text-gray-300' },
+                      { label: 'Enviados',  value: item.stats.success, color: 'text-blue-400' },
+                      { label: 'Falhas',    value: item.stats.failed,  color: 'text-red-400' },
+                    ].map(s => (
+                      <div key={s.label} className="bg-gray-800 rounded-lg p-2 text-center col-span-2 sm:col-span-1">
+                        <p className={`text-lg font-bold ${s.color}`}>{s.value}</p>
+                        <p className="text-[10px] text-gray-500">{s.label}</p>
+                      </div>
+                    ))}
+                  </div>
+
+                  {item.stats.total > 0 && (
+                    <div className="mb-2">
+                      <div className="flex justify-between text-xs text-gray-500 mb-1">
+                        <span>{isRunning ? 'Enviando...' : 'Concluído'}</span>
+                        <span>{progress}%</span>
+                      </div>
+                      <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                        <div className={`h-full transition-all duration-500 ${isRunning ? 'bg-blue-500' : 'bg-green-500'}`}
+                          style={{ width: `${progress}%` }} />
+                      </div>
+                    </div>
+                  )}
+
+                  {item.log.length > 0 && (
+                    <button onClick={() => setExpandedLog(expandedLog === item.id ? null : item.id)}
+                      className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-300 mt-2">
+                      {expandedLog === item.id ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                      {expandedLog === item.id ? 'Ocultar log' : `Ver log (${item.log.length} eventos)`}
+                    </button>
+                  )}
+                </div>
+
+                {expandedLog === item.id && item.log.length > 0 && (
+                  <div className="border-t border-gray-800 bg-gray-950 p-3 max-h-48 overflow-y-auto">
+                    {item.log.map((line, i) => <p key={i} className="text-xs font-mono mb-0.5 text-gray-500">{line}</p>)}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+
           {[...blasts].reverse().map(blast => {
             const isRunning = runningBlasts.has(blast.id)
             const progress = blast.stats.total > 0
@@ -2006,18 +2105,32 @@ export default function Dispatcher() {
         </div>
       )}
 
-      {canUnofficial && (
-        <div className="mt-10 pt-8 border-t border-gray-800">
-          <ChipCampaignPanel ref={chipCampaignRef} />
-        </div>
-      )}
-
       {chooserOpen && (
         <CampaignTypeChooser
           showUnofficial={canUnofficial}
           onClose={() => setChooserOpen(false)}
           onPickOfficial={() => { setChooserOpen(false); setModal(true) }}
-          onPickUnofficial={() => { setChooserOpen(false); chipCampaignRef.current?.open() }}
+          onPickUnofficial={() => { setChooserOpen(false); setChipWizardOpen(true) }}
+        />
+      )}
+
+      {chipWizardOpen && (
+        <ChipCampaignWizardModal
+          onClose={() => setChipWizardOpen(false)}
+          onStart={chipCampaigns.startCampaign}
+        />
+      )}
+
+      {reportChipItem && (
+        <ChipCampaignReport
+          item={reportChipItem}
+          recalculating={chipCampaigns.recalculatingId === reportChipItem.id}
+          onClose={() => setChipReportItemId(null)}
+          onRecalc={chipCampaigns.recalcEngagement}
+          onExportCSV={item => chipCampaigns.exportResultsCSV(item.results, `${item.name || 'campanha'}.csv`)}
+          onDeleteHistory={reportChipItem.fromHistory ? chipCampaigns.deleteHistory : undefined}
+          onTogglePause={reportChipItem.status === 'running' ? chipCampaigns.togglePause : undefined}
+          onStop={reportChipItem.status === 'running' ? chipCampaigns.stop : undefined}
         />
       )}
 

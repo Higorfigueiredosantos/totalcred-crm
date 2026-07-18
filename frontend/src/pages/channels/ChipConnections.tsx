@@ -178,7 +178,7 @@ const ChipConnections = forwardRef<ChipConnectionsHandle, Props>(({ removeChipDa
           <p className="text-xs mt-1 text-gray-600">Clique em "Adicionar Chip" e escaneie o QR Code com o WhatsApp.</p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 min-[1600px]:grid-cols-2 gap-4">
           {chips.map(chip => (
             <div key={chip.id} className="bg-gray-800 rounded-xl border border-gray-700 p-4 flex flex-col gap-3">
               {/* Header */}

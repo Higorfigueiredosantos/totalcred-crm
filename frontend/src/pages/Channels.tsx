@@ -602,7 +602,10 @@ export default function Channels() {
         </button>
       </div>
 
-      {channels.length === 0 ? (
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-8 items-start">
+      <div>
+        <h2 className="text-base font-semibold text-white mb-4">Canais Oficiais</h2>
+        {channels.length === 0 ? (
         <div className="border-2 border-dashed border-gray-800 rounded-xl p-12 text-center">
           <p className="text-gray-400 mb-2">Nenhum canal configurado</p>
           <button onClick={() => setChooserOpen(true)}
@@ -611,7 +614,7 @@ export default function Channels() {
           </button>
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 min-[1600px]:grid-cols-2 gap-4">
           {channels.map(ch => {
             const q = qualityMeta(qualityMap[ch.id])
             return (
@@ -713,12 +716,14 @@ export default function Channels() {
           })}
         </div>
       )}
+      </div>
 
       {canUnofficial && (
-        <div className="mt-10 pt-8 border-t border-gray-800">
+        <div>
           <ChipConnections ref={chipConnectionsRef} removeChipData={removeChipData} />
         </div>
       )}
+      </div>
 
       {chooserOpen && (
         <ChannelTypeChooser
