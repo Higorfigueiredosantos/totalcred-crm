@@ -146,7 +146,7 @@ export default function Messages() {
   const [showEmoji, setShowEmoji]         = useState(false)
   const [groupMsgMenu, setGroupMsgMenu]   = useState<{ msgId: string; sender: string } | null>(null)
   const [showCallMenu, setShowCallMenu]   = useState(false)
-  const [callNotice, setCallNotice]       = useState<'voice' | 'video' | null>(null)
+  const [callLoading, setCallLoading]     = useState<'voice' | 'video' | null>(null)
 
   // ── Chips desconectados (sessão caiu / precisa reescanear QR) ──────────────
   // Enquanto isso, mensagens do WhatsApp desse chip não chegam ao CRM.
@@ -916,6 +916,50 @@ export default function Messages() {
     }
   }
 
+  // ── Chamada de voz/vídeo (chip) ─────────────────────────────────────────────
+  // Gera um link do WhatsApp (call.whatsapp.com) via whatsapp-web.js, envia
+  // pro contato como mensagem e abre numa nova aba pra quem está no CRM entrar.
+  async function startCall(callType: 'voice' | 'video') {
+    setShowCallMenu(false)
+    if (!activeChipId || !activeConv || !activeContact) return
+    setSendError(null)
+    setCallLoading(callType)
+    try {
+      const r = await apiFetch('/api/chips/call-link', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chipId: activeChipId, callType })
+      })
+      const d = await r.json()
+      if (!r.ok || !d.link) throw new Error(d.error || 'Não foi possível gerar o link da chamada')
+
+      const msgId = uuid()
+      const label = callType === 'video' ? '🎥 Chamada de vídeo' : '📞 Chamada de voz'
+      const text = `${label}\n${d.link}`
+      const msg: Message = {
+        id: msgId, conversationId: activeConv.id,
+        contactId: activeConv.contactId, channelId: activeConv.channelId,
+        direction: 'outbound', type: 'text', text,
+        status: 'sending', timestamp: new Date().toISOString(),
+      }
+      addMessage(msg)
+      updateConversation(activeConv.id, { lastMessage: text, lastMessageAt: msg.timestamp })
+
+      const sendR = await apiFetch('/api/chips/send', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chipId: activeChipId, to: activeContact.phone, message: text })
+      })
+      const sendD = await sendR.json()
+      if (!sendR.ok) throw new Error(sendD.error || 'Erro ao enviar o link da chamada')
+      updateMessage(msgId, { status: 'sent', wamid: sendD.msgId })
+
+      window.open(d.link, '_blank', 'noopener,noreferrer')
+    } catch (e: any) {
+      setSendError(e.message)
+    } finally {
+      setCallLoading(null)
+    }
+  }
+
   function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
@@ -1153,19 +1197,19 @@ export default function Messages() {
               <div className="flex gap-2">
                 {activeChipId && !isGroupConv && (
                   <div className="relative" ref={callMenuRef}>
-                    <button onClick={() => setShowCallMenu(v => !v)}
-                      className="flex items-center gap-1 px-3 py-1.5 text-xs bg-gray-800 text-gray-300 hover:bg-gray-700 rounded-lg">
-                      <Phone size={12} /> Ligar
+                    <button onClick={() => setShowCallMenu(v => !v)} disabled={!!callLoading}
+                      className="flex items-center gap-1 px-3 py-1.5 text-xs bg-gray-800 text-gray-300 hover:bg-gray-700 rounded-lg disabled:opacity-50">
+                      <Phone size={12} /> {callLoading ? 'Gerando link…' : 'Ligar'}
                     </button>
                     {showCallMenu && (
                       <div className="absolute right-0 top-9 bg-gray-900 border border-gray-700 rounded-lg shadow-xl z-20 py-1 min-w-[180px]">
                         <button
-                          onClick={() => { setShowCallMenu(false); setCallNotice('voice') }}
+                          onClick={() => startCall('voice')}
                           className="w-full text-left px-3 py-2 text-xs text-white hover:bg-gray-800 flex items-center gap-2">
                           <Phone size={12} /> Ligação de voz
                         </button>
                         <button
-                          onClick={() => { setShowCallMenu(false); setCallNotice('video') }}
+                          onClick={() => startCall('video')}
                           className="w-full text-left px-3 py-2 text-xs text-white hover:bg-gray-800 flex items-center gap-2">
                           <Video size={12} /> Ligação de vídeo
                         </button>
@@ -1624,29 +1668,6 @@ export default function Messages() {
         </>
       )}
       </div>
-
-      {/* ── Aviso de ligação (voz/vídeo) ainda não suportada pela lib ────────── */}
-      {callNotice && (
-        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center" onClick={() => setCallNotice(null)}>
-          <div className="bg-gray-900 border border-gray-700 rounded-xl p-5 max-w-sm mx-4" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center gap-2 mb-2">
-              {callNotice === 'video' ? <Video size={16} className="text-indigo-400" /> : <Phone size={16} className="text-indigo-400" />}
-              <p className="text-sm font-semibold text-white">
-                Ligação de {callNotice === 'video' ? 'vídeo' : 'voz'} — em breve
-              </p>
-            </div>
-            <p className="text-xs text-gray-400 leading-relaxed">
-              O WhatsApp Web ganhou chamadas de voz e vídeo pelo navegador, mas a biblioteca whatsapp-web.js
-              (usada pelos Chips) ainda não expõe suporte para iniciar chamadas — é um recurso pendente na lib.
-              Assim que houver suporte, o botão "Ligar" passa a discar direto por aqui.
-            </p>
-            <button onClick={() => setCallNotice(null)}
-              className="mt-4 w-full py-1.5 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg">
-              Entendi
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

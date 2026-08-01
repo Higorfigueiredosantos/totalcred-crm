@@ -1687,6 +1687,28 @@ app.post('/api/chips/reconnect', async (req, res) => {
   res.json({ ok: true })
 })
 
+// Gera um link de chamada de voz/vídeo do WhatsApp (call.whatsapp.com) usando
+// a sessão já conectada do chip. Quem clicar no link entra na chamada pela
+// própria interface do WhatsApp — não passa pelo Chrome headless do servidor.
+app.post('/api/chips/call-link', async (req, res) => {
+  const { chipId, callType } = req.body
+  if (!chipId || !['voice', 'video'].includes(callType)) {
+    return res.status(400).json({ error: "chipId e callType ('voice' ou 'video') são obrigatórios" })
+  }
+  const session = chipSessions[chipId]
+  if (!session?.client || !session.isReady) {
+    return res.status(400).json({ error: 'Chip não está conectado' })
+  }
+  try {
+    const link = await session.client.createCallLink(new Date(), callType)
+    if (!link) return res.status(502).json({ error: 'WhatsApp não retornou o link da chamada' })
+    res.json({ link })
+  } catch (e) {
+    console.error(`[Chip ${chipId}] Erro ao gerar link de chamada:`, e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
 // ── Chip Campaign Routes ──────────────────────────────────────────────────────
 
 app.post('/api/chip-campaign/start', (req, res) => {
