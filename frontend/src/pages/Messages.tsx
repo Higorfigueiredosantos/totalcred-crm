@@ -1,6 +1,8 @@
 import { Fragment, useEffect, useRef, useState, useCallback, useMemo } from 'react'
+import { Link } from 'react-router-dom'
 import { useStore } from '../store'
 import { useAuthStore } from '../store/auth'
+import { useChips } from '../hooks/useChips'
 import type { Message } from '../types'
 import { v4 as uuid } from '../utils/uuid'
 import { format, isToday, isYesterday, isSameDay } from 'date-fns'
@@ -145,6 +147,14 @@ export default function Messages() {
   const [groupMsgMenu, setGroupMsgMenu]   = useState<{ msgId: string; sender: string } | null>(null)
   const [showCallMenu, setShowCallMenu]   = useState(false)
   const [callNotice, setCallNotice]       = useState<'voice' | 'video' | null>(null)
+
+  // ── Chips desconectados (sessão caiu / precisa reescanear QR) ──────────────
+  // Enquanto isso, mensagens do WhatsApp desse chip não chegam ao CRM.
+  const { chips } = useChips()
+  const disconnectedChips = useMemo(
+    () => chips.filter(c => c.status === 'qr' || c.status === 'disconnected' || c.status === 'error' || c.status === 'auth_failure'),
+    [chips]
+  )
 
   const messagesRef       = useRef(messages)
   useEffect(() => { messagesRef.current = messages }, [messages])
@@ -935,7 +945,24 @@ export default function Messages() {
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
-    <div className="flex h-full overflow-hidden">
+    <div className="flex flex-col h-full overflow-hidden">
+
+      {/* ── Aviso: chip(s) desconectado(s) — mensagens não estão chegando ────── */}
+      {disconnectedChips.length > 0 && (
+        <div className="shrink-0 flex items-center gap-2 px-4 py-2 bg-amber-900/40 border-b border-amber-700/50 text-xs text-amber-300">
+          <AlertCircle size={13} className="shrink-0" />
+          <span>
+            {disconnectedChips.length === 1
+              ? `Chip "${disconnectedChips[0].id}" desconectado — novas mensagens desse número não estão chegando ao CRM.`
+              : `${disconnectedChips.length} chips desconectados — novas mensagens desses números não estão chegando ao CRM.`}
+          </span>
+          <Link to="/channels" className="ml-auto shrink-0 underline hover:text-amber-200">
+            Reconectar em Canais
+          </Link>
+        </div>
+      )}
+
+      <div className="flex flex-1 overflow-hidden">
 
       {/* ── Filter side panel (Canais + Etiquetas) ──────────────────────────── */}
       <div className={`${filterPanelOpen ? 'w-44' : 'w-0'} transition-all duration-200 overflow-hidden shrink-0 border-r border-gray-800 bg-gray-900 flex flex-col`}>
@@ -1596,6 +1623,7 @@ export default function Messages() {
           )}
         </>
       )}
+      </div>
 
       {/* ── Aviso de ligação (voz/vídeo) ainda não suportada pela lib ────────── */}
       {callNotice && (

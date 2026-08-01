@@ -872,6 +872,7 @@ async function initChip(chipId) {
     })
 
     client.on('disconnected', (reason) => {
+      console.warn(`[Chip ${chipId}] Disconnected — reason: ${reason}`)
       chipSessions[chipId].isReady = false
       chipSessions[chipId].status = 'disconnected'
       broadcastChipsStatus()
