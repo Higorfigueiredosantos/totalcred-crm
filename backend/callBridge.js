@@ -99,16 +99,41 @@ async function dismissNoveltiesModal(page) {
 // que toca de verdade no aparelho do contato (sem link, sem mensagem).
 async function openChatAndCall(page, phone, callType) {
   const digits = String(phone).replace(/\D/g, '')
-  await page.goto(`https://web.whatsapp.com/send?phone=${digits}`, { waitUntil: 'networkidle2', timeout: 45000 })
+  const url = `https://web.whatsapp.com/send?phone=${digits}`
 
-  for (let i = 0; i < 15; i++) {
-    const loaded = await page.evaluate(() =>
-      !document.body.innerText.includes('Suas mensagens estão sendo baixadas')).catch(() => true)
-    if (loaded) break
-    await new Promise(r => setTimeout(r, 2000))
+  async function waitLoad() {
+    for (let i = 0; i < 15; i++) {
+      const loaded = await page.evaluate(() =>
+        !document.body.innerText.includes('Suas mensagens estão sendo baixadas')).catch(() => true)
+      if (loaded) break
+      await new Promise(r => setTimeout(r, 2000))
+    }
   }
+
+  await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 })
+  await waitLoad()
   await dismissNoveltiesModal(page)
   await new Promise(r => setTimeout(r, 1500))
+
+  // Numa sessão recém-clonada o popup de "Novidades" costuma aparecer nesse
+  // primeiro carregamento e engole a abertura automática da conversa do
+  // ?phone= — se não abriu (sem #main na tela), navega pro mesmo link de
+  // novo agora que o popup já não atrapalha mais.
+  let hasMain = await page.evaluate(() => !!document.querySelector('#main')).catch(() => false)
+  if (!hasMain) {
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 })
+    await waitLoad()
+    await new Promise(r => setTimeout(r, 1500))
+    hasMain = await page.evaluate(() => !!document.querySelector('#main')).catch(() => false)
+  }
+
+  if (!hasMain) {
+    const notOnWhatsapp = await page.evaluate(() =>
+      document.body.innerText.includes('não está no WhatsApp') ||
+      document.body.innerText.includes('is not on WhatsApp')).catch(() => false)
+    if (notOnWhatsapp) throw new Error('Esse número não tem WhatsApp')
+    throw new Error('Não consegui abrir a conversa desse contato no WhatsApp Web')
+  }
 
   const labels = callType === 'video'
     ? ['Ligação de vídeo', 'Video call']
