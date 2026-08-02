@@ -97,12 +97,15 @@ async function dismissNoveltiesModal(page) {
 // Abre a conversa do contato (via deep link) e clica no botão real de
 // ligação de voz/vídeo do cabeçalho — o mesmo botão que um humano clicaria,
 // que toca de verdade no aparelho do contato (sem link, sem mensagem).
-async function openChatAndCall(page, phone, callType) {
+async function openChatAndCall(page, phone, callType, onStatus) {
   const digits = String(phone).replace(/\D/g, '')
   const url = `https://web.whatsapp.com/send?phone=${digits}`
 
+  // Numa sessão recém-clonada o WhatsApp precisa re-sincronizar o histórico
+  // de mensagens do zero — em servidor sob carga isso às vezes passa dos 30s
+  // que eu dava antes, deixando a tela presa em "baixando mensagens".
   async function waitLoad() {
-    for (let i = 0; i < 15; i++) {
+    for (let i = 0; i < 45; i++) {
       const loaded = await page.evaluate(() =>
         !document.body.innerText.includes('Suas mensagens estão sendo baixadas')).catch(() => true)
       if (loaded) break
@@ -114,6 +117,7 @@ async function openChatAndCall(page, phone, callType) {
   // 'networkidle2' às vezes nunca é satisfeito e trava até estourar o timeout.
   // 'domcontentloaded' dispara de forma confiável; a prontidão real de fato é
   // conferida pelo polling em waitLoad()/checagem de #main logo depois.
+  onStatus?.('sincronizando')
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
   await waitLoad()
   await dismissNoveltiesModal(page)
@@ -201,10 +205,10 @@ class CallBridge {
     const context = this.browser.defaultBrowserContext()
     await context.overridePermissions('https://web.whatsapp.com', ['camera', 'microphone'])
 
-    onStatus?.('autenticando_ligando')
     this.callPage = await this.browser.newPage()
-    const called = await openChatAndCall(this.callPage, phone, this.callType)
+    const called = await openChatAndCall(this.callPage, phone, this.callType, onStatus)
     if (!called) throw new Error('Não encontrei o botão de ligação no cabeçalho da conversa')
+    onStatus?.('autenticando_ligando')
 
     // espera a discagem conectar
     await new Promise(r => setTimeout(r, 6000))

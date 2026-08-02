@@ -11,6 +11,7 @@ interface Props {
 function statusLabel(s: string) {
   switch (s) {
     case 'preparando': return 'Preparando...'
+    case 'sincronizando': return 'Sincronizando WhatsApp...'
     case 'autenticando_ligando': return 'Ligando...'
     case 'conectado': return 'Em chamada'
     case 'encerrada': return 'Chamada encerrada'
