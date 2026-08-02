@@ -22,9 +22,12 @@ const crypto = require('crypto')
 const multer = require('multer')
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } })
 
+const { CallBridge } = require('./callBridge')
+
 const app = express()
 const server = http.createServer(app)
 const wss = new WebSocketServer({ server, path: '/ws' })
+const wssCall = new WebSocketServer({ server, path: '/ws/call' })
 
 app.use(cors({ origin: process.env.NODE_ENV === 'production' ? true : ['http://localhost:5173', 'http://127.0.0.1:5173'] }))
 app.use(express.json({ limit: '50mb' }))
@@ -179,6 +182,59 @@ wss.on('connection', (ws) => {
   ws.on('error', () => { wsClients.delete(ws) })
   console.log(`[WS] Client conectado (${wsClients.size} total)`)
   ws.send(JSON.stringify({ type: 'chips_status', payload: getChipsList() }))
+})
+
+// ── WS dedicado à chamada embutida (vídeo/áudio da call bridge) ────────────────
+// Uma chamada por vez. Mensagens binárias do cliente = áudio do microfone.
+// Mensagens binárias do servidor = 1 byte de tipo (1=frame de vídeo JPEG,
+// 2=chunk de áudio PCM) + payload.
+let activeCallBridge = null
+
+wssCall.on('connection', (ws) => {
+  let bridge = null
+
+  ws.on('message', async (data, isBinary) => {
+    if (isBinary) { bridge?.writeMic(data); return }
+
+    let msg
+    try { msg = JSON.parse(data.toString()) } catch (_) { return }
+
+    if (msg.type === 'start') {
+      if (activeCallBridge) {
+        ws.send(JSON.stringify({ type: 'error', error: 'Já existe uma chamada em andamento' }))
+        return
+      }
+      if (!msg.chipId || !msg.link) {
+        ws.send(JSON.stringify({ type: 'error', error: 'chipId e link são obrigatórios' }))
+        return
+      }
+      bridge = new CallBridge(msg.chipId, msg.callType)
+      activeCallBridge = bridge
+      try {
+        await bridge.start(msg.link, {
+          onVideoFrame: buf => { if (ws.readyState === 1) ws.send(Buffer.concat([Buffer.from([1]), buf])) },
+          onAudioChunk: buf => { if (ws.readyState === 1) ws.send(Buffer.concat([Buffer.from([2]), buf])) },
+          onStatus: status => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'status', status })) },
+        })
+      } catch (e) {
+        console.error('[CallBridge] Erro ao iniciar:', e.message)
+        ws.send(JSON.stringify({ type: 'error', error: e.message }))
+        await bridge.stop().catch(() => {})
+        if (activeCallBridge === bridge) activeCallBridge = null
+        bridge = null
+      }
+    } else if (msg.type === 'stop') {
+      await bridge?.stop().catch(() => {})
+      if (activeCallBridge === bridge) activeCallBridge = null
+      bridge = null
+    }
+  })
+
+  ws.on('close', async () => {
+    await bridge?.stop().catch(() => {})
+    if (activeCallBridge === bridge) activeCallBridge = null
+    bridge = null
+  })
 })
 
 // Detecta conexões mortas a cada 20s e remove do Set

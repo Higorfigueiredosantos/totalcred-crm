@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { useStore } from '../store'
 import { useAuthStore } from '../store/auth'
 import { useChips } from '../hooks/useChips'
+import CallOverlay from '../components/CallOverlay'
 import type { Message } from '../types'
 import { v4 as uuid } from '../utils/uuid'
 import { format, isToday, isYesterday, isSameDay } from 'date-fns'
@@ -147,6 +148,7 @@ export default function Messages() {
   const [groupMsgMenu, setGroupMsgMenu]   = useState<{ msgId: string; sender: string } | null>(null)
   const [showCallMenu, setShowCallMenu]   = useState(false)
   const [callLoading, setCallLoading]     = useState<'voice' | 'video' | null>(null)
+  const [activeCall, setActiveCall]       = useState<{ chipId: string; callType: 'voice' | 'video'; link: string } | null>(null)
 
   // ── Chips desconectados (sessão caiu / precisa reescanear QR) ──────────────
   // Enquanto isso, mensagens do WhatsApp desse chip não chegam ao CRM.
@@ -917,8 +919,9 @@ export default function Messages() {
   }
 
   // ── Chamada de voz/vídeo (chip) ─────────────────────────────────────────────
-  // Gera um link do WhatsApp (call.whatsapp.com) via whatsapp-web.js, envia
-  // pro contato como mensagem e abre numa nova aba pra quem está no CRM entrar.
+  // Gera um link do WhatsApp (call.whatsapp.com) via whatsapp-web.js, envia pro
+  // contato como mensagem (pra ele entrar pelo WhatsApp dele) e abre a chamada
+  // embutida (CallOverlay) pra quem está no CRM entrar sem sair da tela.
   async function startCall(callType: 'voice' | 'video') {
     setShowCallMenu(false)
     if (!activeChipId || !activeConv || !activeContact) return
@@ -952,7 +955,7 @@ export default function Messages() {
       if (!sendR.ok) throw new Error(sendD.error || 'Erro ao enviar o link da chamada')
       updateMessage(msgId, { status: 'sent', wamid: sendD.msgId })
 
-      window.open(d.link, '_blank', 'noopener,noreferrer')
+      setActiveCall({ chipId: activeChipId, callType, link: d.link })
     } catch (e: any) {
       setSendError(e.message)
     } finally {
@@ -1668,6 +1671,15 @@ export default function Messages() {
         </>
       )}
       </div>
+
+      {activeCall && (
+        <CallOverlay
+          chipId={activeCall.chipId}
+          callType={activeCall.callType}
+          link={activeCall.link}
+          onClose={() => setActiveCall(null)}
+        />
+      )}
     </div>
   )
 }

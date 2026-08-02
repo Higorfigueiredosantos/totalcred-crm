@@ -1,0 +1,9 @@
+.fail
+
+load-module module-null-sink sink_name=call_out sink_properties=device.description=CallOut
+load-module module-null-sink sink_name=call_in sink_properties=device.description=CallIn
+load-module module-remap-source master=call_in.monitor source_name=call_mic source_properties=device.description=CallMic
+load-module module-native-protocol-unix auth-anonymous=1 socket=/tmp/pulse.sock
+
+set-default-sink call_out
+set-default-source call_mic

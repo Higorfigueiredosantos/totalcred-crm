@@ -9,6 +9,8 @@ RUN apt-get update && apt-get install -y wget gnupg ca-certificates \
         fonts-freefont-ttf \
         libxss1 \
         ffmpeg \
+        pulseaudio \
+        pulseaudio-utils \
         --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
