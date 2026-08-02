@@ -26,8 +26,23 @@ const { CallBridge } = require('./callBridge')
 
 const app = express()
 const server = http.createServer(app)
-const wss = new WebSocketServer({ server, path: '/ws' })
-const wssCall = new WebSocketServer({ server, path: '/ws/call' })
+// noServer + roteamento manual do 'upgrade': com { server, path } o ws aborta
+// (400) qualquer conexão cujo caminho não bata EXATAMENTE com o path daquela
+// instância — como o listener de '/ws' é registrado primeiro, ele rejeitava
+// '/ws/call' antes da segunda instância conseguir atender.
+const wss = new WebSocketServer({ noServer: true })
+const wssCall = new WebSocketServer({ noServer: true })
+
+server.on('upgrade', (req, socket, head) => {
+  const { pathname } = new URL(req.url, `http://${req.headers.host}`)
+  if (pathname === '/ws') {
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req))
+  } else if (pathname === '/ws/call') {
+    wssCall.handleUpgrade(req, socket, head, (ws) => wssCall.emit('connection', ws, req))
+  } else {
+    socket.destroy()
+  }
+})
 
 app.use(cors({ origin: process.env.NODE_ENV === 'production' ? true : ['http://localhost:5173', 'http://127.0.0.1:5173'] }))
 app.use(express.json({ limit: '50mb' }))
