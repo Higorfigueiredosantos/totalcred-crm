@@ -101,46 +101,48 @@ async function openChatAndCall(page, phone, callType, onStatus) {
   const digits = String(phone).replace(/\D/g, '')
   const url = `https://web.whatsapp.com/send?phone=${digits}`
 
-  // Numa sessão recém-clonada o WhatsApp precisa re-sincronizar o histórico
-  // de mensagens do zero — em servidor sob carga isso às vezes passa dos 30s
-  // que eu dava antes, deixando a tela presa em "baixando mensagens".
-  async function waitLoad() {
-    for (let i = 0; i < 45; i++) {
-      const loaded = await page.evaluate(() =>
-        !document.body.innerText.includes('Suas mensagens estão sendo baixadas')).catch(() => true)
-      if (loaded) break
-      await new Promise(r => setTimeout(r, 2000))
+  async function safeGoto() {
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+    } catch (e) {
+      console.error('[CallBridge] page.goto falhou:', e.message)
     }
   }
 
-  // O WhatsApp Web mantém conexão persistente (WebSocket) o tempo todo, então
-  // 'networkidle2' às vezes nunca é satisfeito e trava até estourar o timeout.
-  // 'domcontentloaded' dispara de forma confiável; a prontidão real de fato é
-  // conferida pelo polling em waitLoad()/checagem de #main logo depois.
-  onStatus?.('sincronizando')
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
-  await waitLoad()
-  await dismissNoveltiesModal(page)
-  await new Promise(r => setTimeout(r, 1500))
-
-  // Numa sessão recém-clonada o popup de "Novidades" costuma aparecer nesse
-  // primeiro carregamento e engole a abertura automática da conversa do
-  // ?phone= — se não abriu (sem #main na tela), navega pro mesmo link de
-  // novo agora que o popup já não atrapalha mais.
-  let hasMain = await page.evaluate(() => !!document.querySelector('#main')).catch(() => false)
-  if (!hasMain) {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
-    await waitLoad()
-    await new Promise(r => setTimeout(r, 1500))
-    hasMain = await page.evaluate(() => !!document.querySelector('#main')).catch(() => false)
+  // Espera pelo RESULTADO final de verdade (chat aberto ou número inválido),
+  // em vez de um sinal intermediário (tipo "sumiu o texto de sincronização")
+  // que pode bater tanto na tela em branco inicial quanto no fim do processo
+  // — checar o estado final direto evita concluir "carregou" cedo demais.
+  // Tenta fechar o popup de "Novidades" a cada volta, caso apareça no meio.
+  async function waitForOutcome(maxSeconds) {
+    for (let i = 0; i < maxSeconds; i++) {
+      await dismissNoveltiesModal(page).catch(() => {})
+      const state = await page.evaluate(() => ({
+        hasMain: !!document.querySelector('#main'),
+        notOnWhatsapp: document.body.innerText.includes('não está no WhatsApp') ||
+          document.body.innerText.includes('is not on WhatsApp'),
+      })).catch(e => { console.error('[CallBridge] waitForOutcome evaluate falhou:', e.message); return null })
+      if (state?.hasMain) return 'main'
+      if (state?.notOnWhatsapp) return 'invalid'
+      await new Promise(r => setTimeout(r, 1000))
+    }
+    return 'timeout'
   }
 
-  if (!hasMain) {
-    const notOnWhatsapp = await page.evaluate(() =>
-      document.body.innerText.includes('não está no WhatsApp') ||
-      document.body.innerText.includes('is not on WhatsApp')).catch(() => false)
+  onStatus?.('sincronizando')
+  await safeGoto()
+  let outcome = await waitForOutcome(25)
+  if (outcome === 'timeout') {
+    // O popup de "Novidades" (numa sessão recém-clonada) pode ter engolido a
+    // abertura automática da conversa do ?phone= — navega de novo agora que
+    // ele já foi fechado durante a espera acima.
+    await safeGoto()
+    outcome = await waitForOutcome(70)
+  }
+
+  if (outcome === 'invalid') throw new Error('Esse número não tem WhatsApp')
+  if (outcome !== 'main') {
     await dumpDiagnostics(page, 'no-main')
-    if (notOnWhatsapp) throw new Error('Esse número não tem WhatsApp')
     throw new Error('Não consegui abrir a conversa desse contato no WhatsApp Web')
   }
 
