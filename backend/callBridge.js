@@ -110,7 +110,11 @@ async function openChatAndCall(page, phone, callType) {
     }
   }
 
-  await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 })
+  // O WhatsApp Web mantém conexão persistente (WebSocket) o tempo todo, então
+  // 'networkidle2' às vezes nunca é satisfeito e trava até estourar o timeout.
+  // 'domcontentloaded' dispara de forma confiável; a prontidão real de fato é
+  // conferida pelo polling em waitLoad()/checagem de #main logo depois.
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
   await waitLoad()
   await dismissNoveltiesModal(page)
   await new Promise(r => setTimeout(r, 1500))
@@ -121,7 +125,7 @@ async function openChatAndCall(page, phone, callType) {
   // novo agora que o popup já não atrapalha mais.
   let hasMain = await page.evaluate(() => !!document.querySelector('#main')).catch(() => false)
   if (!hasMain) {
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 })
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
     await waitLoad()
     await new Promise(r => setTimeout(r, 1500))
     hasMain = await page.evaluate(() => !!document.querySelector('#main')).catch(() => false)
