@@ -131,6 +131,7 @@ async function openChatAndCall(page, phone, callType) {
     const notOnWhatsapp = await page.evaluate(() =>
       document.body.innerText.includes('não está no WhatsApp') ||
       document.body.innerText.includes('is not on WhatsApp')).catch(() => false)
+    await dumpDiagnostics(page, 'no-main')
     if (notOnWhatsapp) throw new Error('Esse número não tem WhatsApp')
     throw new Error('Não consegui abrir a conversa desse contato no WhatsApp Web')
   }
@@ -144,7 +145,18 @@ async function openChatAndCall(page, phone, callType) {
     if (box) { await realClickByBox(page, box); return true }
     await new Promise(r => setTimeout(r, 1000))
   }
+  await dumpDiagnostics(page, 'no-call-button')
   return false
+}
+
+// Salva screenshot + texto da página em /tmp pra diagnosticar falhas reais
+// sem precisar reproduzir o cenário depois.
+async function dumpDiagnostics(page, tag) {
+  try {
+    await page.screenshot({ path: `/tmp/callbridge_fail_${tag}.png` })
+    const text = await page.evaluate(() => document.body.innerText.slice(0, 2000))
+    fs.writeFileSync(`/tmp/callbridge_fail_${tag}.txt`, `URL: ${page.url()}\n\n${text}`)
+  } catch (_) { /* melhor esforço, não deve derrubar o fluxo principal */ }
 }
 
 class CallBridge {
