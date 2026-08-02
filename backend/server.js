@@ -204,14 +204,14 @@ wssCall.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'error', error: 'Já existe uma chamada em andamento' }))
         return
       }
-      if (!msg.chipId || !msg.link) {
-        ws.send(JSON.stringify({ type: 'error', error: 'chipId e link são obrigatórios' }))
+      if (!msg.chipId || !msg.phone) {
+        ws.send(JSON.stringify({ type: 'error', error: 'chipId e phone são obrigatórios' }))
         return
       }
       bridge = new CallBridge(msg.chipId, msg.callType)
       activeCallBridge = bridge
       try {
-        await bridge.start(msg.link, {
+        await bridge.start(msg.phone, {
           onVideoFrame: buf => { if (ws.readyState === 1) ws.send(Buffer.concat([Buffer.from([1]), buf])) },
           onAudioChunk: buf => { if (ws.readyState === 1) ws.send(Buffer.concat([Buffer.from([2]), buf])) },
           onStatus: status => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'status', status })) },
@@ -1743,27 +1743,6 @@ app.post('/api/chips/reconnect', async (req, res) => {
   res.json({ ok: true })
 })
 
-// Gera um link de chamada de voz/vídeo do WhatsApp (call.whatsapp.com) usando
-// a sessão já conectada do chip. Quem clicar no link entra na chamada pela
-// própria interface do WhatsApp — não passa pelo Chrome headless do servidor.
-app.post('/api/chips/call-link', async (req, res) => {
-  const { chipId, callType } = req.body
-  if (!chipId || !['voice', 'video'].includes(callType)) {
-    return res.status(400).json({ error: "chipId e callType ('voice' ou 'video') são obrigatórios" })
-  }
-  const session = chipSessions[chipId]
-  if (!session?.client || !session.isReady) {
-    return res.status(400).json({ error: 'Chip não está conectado' })
-  }
-  try {
-    const link = await session.client.createCallLink(new Date(), callType)
-    if (!link) return res.status(502).json({ error: 'WhatsApp não retornou o link da chamada' })
-    res.json({ link })
-  } catch (e) {
-    console.error(`[Chip ${chipId}] Erro ao gerar link de chamada:`, e.message)
-    res.status(500).json({ error: e.message })
-  }
-})
 
 // ── Chip Campaign Routes ──────────────────────────────────────────────────────
 

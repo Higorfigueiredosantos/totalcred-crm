@@ -4,22 +4,21 @@ import { Mic, MicOff, PhoneOff } from 'lucide-react'
 interface Props {
   chipId: string
   callType: 'voice' | 'video'
-  link: string
+  phone: string
   onClose: () => void
 }
 
 function statusLabel(s: string) {
   switch (s) {
     case 'preparando': return 'Preparando...'
-    case 'autenticando': return 'Conectando ao WhatsApp...'
-    case 'entrando_na_chamada': return 'Entrando na chamada...'
+    case 'autenticando_ligando': return 'Ligando...'
     case 'conectado': return 'Em chamada'
     case 'encerrada': return 'Chamada encerrada'
     default: return 'Conectando...'
   }
 }
 
-export default function CallOverlay({ chipId, callType, link, onClose }: Props) {
+export default function CallOverlay({ chipId, callType, phone, onClose }: Props) {
   const [status, setStatus] = useState('conectando')
   const [error, setError] = useState<string | null>(null)
   const [muted, setMuted] = useState(false)
@@ -43,7 +42,7 @@ export default function CallOverlay({ chipId, callType, link, onClose }: Props) 
     audioCtxRef.current = audioCtx
 
     ws.onopen = async () => {
-      ws.send(JSON.stringify({ type: 'start', chipId, callType, link }))
+      ws.send(JSON.stringify({ type: 'start', chipId, callType, phone }))
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
         micStreamRef.current = stream
@@ -129,7 +128,7 @@ export default function CallOverlay({ chipId, callType, link, onClose }: Props) 
       audioCtx.close().catch(() => {})
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chipId, callType, link])
+  }, [chipId, callType, phone])
 
   return (
     <div className="fixed inset-0 z-50 bg-black/95 flex flex-col items-center justify-center">

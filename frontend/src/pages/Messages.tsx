@@ -147,8 +147,7 @@ export default function Messages() {
   const [showEmoji, setShowEmoji]         = useState(false)
   const [groupMsgMenu, setGroupMsgMenu]   = useState<{ msgId: string; sender: string } | null>(null)
   const [showCallMenu, setShowCallMenu]   = useState(false)
-  const [callLoading, setCallLoading]     = useState<'voice' | 'video' | null>(null)
-  const [activeCall, setActiveCall]       = useState<{ chipId: string; callType: 'voice' | 'video'; link: string } | null>(null)
+  const [activeCall, setActiveCall]       = useState<{ chipId: string; callType: 'voice' | 'video'; phone: string } | null>(null)
 
   // ── Chips desconectados (sessão caiu / precisa reescanear QR) ──────────────
   // Enquanto isso, mensagens do WhatsApp desse chip não chegam ao CRM.
@@ -919,48 +918,14 @@ export default function Messages() {
   }
 
   // ── Chamada de voz/vídeo (chip) ─────────────────────────────────────────────
-  // Gera um link do WhatsApp (call.whatsapp.com) via whatsapp-web.js, envia pro
-  // contato como mensagem (pra ele entrar pelo WhatsApp dele) e abre a chamada
-  // embutida (CallOverlay) pra quem está no CRM entrar sem sair da tela.
-  async function startCall(callType: 'voice' | 'video') {
+  // Abre a chamada embutida (CallOverlay), que clica no botão real de ligação
+  // no cabeçalho da conversa do WhatsApp Web — toca direto no aparelho do
+  // contato, sem link e sem mensagem, igual uma ligação normal.
+  function startCall(callType: 'voice' | 'video') {
     setShowCallMenu(false)
-    if (!activeChipId || !activeConv || !activeContact) return
+    if (!activeChipId || !activeContact) return
     setSendError(null)
-    setCallLoading(callType)
-    try {
-      const r = await apiFetch('/api/chips/call-link', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chipId: activeChipId, callType })
-      })
-      const d = await r.json()
-      if (!r.ok || !d.link) throw new Error(d.error || 'Não foi possível gerar o link da chamada')
-
-      const msgId = uuid()
-      const label = callType === 'video' ? '🎥 Chamada de vídeo' : '📞 Chamada de voz'
-      const text = `${label}\n${d.link}`
-      const msg: Message = {
-        id: msgId, conversationId: activeConv.id,
-        contactId: activeConv.contactId, channelId: activeConv.channelId,
-        direction: 'outbound', type: 'text', text,
-        status: 'sending', timestamp: new Date().toISOString(),
-      }
-      addMessage(msg)
-      updateConversation(activeConv.id, { lastMessage: text, lastMessageAt: msg.timestamp })
-
-      const sendR = await apiFetch('/api/chips/send', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chipId: activeChipId, to: activeContact.phone, message: text })
-      })
-      const sendD = await sendR.json()
-      if (!sendR.ok) throw new Error(sendD.error || 'Erro ao enviar o link da chamada')
-      updateMessage(msgId, { status: 'sent', wamid: sendD.msgId })
-
-      setActiveCall({ chipId: activeChipId, callType, link: d.link })
-    } catch (e: any) {
-      setSendError(e.message)
-    } finally {
-      setCallLoading(null)
-    }
+    setActiveCall({ chipId: activeChipId, callType, phone: activeContact.phone })
   }
 
   function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
@@ -1200,9 +1165,9 @@ export default function Messages() {
               <div className="flex gap-2">
                 {activeChipId && !isGroupConv && (
                   <div className="relative" ref={callMenuRef}>
-                    <button onClick={() => setShowCallMenu(v => !v)} disabled={!!callLoading}
-                      className="flex items-center gap-1 px-3 py-1.5 text-xs bg-gray-800 text-gray-300 hover:bg-gray-700 rounded-lg disabled:opacity-50">
-                      <Phone size={12} /> {callLoading ? 'Gerando link…' : 'Ligar'}
+                    <button onClick={() => setShowCallMenu(v => !v)}
+                      className="flex items-center gap-1 px-3 py-1.5 text-xs bg-gray-800 text-gray-300 hover:bg-gray-700 rounded-lg">
+                      <Phone size={12} /> Ligar
                     </button>
                     {showCallMenu && (
                       <div className="absolute right-0 top-9 bg-gray-900 border border-gray-700 rounded-lg shadow-xl z-20 py-1 min-w-[180px]">
@@ -1676,7 +1641,7 @@ export default function Messages() {
         <CallOverlay
           chipId={activeCall.chipId}
           callType={activeCall.callType}
-          link={activeCall.link}
+          phone={activeCall.phone}
           onClose={() => setActiveCall(null)}
         />
       )}

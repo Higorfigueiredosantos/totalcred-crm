@@ -1,9 +1,11 @@
 'use strict'
 // Ponte de chamada de voz/vídeo: abre uma sessão autenticada (clonada da sessão
 // real do chip, isolada, sem tocar no Chrome ao vivo que cuida das mensagens),
-// entra na call.whatsapp.com de verdade dentro dela, e expõe vídeo (via CDP
-// screencast) e áudio (via dispositivos virtuais do PulseAudio) pra quem estiver
-// usando o CRM — sem depender de app nativo nem de embutir a página da Meta.
+// abre a conversa do contato e clica no botão real de ligação do WhatsApp Web
+// (toca de verdade no aparelho dele, sem link e sem mensagem), e expõe vídeo
+// (via CDP screencast) e áudio (via dispositivos virtuais do PulseAudio) pra
+// quem estiver usando o CRM — sem depender de app nativo nem de embutir a
+// página da Meta.
 const path = require('path')
 const fs = require('fs')
 const { execSync, spawn } = require('child_process')
@@ -56,16 +58,65 @@ function cloneSession(chipId) {
   return dest
 }
 
-async function clickJoinButton(page) {
+// Cliques sintéticos (elemento.click() via page.evaluate) não disparam os
+// handlers de pointer event que o React do WhatsApp Web escuta em alguns
+// componentes — usa um clique de mouse real nas coordenadas do elemento.
+async function realClickByBox(page, box) {
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+}
+
+async function findBoxByText(page, texts) {
+  return page.evaluate((texts) => {
+    const els = Array.from(document.querySelectorAll('button, div[role="button"], span'))
+    const el = els.find(e => texts.includes((e.textContent || '').trim()))
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    return { x: r.x, y: r.y, width: r.width, height: r.height }
+  }, texts)
+}
+
+async function findBoxByAriaLabel(page, labels) {
+  return page.evaluate((labels) => {
+    const main = document.querySelector('#main') || document.querySelector('[data-testid="conversation-panel-wrapper"]')
+    const header = main ? main.querySelector('header') : null
+    if (!header) return null
+    const els = Array.from(header.querySelectorAll('[aria-label]'))
+    const el = els.find(e => labels.includes(e.getAttribute('aria-label')))
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    return { x: r.x, y: r.y, width: r.width, height: r.height }
+  }, labels)
+}
+
+// Fecha o popup de "Novidades do WhatsApp Web" que aparece no primeiro carregamento
+async function dismissNoveltiesModal(page) {
+  const box = await findBoxByText(page, ['Continuar', 'Continue', 'OK', 'Got it'])
+  if (box) await realClickByBox(page, box)
+}
+
+// Abre a conversa do contato (via deep link) e clica no botão real de
+// ligação de voz/vídeo do cabeçalho — o mesmo botão que um humano clicaria,
+// que toca de verdade no aparelho do contato (sem link, sem mensagem).
+async function openChatAndCall(page, phone, callType) {
+  const digits = String(phone).replace(/\D/g, '')
+  await page.goto(`https://web.whatsapp.com/send?phone=${digits}`, { waitUntil: 'networkidle2', timeout: 45000 })
+
+  for (let i = 0; i < 15; i++) {
+    const loaded = await page.evaluate(() =>
+      !document.body.innerText.includes('Suas mensagens estão sendo baixadas')).catch(() => true)
+    if (loaded) break
+    await new Promise(r => setTimeout(r, 2000))
+  }
+  await dismissNoveltiesModal(page)
+  await new Promise(r => setTimeout(r, 1500))
+
+  const labels = callType === 'video'
+    ? ['Ligação de vídeo', 'Video call']
+    : ['Ligação de voz', 'Voice call']
+
   for (let i = 0; i < 10; i++) {
-    const clicked = await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button'))
-      const btn = btns.find(b =>
-        /^(join call|entrar na liga)/i.test((b.textContent || '').trim()) && b.offsetParent !== null)
-      if (btn) { btn.click(); return true }
-      return false
-    }).catch(() => false)
-    if (clicked) return true
+    const box = await findBoxByAriaLabel(page, labels)
+    if (box) { await realClickByBox(page, box); return true }
     await new Promise(r => setTimeout(r, 1000))
   }
   return false
@@ -84,7 +135,8 @@ class CallBridge {
     this.stopped = false
   }
 
-  async start(link, { onVideoFrame, onAudioChunk, onStatus } = {}) {
+  // phone: número/chatId do contato (ex: "5535999998888" ou "5535999998888@c.us")
+  async start(phone, { onVideoFrame, onAudioChunk, onStatus } = {}) {
     onStatus?.('preparando')
     ensurePulseAudio()
     this.clonedProfile = cloneSession(this.chipId)
@@ -107,25 +159,13 @@ class CallBridge {
 
     const context = this.browser.defaultBrowserContext()
     await context.overridePermissions('https://web.whatsapp.com', ['camera', 'microphone'])
-    await context.overridePermissions(link, ['camera', 'microphone'])
 
-    onStatus?.('autenticando')
-    const warmupPage = await this.browser.newPage()
-    await warmupPage.goto('https://web.whatsapp.com', { waitUntil: 'networkidle2', timeout: 45000 })
-    for (let i = 0; i < 15; i++) {
-      const loaded = await warmupPage.evaluate(() =>
-        !document.body.innerText.includes('Suas mensagens estão sendo baixadas')).catch(() => true)
-      if (loaded) break
-      await new Promise(r => setTimeout(r, 2000))
-    }
-
-    onStatus?.('entrando_na_chamada')
+    onStatus?.('autenticando_ligando')
     this.callPage = await this.browser.newPage()
-    await this.callPage.goto(link, { waitUntil: 'networkidle2', timeout: 30000 })
-    const joined = await clickJoinButton(this.callPage)
-    if (!joined) throw new Error('Não encontrei o botão de entrar na chamada')
+    const called = await openChatAndCall(this.callPage, phone, this.callType)
+    if (!called) throw new Error('Não encontrei o botão de ligação no cabeçalho da conversa')
 
-    // espera terminar de navegar pro app principal e a call conectar
+    // espera a discagem conectar
     await new Promise(r => setTimeout(r, 6000))
 
     this.cdp = await this.callPage.target().createCDPSession()
