@@ -2358,6 +2358,8 @@ app.post('/api/send-message', async (req, res) => {
 
 app.post('/api/chips/send', async (req, res) => {
   const { chipId, to, message } = req.body
+  const reqId = Math.random().toString(36).slice(2, 8)
+  console.log(`[Send ${reqId}] POST /api/chips/send chipId=${chipId} to=${to} msg="${(message || '').slice(0, 40)}" ip=${req.ip} ua="${(req.headers['user-agent'] || '').slice(0, 60)}"`)
   if (!chipId || !to || !message) return res.status(400).json({ error: 'chipId, to e message são obrigatórios' })
   const session = chipSessions[chipId]
   if (!session?.isReady || !session.client) return res.status(400).json({ error: `Chip "${chipId}" não está conectado` })
@@ -2367,14 +2369,18 @@ app.post('/api/chips/send', async (req, res) => {
     let chatId = to.includes('@') ? to : formatNumber(to)
     const convId = getConvId(chipId, chatId)
     const pendingAck = registerPendingAck(chipId, chatId)
+    console.log(`[Send ${reqId}] chamando client.sendMessage...`)
     const msg = await sendChipText(session.client, chatId, message)
+    console.log(`[Send ${reqId}] client.sendMessage resolveu`)
     let msgId = extractMsgId(msg)
     if (msgId) pendingAck.cancel(); else msgId = await pendingAck.promise
+    console.log(`[Send ${reqId}] msgId final=${msgId}`)
     fireWebhooks('message_sent', { chipId, to: chatId, message, msgId, conversationId: convId })
     res.json({ ok: true, msgId })
     // Broadcast após resposta HTTP para o frontend exibir a mensagem enviada externamente
     setTimeout(() => broadcast('chip_outbound', { chipId, to: chatId, message, msgId, type: 'text', timestamp: Date.now(), conversationId: convId }), 300)
   } catch (e) {
+    console.log(`[Send ${reqId}] ERRO: ${e.message}`)
     res.status(500).json({ error: e.message })
   }
 })
