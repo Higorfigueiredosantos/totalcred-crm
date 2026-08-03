@@ -1685,18 +1685,6 @@ app.post('/api/tools/wa-filter', (req, res) => {
 
 app.get('/api/chips', (_req, res) => res.json(getChipsList()))
 
-// TEMP DEBUG: valida a resolucao de LID -> numero real antes de remover.
-app.get('/api/debug/resolve-contact/:chipId', async (req, res) => {
-  try {
-    const client = chipSessions[req.params.chipId]?.client
-    if (!client) return res.status(404).json({ error: 'chip não encontrado ou não pronto' })
-    const contact = await client.getContactById(String(req.query.phone))
-    res.json({ id: contact?.id, number: contact?.number })
-  } catch (e) {
-    res.status(500).json({ error: e.message })
-  }
-})
-
 app.post('/api/chips/connect', (req, res) => {
   const { chipId } = req.body
   if (!chipId) return res.status(400).json({ error: 'chipId obrigatório' })
