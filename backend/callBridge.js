@@ -147,21 +147,33 @@ async function searchAndOpenChat(page, contactName) {
   }
   if (!typed) throw new Error('Não consegui digitar o nome do contato na busca do WhatsApp Web')
 
-  // Não basta pegar "o primeiro item da lista": sob disputa de CPU a lista
-  // pode ainda não ter filtrado quando a gente olha, e o primeiro item seria
-  // uma conversa qualquer (não a buscada) — confirma que o texto do item
-  // bate com o contato antes de clicar, com retentativas.
+  // Não basta pegar "o primeiro item da lista", nem comparar contra o texto
+  // INTEIRO da linha (isso inclui a prévia da última mensagem e nome de
+  // grupos em comum — um contato diferente cuja última mensagem só CONTÉM a
+  // palavra buscada já bastava pra ser escolhido por engano, ligando pro
+  // número errado). Compara só a primeira linha (o nome exibido) e prioriza
+  // igualdade exata > começa-com > contém, escolhendo o melhor entre todos
+  // os itens visíveis em vez do primeiro que bater.
   const needle = contactName.trim().toLowerCase()
   let resultBox = null
   for (let i = 0; i < 10 && !resultBox; i++) {
     resultBox = await page.evaluate((needle) => {
       const rows = Array.from(document.querySelectorAll('[data-testid="cell-frame-container"], div[role="listitem"], div[role="gridcell"]'))
-      const row = rows.find(r => (r.innerText || '').toLowerCase().includes(needle))
-      if (!row) return null
-      const r = row.getBoundingClientRect()
+      let best = null
+      let bestScore = -1
+      for (const row of rows) {
+        const firstLine = (row.innerText || '').split('\n')[0].trim().toLowerCase()
+        let score = -1
+        if (firstLine === needle) score = 3
+        else if (firstLine.startsWith(needle)) score = 2
+        else if (firstLine.includes(needle)) score = 1
+        if (score > bestScore) { bestScore = score; best = row }
+      }
+      if (!best || bestScore < 0) return null
+      const r = best.getBoundingClientRect()
       return { x: r.x, y: r.y, width: r.width, height: r.height }
     }, needle).catch(() => null)
-    if (!resultBox) await new Promise(r => setTimeout(r, 500))
+    if (!resultBox) await new Promise(r => setTimeout(r, 400))
   }
   if (!resultBox) throw new Error(`Não encontrei "${contactName}" na busca do WhatsApp Web`)
 
@@ -219,7 +231,7 @@ async function openChatAndCall(browser, contactName, callType, onStatus) {
   // cima, não na conversa por baixo). Dedica alguns segundos só pra isso.
   for (let i = 0; i < 5; i++) {
     await dismissNoveltiesModal(page).catch(() => {})
-    await new Promise(r => setTimeout(r, 1000))
+    await new Promise(r => setTimeout(r, 600))
   }
 
   onStatus?.('procurando_contato')
@@ -237,7 +249,7 @@ async function openChatAndCall(browser, contactName, callType, onStatus) {
       // WhatsApp mostra logo após o clique (tela de discagem, erro de
       // câmera/microfone, popup interceptando o clique etc.) pra saber se a
       // ligação de verdade começou, já que o clique em si não garante isso.
-      await new Promise(r => setTimeout(r, 3000))
+      await new Promise(r => setTimeout(r, 1500))
       await dumpDiagnostics(page, 'after-call-click')
       return { called: true, page }
     }
@@ -317,7 +329,7 @@ class CallBridge {
     onStatus?.('autenticando_ligando')
 
     // espera a discagem conectar
-    await new Promise(r => setTimeout(r, 6000))
+    await new Promise(r => setTimeout(r, 3500))
 
     this.cdp = await this.callPage.target().createCDPSession()
     await this.cdp.send('Page.startScreencast', { format: 'jpeg', quality: 55, everyNthFrame: 1 })
