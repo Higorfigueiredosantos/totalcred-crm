@@ -209,7 +209,16 @@ async function openChatAndCall(browser, contactName, callType, onStatus) {
 
   for (let i = 0; i < 10; i++) {
     const box = await findBoxByAriaLabel(page, labels)
-    if (box) { await realClickByBox(page, box); return { called: true, page } }
+    if (box) {
+      await realClickByBox(page, box)
+      // Dump incondicional (não só em falha): precisamos ver o que a tela do
+      // WhatsApp mostra logo após o clique (tela de discagem, erro de
+      // câmera/microfone, popup interceptando o clique etc.) pra saber se a
+      // ligação de verdade começou, já que o clique em si não garante isso.
+      await new Promise(r => setTimeout(r, 3000))
+      await dumpDiagnostics(page, 'after-call-click')
+      return { called: true, page }
+    }
     await new Promise(r => setTimeout(r, 1000))
   }
   await dumpDiagnostics(page, 'no-call-button')
