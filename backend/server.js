@@ -1084,17 +1084,16 @@ function extractMsgId(msg) {
   return idPartsToSerialized(dataId)
 }
 
+// Não retenta: client.sendMessage() dispara o envio de verdade dentro da
+// página antes de a promise resolver — se a promise rejeitar por um erro
+// transitório de puppeteer/página (frame destruído, sessão fechada), o
+// envio pode já ter saído mesmo assim. Retentar nesses casos arrisca mandar
+// a MESMA mensagem de novo pro contato (visto na prática: 3 bolhas de texto
+// idêntico, cada uma com tique de "enviado" próprio — 3 envios reais, não
+// só uma duplicata visual). Melhor deixar o erro aparecer e o usuário
+// decidir se reenvia manualmente.
 async function sendChipText(client, chatId, text) {
-  for (let i = 0; i < 3; i++) {
-    try {
-      return await client.sendMessage(chatId, text)
-    } catch (e) {
-      const msg = (e.message || '').toLowerCase()
-      const retry = msg.includes('timeout') || msg.includes('detached frame') || msg.includes('target closed') || msg.includes('session closed') || msg === 't'
-      if (retry && i < 2) { await sleep(4000); continue }
-      throw e
-    }
-  }
+  return await client.sendMessage(chatId, text)
 }
 
 // client.sendMessage() às vezes resolve sem devolver o objeto da mensagem
