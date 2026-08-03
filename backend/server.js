@@ -234,7 +234,7 @@ wssCall.on('connection', (ws) => {
       } catch (e) {
         console.error('[CallBridge] Erro ao iniciar:', e.message)
         ws.send(JSON.stringify({ type: 'error', error: e.message }))
-        await bridge.stop().catch(() => {})
+        await bridge?.stop().catch(() => {})
         if (activeCallBridge === bridge) activeCallBridge = null
         bridge = null
       }
@@ -1126,10 +1126,17 @@ function registerPendingAck(chipId, chatId, timeoutMs = 4000) {
 }
 
 function resolveSendAck(chipId, chatId, msgId) {
-  if (!chatId || !msgId) return
+  if (!msgId) return
   const key = `${chipId}:${chatId}`
-  const resolve = pendingSendAcks.get(key)
-  if (resolve) resolve(msgId)
+  const exact = pendingSendAcks.get(key)
+  if (exact) { exact(msgId); return }
+  // Contas com LID às vezes reportam o "remote" do ack com um id diferente
+  // do chatId usado pra registrar o envio (ex: telefone vs @lid) — nesse
+  // caso a chave exata nunca bate. Cai pro pendente mais antigo do mesmo
+  // chip (Map preserva ordem de inserção = ordem de envio).
+  for (const [k, resolve] of pendingSendAcks) {
+    if (k.startsWith(`${chipId}:`)) { resolve(msgId); return }
+  }
 }
 
 // ── Humanization ──────────────────────────────────────────────────────────────
