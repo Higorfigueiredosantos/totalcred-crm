@@ -428,19 +428,23 @@ export default function Messages() {
     // aqui apagaria esse progresso, voltando a mensagem pra "enviado").
     // Se ainda não existir localmente, cai no fallback: casa com a mensagem
     // otimista ainda "sending" da mesma conversa (sem depender de timing),
-    // evitando duplicar a mensagem.
-    if (msgId) {
-      let existing = messagesRef.current.find(m => m.wamid === msgId)
-      if (!existing) {
-        existing = messagesRef.current.find(m =>
-          m.direction === 'outbound' && !m.wamid && m.status === 'sending' &&
-          (conversationId ? m.conversationId === conversationId : m.channelId === CHIP_PREFIX + chipId)
-        )
-      }
-      if (existing) {
-        if (!existing.wamid) updateMessage(existing.id, { wamid: msgId })
-        return
-      }
+    // evitando duplicar a mensagem. O fallback roda mesmo sem msgId (contas
+    // com LID frequentemente não retornam id nenhum) — sem isso, toda vez
+    // que faltasse o id a mensagem otimista ficava presa em "enviando" E
+    // uma segunda bolha era criada aqui do zero, duplicando na tela.
+    let existing = msgId ? messagesRef.current.find(m => m.wamid === msgId) : undefined
+    if (!existing) {
+      // Por essa altura a resposta do POST /api/chips/send já chegou no
+      // handleSend, que já marcou a mensagem local como "sent" — não dá
+      // mais pra exigir status "sending" aqui, senão nunca casa e duplica.
+      existing = messagesRef.current.find(m =>
+        m.direction === 'outbound' && !m.wamid && m.text === (message || caption) &&
+        (conversationId ? m.conversationId === conversationId : m.channelId === CHIP_PREFIX + chipId)
+      )
+    }
+    if (existing) {
+      if (msgId && !existing.wamid) updateMessage(existing.id, { wamid: msgId })
+      return
     }
 
     const channelId = CHIP_PREFIX + chipId
