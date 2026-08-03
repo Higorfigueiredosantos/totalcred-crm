@@ -219,14 +219,14 @@ wssCall.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'error', error: 'Já existe uma chamada em andamento' }))
         return
       }
-      if (!msg.chipId || !msg.phone) {
-        ws.send(JSON.stringify({ type: 'error', error: 'chipId e phone são obrigatórios' }))
+      if (!msg.chipId || !msg.contactName) {
+        ws.send(JSON.stringify({ type: 'error', error: 'chipId e contactName são obrigatórios' }))
         return
       }
       bridge = new CallBridge(msg.chipId, msg.callType)
       activeCallBridge = bridge
       try {
-        await bridge.start(msg.phone, {
+        await bridge.start({ phone: msg.phone, contactName: msg.contactName }, {
           onVideoFrame: buf => { if (ws.readyState === 1) ws.send(Buffer.concat([Buffer.from([1]), buf])) },
           onAudioChunk: buf => { if (ws.readyState === 1) ws.send(Buffer.concat([Buffer.from([2]), buf])) },
           onStatus: status => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'status', status })) },

@@ -147,7 +147,7 @@ export default function Messages() {
   const [showEmoji, setShowEmoji]         = useState(false)
   const [groupMsgMenu, setGroupMsgMenu]   = useState<{ msgId: string; sender: string } | null>(null)
   const [showCallMenu, setShowCallMenu]   = useState(false)
-  const [activeCall, setActiveCall]       = useState<{ chipId: string; callType: 'voice' | 'video'; phone: string } | null>(null)
+  const [activeCall, setActiveCall]       = useState<{ chipId: string; callType: 'voice' | 'video'; phone: string; contactName: string } | null>(null)
 
   // ── Chips desconectados (sessão caiu / precisa reescanear QR) ──────────────
   // Enquanto isso, mensagens do WhatsApp desse chip não chegam ao CRM.
@@ -929,7 +929,7 @@ export default function Messages() {
     setShowCallMenu(false)
     if (!activeChipId || !activeContact) return
     setSendError(null)
-    setActiveCall({ chipId: activeChipId, callType, phone: activeContact.phone })
+    setActiveCall({ chipId: activeChipId, callType, phone: activeContact.phone, contactName: activeContact.name })
   }
 
   function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
@@ -1646,6 +1646,7 @@ export default function Messages() {
           chipId={activeCall.chipId}
           callType={activeCall.callType}
           phone={activeCall.phone}
+          contactName={activeCall.contactName}
           onClose={() => setActiveCall(null)}
         />
       )}

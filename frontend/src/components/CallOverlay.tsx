@@ -5,6 +5,7 @@ interface Props {
   chipId: string
   callType: 'voice' | 'video'
   phone: string
+  contactName: string
   onClose: () => void
 }
 
@@ -12,6 +13,7 @@ function statusLabel(s: string) {
   switch (s) {
     case 'preparando': return 'Preparando...'
     case 'sincronizando': return 'Sincronizando WhatsApp...'
+    case 'procurando_contato': return 'Procurando contato...'
     case 'autenticando_ligando': return 'Ligando...'
     case 'conectado': return 'Em chamada'
     case 'encerrada': return 'Chamada encerrada'
@@ -19,7 +21,7 @@ function statusLabel(s: string) {
   }
 }
 
-export default function CallOverlay({ chipId, callType, phone, onClose }: Props) {
+export default function CallOverlay({ chipId, callType, phone, contactName, onClose }: Props) {
   const [status, setStatus] = useState('conectando')
   const [error, setError] = useState<string | null>(null)
   const [muted, setMuted] = useState(false)
@@ -43,7 +45,7 @@ export default function CallOverlay({ chipId, callType, phone, onClose }: Props)
     audioCtxRef.current = audioCtx
 
     ws.onopen = async () => {
-      ws.send(JSON.stringify({ type: 'start', chipId, callType, phone }))
+      ws.send(JSON.stringify({ type: 'start', chipId, callType, phone, contactName }))
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
         micStreamRef.current = stream
@@ -129,7 +131,7 @@ export default function CallOverlay({ chipId, callType, phone, onClose }: Props)
       audioCtx.close().catch(() => {})
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chipId, callType, phone])
+  }, [chipId, callType, phone, contactName])
 
   return (
     <div className="fixed inset-0 z-50 bg-black/95 flex flex-col items-center justify-center">
