@@ -419,33 +419,13 @@ export default function Messages() {
   useEffect(() => onWSMessage('chip_outbound', (payload: any) => {
     const { chipId, to, message, msgId, type, mediaFileName, caption, timestamp, conversationId } = payload
     if (!chipId || !to) return
-
-    // Se o wamid já existe na store, foi enviado pela UI — só garante que o
-    // wamid fique gravado (nunca mexe no status: esse broadcast chega ~300ms
-    // depois da resposta HTTP, de propósito, pra avisar outras abas/
-    // integrações externas — por essa mesma demora, os eventos de entrega/
-    // leitura (chip_ack) costumam chegar primeiro, e sobrescrever o status
-    // aqui apagaria esse progresso, voltando a mensagem pra "enviado").
-    // Se ainda não existir localmente, cai no fallback: casa com a mensagem
-    // otimista ainda "sending" da mesma conversa (sem depender de timing),
-    // evitando duplicar a mensagem. O fallback roda mesmo sem msgId (contas
-    // com LID frequentemente não retornam id nenhum) — sem isso, toda vez
-    // que faltasse o id a mensagem otimista ficava presa em "enviando" E
-    // uma segunda bolha era criada aqui do zero, duplicando na tela.
-    let existing = msgId ? messagesRef.current.find(m => m.wamid === msgId) : undefined
-    if (!existing) {
-      // Por essa altura a resposta do POST /api/chips/send já chegou no
-      // handleSend, que já marcou a mensagem local como "sent" — não dá
-      // mais pra exigir status "sending" aqui, senão nunca casa e duplica.
-      existing = messagesRef.current.find(m =>
-        m.direction === 'outbound' && !m.wamid && m.text === (message || caption) &&
-        (conversationId ? m.conversationId === conversationId : m.channelId === CHIP_PREFIX + chipId)
-      )
-    }
-    if (existing) {
-      if (msgId && !existing.wamid) updateMessage(existing.id, { wamid: msgId })
-      return
-    }
+    // O `conversationId` desse payload é um hash gerado no backend
+    // (chipId+chatId), que NUNCA bate com o id (uuid) da conversa local no
+    // Zustand — usá-lo pra achar a mensagem otimista sempre falhava e
+    // criava uma bolha nova a cada broadcast, duplicando a mensagem na
+    // tela. Resolve a conversa de verdade primeiro (mesma lógica de
+    // contato/telefone usada pra mensagens recebidas) e casa por ela.
+    void conversationId
 
     const channelId = CHIP_PREFIX + chipId
     const ts = timestamp
@@ -493,6 +473,26 @@ export default function Messages() {
       }
       conversationsRef.current = [...conversationsRef.current, conv]
       addConversation(conv)
+    }
+
+    // Se o wamid já existe na store, foi enviado pela UI — só garante que o
+    // wamid fique gravado (nunca mexe no status: esse broadcast chega ~300ms
+    // depois da resposta HTTP, de propósito, pra avisar outras abas/
+    // integrações externas — por essa mesma demora, os eventos de entrega/
+    // leitura (chip_ack) costumam chegar primeiro, e sobrescrever o status
+    // aqui apagaria esse progresso, voltando a mensagem pra "enviado").
+    // Se ainda não existir, cai no fallback: casa pela conversa (agora
+    // resolvida corretamente acima) + texto, sem depender de status nem de
+    // msgId presente (contas com LID costumam não retornar id nenhum).
+    let existing = msgId ? messagesRef.current.find(m => m.wamid === msgId) : undefined
+    if (!existing) {
+      existing = messagesRef.current.find(m =>
+        m.direction === 'outbound' && !m.wamid && m.conversationId === conv!.id && m.text === textBody
+      )
+    }
+    if (existing) {
+      if (msgId && !existing.wamid) updateMessage(existing.id, { wamid: msgId })
+      return
     }
 
     const newMsg: Message = {
