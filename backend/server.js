@@ -223,6 +223,12 @@ wssCall.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'error', error: 'chipId e contactName são obrigatórios' }))
         return
       }
+      const ownNumber = chipSessions[msg.chipId]?.number
+      const targetNumber = String(msg.phone || '').replace(/\D/g, '')
+      if (ownNumber && targetNumber && targetNumber.endsWith(ownNumber)) {
+        ws.send(JSON.stringify({ type: 'error', error: 'Esse contato é o próprio número do chip — não é possível ligar para si mesmo no WhatsApp.' }))
+        return
+      }
       bridge = new CallBridge(msg.chipId, msg.callType)
       activeCallBridge = bridge
       try {
