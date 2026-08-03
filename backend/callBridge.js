@@ -176,13 +176,41 @@ async function openChatAndCall(browser, contactName, callType, onStatus) {
   for (let i = 0; i < 10; i++) {
     const box = await findBoxByAriaLabel(page, labels)
     if (box) {
+      // Captura erros de console/página e requisições de rede que falharem
+      // a partir do clique — o clique sozinho não garante que o sinal de
+      // chamada de fato saiu (a tela mostra "Ligando..." mesmo quando a
+      // negociação falha silenciosamente por baixo), então isso é o que
+      // permite ver O QUE quebrou sem precisar reproduzir outra ligação real.
+      const netErrors = []
+      const consoleErrors = []
+      const onConsole = (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text().slice(0, 300)) }
+      const onPageError = (err) => consoleErrors.push('pageerror: ' + err.message)
+      const onReqFailed = (req) => netErrors.push(`${req.url()} — ${req.failure()?.errorText}`)
+      const onResponse = (resp) => { if (resp.status() >= 400) netErrors.push(`${resp.status()} ${resp.url()}`) }
+      page.on('console', onConsole)
+      page.on('pageerror', onPageError)
+      page.on('requestfailed', onReqFailed)
+      page.on('response', onResponse)
+
       await realClickByBox(page, box)
+      await new Promise(r => setTimeout(r, 4000))
+
+      page.off('console', onConsole)
+      page.off('pageerror', onPageError)
+      page.off('requestfailed', onReqFailed)
+      page.off('response', onResponse)
+
       // Dump incondicional (não só em falha): precisamos ver o que a tela do
-      // WhatsApp mostra logo após o clique (tela de discagem, erro de
-      // câmera/microfone, popup interceptando o clique etc.) pra saber se a
-      // ligação de verdade começou, já que o clique em si não garante isso.
-      await new Promise(r => setTimeout(r, 1500))
+      // WhatsApp mostra logo após o clique pra saber se a ligação de verdade
+      // começou, já que o clique em si não garante isso.
       await dumpDiagnostics(page, 'after-call-click')
+      try {
+        fs.writeFileSync(
+          '/tmp/callbridge_fail_after-call-click-net.txt',
+          `Console/página (erros):\n${consoleErrors.join('\n') || '(nenhum)'}\n\n` +
+          `Rede (falhas/erros HTTP):\n${netErrors.slice(0, 50).join('\n') || '(nenhum)'}`
+        )
+      } catch (_) {}
       return { called: true, page }
     }
     await new Promise(r => setTimeout(r, 1000))
