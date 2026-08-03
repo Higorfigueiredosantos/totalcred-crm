@@ -199,6 +199,10 @@ class CallBridge {
     ensurePulseAudio()
     this.clonedProfile = cloneSession(this.chipId)
 
+    // Mesmas flags do Chrome do chip2 (server.js/initChip), que roda estável
+    // há dias — a ponte de chamada usava um subconjunto menor e sofria com
+    // "Requesting main frame too early!" toda vez, o que sugere que alguma
+    // dessas flags (provavelmente --no-zygote) é o que faltava.
     const chromePath = findChromePath()
     this.browser = await puppeteer.launch({
       headless: true,
@@ -210,9 +214,15 @@ class CallBridge {
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
+        '--no-first-run',
+        '--no-zygote',
+        '--disable-single-instance',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-features=site-per-process',
         '--autoplay-policy=no-user-gesture-required',
         '--window-size=960,720',
       ],
+      ignoreDefaultArgs: ['--enable-automation'],
     })
 
     const context = this.browser.defaultBrowserContext()
