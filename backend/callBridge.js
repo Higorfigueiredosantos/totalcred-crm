@@ -251,9 +251,13 @@ class CallBridge {
     // há dias — a ponte de chamada usava um subconjunto menor e sofria com
     // "Requesting main frame too early!" toda vez, o que sugere que alguma
     // dessas flags (provavelmente --no-zygote) é o que faltava.
+    // headless: true usa o modo headless ANTIGO do Chrome, que adiciona a
+    // flag --mute-audio automaticamente (silencia toda saída de áudio, então
+    // o call_out nunca recebia nada pro parec capturar). O modo "new" não
+    // faz isso e realmente envia o áudio pro dispositivo PulseAudio.
     const chromePath = findChromePath()
     this.browser = await puppeteer.launch({
-      headless: true,
+      headless: 'new',
       executablePath: chromePath || undefined,
       userDataDir: this.clonedProfile,
       env: { ...process.env, PULSE_SERVER: `unix:${PULSE_SOCKET}` },
