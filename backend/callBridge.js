@@ -150,6 +150,7 @@ async function searchAndOpenChat(page, contactName) {
     if (hasMain) return
     await new Promise(r => setTimeout(r, 1000))
   }
+  await dumpDiagnostics(page, 'no-main-after-search')
   throw new Error('Não consegui abrir a conversa desse contato no WhatsApp Web')
 }
 
@@ -187,6 +188,16 @@ async function openChatAndCall(browser, contactName, callType, onStatus) {
   if (outcome !== 'ready') {
     await dumpDiagnostics(page, 'app-not-ready')
     throw new Error('O WhatsApp Web não terminou de carregar')
+  }
+
+  // O popup de "Novidades" às vezes só aparece um pouco DEPOIS da caixa de
+  // pesquisa já existir no DOM — a checagem de waitForAppReady já passava
+  // antes dele nem ter surgido, então nunca era fechado a tempo e acabava
+  // engolindo o clique no resultado da busca (o clique caía no popup por
+  // cima, não na conversa por baixo). Dedica alguns segundos só pra isso.
+  for (let i = 0; i < 5; i++) {
+    await dismissNoveltiesModal(page).catch(() => {})
+    await new Promise(r => setTimeout(r, 1000))
   }
 
   onStatus?.('procurando_contato')
