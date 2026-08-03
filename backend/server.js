@@ -219,20 +219,50 @@ wssCall.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'error', error: 'Já existe uma chamada em andamento' }))
         return
       }
-      if (!msg.chipId || !msg.contactName) {
-        ws.send(JSON.stringify({ type: 'error', error: 'chipId e contactName são obrigatórios' }))
+      if (!msg.chipId || !msg.phone) {
+        ws.send(JSON.stringify({ type: 'error', error: 'chipId e phone são obrigatórios' }))
         return
       }
       const ownNumber = chipSessions[msg.chipId]?.number
-      const targetNumber = String(msg.phone || '').replace(/\D/g, '')
-      if (ownNumber && targetNumber && targetNumber.endsWith(ownNumber)) {
+      const targetDigitsRaw = String(msg.phone || '').replace(/\D/g, '')
+      if (ownNumber && targetDigitsRaw && targetDigitsRaw.endsWith(ownNumber)) {
         ws.send(JSON.stringify({ type: 'error', error: 'Esse contato é o próprio número do chip — não é possível ligar para si mesmo no WhatsApp.' }))
         return
       }
+
+      // Resolve o número real pra ligação. Contatos identificados por LID
+      // (comuns nessa conta) não têm número pesquisável diretamente, mas o
+      // WhatsApp muitas vezes já sabe o número real associado internamente —
+      // client.getContactById resolve isso via o chip ao vivo (mesma
+      // sessão autenticada, sem precisar do bridge isolado).
+      const rawPhone = String(msg.phone)
+      let contactQuery = null
+      if (rawPhone.endsWith('@lid')) {
+        try {
+          const client = chipSessions[msg.chipId]?.client
+          const contact = client ? await client.getContactById(rawPhone) : null
+          const resolvedId = contact?.id?._serialized || ''
+          if (resolvedId.endsWith('@c.us')) {
+            contactQuery = `+${resolvedId.replace(/@.*$/, '')}`
+          }
+        } catch (e) {
+          console.error('[CallBridge] Erro ao resolver número real do LID:', e.message)
+        }
+        if (!contactQuery) {
+          ws.send(JSON.stringify({ type: 'error', error: 'Não consegui obter o número de telefone real desse contato para ligar.' }))
+          return
+        }
+      } else if (rawPhone.endsWith('@c.us') && targetDigitsRaw) {
+        contactQuery = `+${targetDigitsRaw}`
+      } else {
+        ws.send(JSON.stringify({ type: 'error', error: 'Esse contato não tem um número de telefone válido para ligação.' }))
+        return
+      }
+
       bridge = new CallBridge(msg.chipId, msg.callType)
       activeCallBridge = bridge
       try {
-        await bridge.start({ phone: msg.phone, contactName: msg.contactName }, {
+        await bridge.start({ contactName: contactQuery }, {
           onVideoFrame: buf => { if (ws.readyState === 1) ws.send(Buffer.concat([Buffer.from([1]), buf])) },
           onAudioChunk: buf => { if (ws.readyState === 1) ws.send(Buffer.concat([Buffer.from([2]), buf])) },
           onStatus: status => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'status', status })) },
@@ -1654,6 +1684,18 @@ app.post('/api/tools/wa-filter', (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 app.get('/api/chips', (_req, res) => res.json(getChipsList()))
+
+// TEMP DEBUG: valida a resolucao de LID -> numero real antes de remover.
+app.get('/api/debug/resolve-contact/:chipId', async (req, res) => {
+  try {
+    const client = chipSessions[req.params.chipId]?.client
+    if (!client) return res.status(404).json({ error: 'chip não encontrado ou não pronto' })
+    const contact = await client.getContactById(String(req.query.phone))
+    res.json({ id: contact?.id, number: contact?.number })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
 
 app.post('/api/chips/connect', (req, res) => {
   const { chipId } = req.body

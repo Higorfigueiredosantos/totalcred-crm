@@ -929,19 +929,15 @@ export default function Messages() {
     setShowCallMenu(false)
     if (!activeChipId || !activeContact) return
     setSendError(null)
-    // Abre a conversa pelo NÚMERO de telefone (deep link resolvido pelo
-    // próprio WhatsApp, sem ambiguidade) — nomes podem colidir entre
-    // contatos diferentes (ex: dois contatos salvos como "."), então não dá
-    // pra confiar neles pra achar a conversa certa. Contatos identificados
-    // por LID ou grupos não têm número de telefone de verdade, então não
-    // são suportados pra ligação por enquanto.
-    const rawPhone = activeContact.phone || ''
-    const digits = rawPhone.replace(/@.*$/, '').replace(/\D/g, '')
-    if (!rawPhone.endsWith('@c.us') || !digits) {
-      setSendError('Esse contato não tem um número de telefone válido para ligação.')
+    // A resolução do número (inclusive contatos identificados por LID, cujo
+    // número real o backend consegue obter via o chip ao vivo) acontece no
+    // backend — o frontend só repassa o JID bruto do contato. Grupos não
+    // têm número de telefone, então não são suportados pra ligação.
+    if (activeContact.phone?.endsWith('@g.us')) {
+      setSendError('Não é possível ligar para grupos.')
       return
     }
-    setActiveCall({ chipId: activeChipId, callType, phone: activeContact.phone, contactName: `+${digits}` })
+    setActiveCall({ chipId: activeChipId, callType, phone: activeContact.phone, contactName: activeContact.phone })
   }
 
   function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
