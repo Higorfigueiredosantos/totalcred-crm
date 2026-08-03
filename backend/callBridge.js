@@ -94,131 +94,16 @@ async function dismissNoveltiesModal(page) {
   if (box) await realClickByBox(page, box)
 }
 
-// Abre a página principal do WhatsApp Web (sem depender de link/telefone) e
-// espera ela carregar de verdade, tentando fechar o popup de "Novidades" a
-// cada volta (aparece toda vez numa sessão recém-clonada e engole outras
-// interações se não for fechado). Retorna 'ready' ou 'timeout'.
-// Caixa de pesquisa do WhatsApp Web: um <input> de verdade (não
-// contenteditable, como em versões antigas), identificado com mais
-// confiança pelo aria-label (funciona em pt-BR e en) do que por classes.
-const SEARCH_INPUT_SELECTOR = 'input[data-tab="3"], input[aria-label*="Pesquisar"], input[aria-label*="Search"]'
-
-async function waitForAppReady(page, maxSeconds) {
-  for (let i = 0; i < maxSeconds; i++) {
-    await dismissNoveltiesModal(page).catch(() => {})
-    const ready = await page.evaluate((sel) => !!document.querySelector(sel), SEARCH_INPUT_SELECTOR)
-      .catch(e => { console.error('[CallBridge] waitForAppReady evaluate falhou:', e.message); return false })
-    if (ready) return 'ready'
-    await new Promise(r => setTimeout(r, 1000))
-  }
-  return 'timeout'
-}
-
-// Busca o contato pelo NÚMERO sempre que existir um de verdade (números não
-// colidem entre contatos, diferente de nomes — ex: "mae" e "mae isadora").
-// Só cai pro NOME quando o contato é identificado por LID ou é um grupo: aí
-// não existe número de telefone de verdade pra buscar (a conta nem enxerga
-// um), então o deep link `send?phone=` e a busca numérica não funcionam.
-async function searchAndOpenChat(page, contactName) {
-  // Quando a busca é por número (formato "+55...", montado no frontend), o
-  // item encontrado mostra o NOME salvo do contato, não o número digitado —
-  // então não dá pra confirmar o match comparando texto. Números não
-  // colidem como nomes colidem, então usa o primeiro resultado direto,
-  // igual um humano faria ao digitar um número exato.
-  const isPhoneQuery = /^\+?\d{8,15}$/.test(contactName.trim())
-  // Clicar por coordenada costuma focar um <div> de sobreposição em vez do
-  // <input> de verdade (o WhatsApp Web desenha uma camada por cima) — focar
-  // direto via .focus() no elemento é o que realmente funciona.
-  const focused = await page.evaluate((sel) => {
-    const el = document.querySelector(sel)
-    if (!el) return false
-    el.focus()
-    return document.activeElement === el
-  }, SEARCH_INPUT_SELECTOR).catch(() => false)
-  if (!focused) throw new Error('Não encontrei a caixa de pesquisa do WhatsApp Web')
-
-  // Sob disputa de CPU (o chip2 ao vivo roda no mesmo container), digitar
-  // pode não "colar" de primeira — confirma o valor do campo e retenta em
-  // vez de assumir que funcionou.
-  let typed = false
-  for (let attempt = 0; attempt < 3 && !typed; attempt++) {
-    if (attempt > 0) {
-      await page.evaluate((sel) => { const el = document.querySelector(sel); if (el) el.value = '' }, SEARCH_INPUT_SELECTOR).catch(() => {})
-    }
-    await page.keyboard.type(contactName, { delay: 60 })
-    await new Promise(r => setTimeout(r, 800))
-    const val = await page.evaluate((sel) => document.querySelector(sel)?.value, SEARCH_INPUT_SELECTOR).catch(() => null)
-    typed = val === contactName
-  }
-  if (!typed) throw new Error('Não consegui digitar o nome do contato na busca do WhatsApp Web')
-
-  let resultBox = null
-  if (isPhoneQuery) {
-    for (let i = 0; i < 10 && !resultBox; i++) {
-      resultBox = await page.evaluate(() => {
-        const row = document.querySelector('[data-testid="cell-frame-container"], div[role="listitem"], div[role="gridcell"]')
-        if (!row) return null
-        const r = row.getBoundingClientRect()
-        return { x: r.x, y: r.y, width: r.width, height: r.height }
-      }).catch(() => null)
-      if (!resultBox) await new Promise(r => setTimeout(r, 400))
-    }
-  } else {
-    // Busca por NOME (fallback pra LID/grupo): não basta pegar "o primeiro
-    // item da lista", nem comparar contra o texto INTEIRO da linha (isso
-    // inclui a prévia da última mensagem e nome de grupos em comum — um
-    // contato diferente cuja última mensagem só CONTÉM a palavra buscada já
-    // bastava pra ser escolhido por engano). Compara só a primeira linha (o
-    // nome exibido) e prioriza igualdade exata > começa-com > contém,
-    // escolhendo o melhor entre todos os itens visíveis.
-    const needle = contactName.trim().toLowerCase()
-    for (let i = 0; i < 10 && !resultBox; i++) {
-      resultBox = await page.evaluate((needle) => {
-        const rows = Array.from(document.querySelectorAll('[data-testid="cell-frame-container"], div[role="listitem"], div[role="gridcell"]'))
-        let best = null
-        let bestScore = -1
-        for (const row of rows) {
-          const firstLine = (row.innerText || '').split('\n')[0].trim().toLowerCase()
-          let score = -1
-          if (firstLine === needle) score = 3
-          else if (firstLine.startsWith(needle)) score = 2
-          else if (firstLine.includes(needle)) score = 1
-          if (score > bestScore) { bestScore = score; best = row }
-        }
-        if (!best || bestScore < 0) return null
-        const r = best.getBoundingClientRect()
-        return { x: r.x, y: r.y, width: r.width, height: r.height }
-      }, needle).catch(() => null)
-      if (!resultBox) await new Promise(r => setTimeout(r, 400))
-    }
-  }
-  if (!resultBox) throw new Error(`Não encontrei "${contactName}" na busca do WhatsApp Web`)
-
-  await realClickByBox(page, resultBox)
-
-  for (let i = 0; i < 25; i++) {
-    const hasMain = await page.evaluate(() => !!document.querySelector('#main')).catch(() => false)
-    if (hasMain) return
-    await new Promise(r => setTimeout(r, 1000))
-  }
-  await dumpDiagnostics(page, 'no-main-after-search')
-  throw new Error('Não consegui abrir a conversa desse contato no WhatsApp Web')
-}
-
-// Abre a conversa do contato (buscando pelo nome) e clica no botão real de
-// ligação de voz/vídeo do cabeçalho — o mesmo botão que um humano clicaria,
-// que toca de verdade no aparelho do contato (sem link, sem mensagem).
-// Recebe o browser (não uma page fixa): sob CPU sob pressão o Puppeteer às
-// vezes nunca anexa o frame principal de uma page recém-criada ("Requesting
-// main frame too early!" em loop) — nesse caso reusar a mesma page tende a
-// repetir o problema, então a segunda tentativa recria a page do zero.
-async function openChatAndCall(browser, contactName, callType, onStatus) {
-  let page = await browser.newPage()
-  await new Promise(r => setTimeout(r, 500)) // folga pro frame principal anexar
-
+// Abre a conversa navegando DIRETO pro deep link `send?phone=<numero>` — o
+// próprio WhatsApp resolve o número no servidor dele, então não existe
+// ambiguidade de nome possível (diferente de buscar na lista, onde dois
+// contatos com o mesmo nome salvo, ex: ".", já causaram ligação pro número
+// errado). Só funciona com número de telefone de verdade: contatos
+// identificados por LID (ou grupos) não têm número pesquisável por essa via.
+async function openChatViaPhoneLink(page, digits, onStatus) {
   async function safeGoto() {
     try {
-      await page.goto('https://web.whatsapp.com', { waitUntil: 'domcontentloaded', timeout: 30000 })
+      await page.goto(`https://web.whatsapp.com/send?phone=${digits}`, { waitUntil: 'domcontentloaded', timeout: 30000 })
     } catch (e) {
       console.error('[CallBridge] page.goto falhou:', e.message)
     }
@@ -226,33 +111,63 @@ async function openChatAndCall(browser, contactName, callType, onStatus) {
 
   onStatus?.('sincronizando')
   await safeGoto()
-  let outcome = await waitForAppReady(page, 25)
+
+  async function waitForOutcome(maxSeconds) {
+    for (let i = 0; i < maxSeconds; i++) {
+      await dismissNoveltiesModal(page).catch(() => {})
+      const hasMain = await page.evaluate(() => !!document.querySelector('#main')).catch(() => false)
+      if (hasMain) return 'ready'
+      const invalid = await page.evaluate(() => {
+        const body = document.body.innerText || ''
+        return body.includes('não tem WhatsApp') || body.includes('Telefone incorreto') || body.includes('inválido')
+      }).catch(() => false)
+      if (invalid) return 'invalid'
+      await new Promise(r => setTimeout(r, 500))
+    }
+    return 'timeout'
+  }
+
+  let outcome = await waitForOutcome(25)
   if (outcome === 'timeout') {
-    // Frame principal nunca anexou (sobrecarga de CPU) — recria a page e
-    // tenta de novo, agora com mais margem.
+    // Frame principal pode nunca ter anexado (sobrecarga de CPU) — recria a
+    // page e tenta de novo, agora com mais margem. Retorna a nova page pro
+    // chamador poder atualizar sua referência.
+    return { outcome: 'retry' }
+  }
+  if (outcome === 'invalid') throw new Error('Esse contato não tem um número de telefone válido no WhatsApp')
+  return { outcome: 'ready' }
+}
+
+// Abre a conversa do contato (pelo número, via deep link) e clica no botão
+// real de ligação de voz/vídeo do cabeçalho — o mesmo botão que um humano
+// clicaria, que toca de verdade no aparelho do contato (sem link, sem
+// mensagem). Recebe o browser (não uma page fixa): sob CPU sob pressão o
+// Puppeteer às vezes nunca anexa o frame principal de uma page recém-criada
+// ("Requesting main frame too early!" em loop) — nesse caso reusar a mesma
+// page tende a repetir o problema, então a segunda tentativa recria a page
+// do zero.
+async function openChatAndCall(browser, contactName, callType, onStatus) {
+  const digits = contactName.trim().replace(/^\+/, '')
+  if (!/^\d{8,15}$/.test(digits)) {
+    throw new Error('Esse contato não tem um número de telefone válido para ligação')
+  }
+
+  let page = await browser.newPage()
+  await new Promise(r => setTimeout(r, 500)) // folga pro frame principal anexar
+
+  let result = await openChatViaPhoneLink(page, digits, onStatus)
+  if (result.outcome === 'retry') {
     try { await page.close() } catch (_) {}
     page = await browser.newPage()
     await new Promise(r => setTimeout(r, 500))
-    await safeGoto()
-    outcome = await waitForAppReady(page, 70)
+    result = await openChatViaPhoneLink(page, digits, onStatus)
   }
-  if (outcome !== 'ready') {
+  if (result.outcome !== 'ready') {
     await dumpDiagnostics(page, 'app-not-ready')
     throw new Error('O WhatsApp Web não terminou de carregar')
   }
 
-  // O popup de "Novidades" às vezes só aparece um pouco DEPOIS da caixa de
-  // pesquisa já existir no DOM — a checagem de waitForAppReady já passava
-  // antes dele nem ter surgido, então nunca era fechado a tempo e acabava
-  // engolindo o clique no resultado da busca (o clique caía no popup por
-  // cima, não na conversa por baixo). Dedica alguns segundos só pra isso.
-  for (let i = 0; i < 5; i++) {
-    await dismissNoveltiesModal(page).catch(() => {})
-    await new Promise(r => setTimeout(r, 600))
-  }
-
   onStatus?.('procurando_contato')
-  await searchAndOpenChat(page, contactName)
 
   const labels = callType === 'video'
     ? ['Ligação de vídeo', 'Video call']
@@ -299,9 +214,11 @@ class CallBridge {
     this.stopped = false
   }
 
-  // target.contactName: nome salvo no CRM — usado pra buscar o contato no
-  // WhatsApp Web (não dá pra confiar no telefone: muitos contatos nessa
-  // conta são identificados por LID interno, não por número de telefone).
+  // target.contactName: aqui é sempre o NÚMERO de telefone do contato
+  // (formato "+55..."), montado pelo frontend — usado pra abrir a conversa
+  // via deep link `send?phone=`, resolvido pelo próprio WhatsApp sem
+  // ambiguidade de nome. Contatos identificados por LID ou grupos não têm
+  // número de telefone de verdade, então não são suportados pra ligação.
   async start({ contactName }, { onVideoFrame, onAudioChunk, onStatus } = {}) {
     onStatus?.('preparando')
     ensurePulseAudio()
