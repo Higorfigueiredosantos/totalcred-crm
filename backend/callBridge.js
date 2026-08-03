@@ -132,20 +132,42 @@ async function searchAndOpenChat(page, contactName) {
   }, SEARCH_INPUT_SELECTOR).catch(() => false)
   if (!focused) throw new Error('Não encontrei a caixa de pesquisa do WhatsApp Web')
 
-  await page.keyboard.type(contactName, { delay: 40 })
-  await new Promise(r => setTimeout(r, 1500))
+  // Sob disputa de CPU (o chip2 ao vivo roda no mesmo container), digitar
+  // pode não "colar" de primeira — confirma o valor do campo e retenta em
+  // vez de assumir que funcionou.
+  let typed = false
+  for (let attempt = 0; attempt < 3 && !typed; attempt++) {
+    if (attempt > 0) {
+      await page.evaluate((sel) => { const el = document.querySelector(sel); if (el) el.value = '' }, SEARCH_INPUT_SELECTOR).catch(() => {})
+    }
+    await page.keyboard.type(contactName, { delay: 60 })
+    await new Promise(r => setTimeout(r, 800))
+    const val = await page.evaluate((sel) => document.querySelector(sel)?.value, SEARCH_INPUT_SELECTOR).catch(() => null)
+    typed = val === contactName
+  }
+  if (!typed) throw new Error('Não consegui digitar o nome do contato na busca do WhatsApp Web')
 
-  const resultBox = await page.evaluate(() => {
-    const row = document.querySelector('[data-testid="cell-frame-container"], div[role="listitem"], div[role="gridcell"]')
-    if (!row) return null
-    const r = row.getBoundingClientRect()
-    return { x: r.x, y: r.y, width: r.width, height: r.height }
-  }).catch(() => null)
+  // Não basta pegar "o primeiro item da lista": sob disputa de CPU a lista
+  // pode ainda não ter filtrado quando a gente olha, e o primeiro item seria
+  // uma conversa qualquer (não a buscada) — confirma que o texto do item
+  // bate com o contato antes de clicar, com retentativas.
+  const needle = contactName.trim().toLowerCase()
+  let resultBox = null
+  for (let i = 0; i < 10 && !resultBox; i++) {
+    resultBox = await page.evaluate((needle) => {
+      const rows = Array.from(document.querySelectorAll('[data-testid="cell-frame-container"], div[role="listitem"], div[role="gridcell"]'))
+      const row = rows.find(r => (r.innerText || '').toLowerCase().includes(needle))
+      if (!row) return null
+      const r = row.getBoundingClientRect()
+      return { x: r.x, y: r.y, width: r.width, height: r.height }
+    }, needle).catch(() => null)
+    if (!resultBox) await new Promise(r => setTimeout(r, 500))
+  }
   if (!resultBox) throw new Error(`Não encontrei "${contactName}" na busca do WhatsApp Web`)
 
   await realClickByBox(page, resultBox)
 
-  for (let i = 0; i < 15; i++) {
+  for (let i = 0; i < 25; i++) {
     const hasMain = await page.evaluate(() => !!document.querySelector('#main')).catch(() => false)
     if (hasMain) return
     await new Promise(r => setTimeout(r, 1000))
