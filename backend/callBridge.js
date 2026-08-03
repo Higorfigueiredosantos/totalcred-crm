@@ -114,13 +114,18 @@ async function waitForAppReady(page, maxSeconds) {
   return 'timeout'
 }
 
-// Busca o contato pelo NOME salvo no CRM (não pelo telefone): muitos contatos
-// nessa conta são identificados internamente por LID, não por um número de
-// telefone de verdade, então o deep link `send?phone=` retorna "esse número
-// não tem WhatsApp" mesmo para contatos com quem já se conversa normalmente.
-// Buscar pelo nome, do mesmo jeito que um humano faria na caixa de pesquisa,
-// funciona independente de LID ou telefone.
+// Busca o contato pelo NÚMERO sempre que existir um de verdade (números não
+// colidem entre contatos, diferente de nomes — ex: "mae" e "mae isadora").
+// Só cai pro NOME quando o contato é identificado por LID ou é um grupo: aí
+// não existe número de telefone de verdade pra buscar (a conta nem enxerga
+// um), então o deep link `send?phone=` e a busca numérica não funcionam.
 async function searchAndOpenChat(page, contactName) {
+  // Quando a busca é por número (formato "+55...", montado no frontend), o
+  // item encontrado mostra o NOME salvo do contato, não o número digitado —
+  // então não dá pra confirmar o match comparando texto. Números não
+  // colidem como nomes colidem, então usa o primeiro resultado direto,
+  // igual um humano faria ao digitar um número exato.
+  const isPhoneQuery = /^\+?\d{8,15}$/.test(contactName.trim())
   // Clicar por coordenada costuma focar um <div> de sobreposição em vez do
   // <input> de verdade (o WhatsApp Web desenha uma camada por cima) — focar
   // direto via .focus() no elemento é o que realmente funciona.
@@ -147,33 +152,45 @@ async function searchAndOpenChat(page, contactName) {
   }
   if (!typed) throw new Error('Não consegui digitar o nome do contato na busca do WhatsApp Web')
 
-  // Não basta pegar "o primeiro item da lista", nem comparar contra o texto
-  // INTEIRO da linha (isso inclui a prévia da última mensagem e nome de
-  // grupos em comum — um contato diferente cuja última mensagem só CONTÉM a
-  // palavra buscada já bastava pra ser escolhido por engano, ligando pro
-  // número errado). Compara só a primeira linha (o nome exibido) e prioriza
-  // igualdade exata > começa-com > contém, escolhendo o melhor entre todos
-  // os itens visíveis em vez do primeiro que bater.
-  const needle = contactName.trim().toLowerCase()
   let resultBox = null
-  for (let i = 0; i < 10 && !resultBox; i++) {
-    resultBox = await page.evaluate((needle) => {
-      const rows = Array.from(document.querySelectorAll('[data-testid="cell-frame-container"], div[role="listitem"], div[role="gridcell"]'))
-      let best = null
-      let bestScore = -1
-      for (const row of rows) {
-        const firstLine = (row.innerText || '').split('\n')[0].trim().toLowerCase()
-        let score = -1
-        if (firstLine === needle) score = 3
-        else if (firstLine.startsWith(needle)) score = 2
-        else if (firstLine.includes(needle)) score = 1
-        if (score > bestScore) { bestScore = score; best = row }
-      }
-      if (!best || bestScore < 0) return null
-      const r = best.getBoundingClientRect()
-      return { x: r.x, y: r.y, width: r.width, height: r.height }
-    }, needle).catch(() => null)
-    if (!resultBox) await new Promise(r => setTimeout(r, 400))
+  if (isPhoneQuery) {
+    for (let i = 0; i < 10 && !resultBox; i++) {
+      resultBox = await page.evaluate(() => {
+        const row = document.querySelector('[data-testid="cell-frame-container"], div[role="listitem"], div[role="gridcell"]')
+        if (!row) return null
+        const r = row.getBoundingClientRect()
+        return { x: r.x, y: r.y, width: r.width, height: r.height }
+      }).catch(() => null)
+      if (!resultBox) await new Promise(r => setTimeout(r, 400))
+    }
+  } else {
+    // Busca por NOME (fallback pra LID/grupo): não basta pegar "o primeiro
+    // item da lista", nem comparar contra o texto INTEIRO da linha (isso
+    // inclui a prévia da última mensagem e nome de grupos em comum — um
+    // contato diferente cuja última mensagem só CONTÉM a palavra buscada já
+    // bastava pra ser escolhido por engano). Compara só a primeira linha (o
+    // nome exibido) e prioriza igualdade exata > começa-com > contém,
+    // escolhendo o melhor entre todos os itens visíveis.
+    const needle = contactName.trim().toLowerCase()
+    for (let i = 0; i < 10 && !resultBox; i++) {
+      resultBox = await page.evaluate((needle) => {
+        const rows = Array.from(document.querySelectorAll('[data-testid="cell-frame-container"], div[role="listitem"], div[role="gridcell"]'))
+        let best = null
+        let bestScore = -1
+        for (const row of rows) {
+          const firstLine = (row.innerText || '').split('\n')[0].trim().toLowerCase()
+          let score = -1
+          if (firstLine === needle) score = 3
+          else if (firstLine.startsWith(needle)) score = 2
+          else if (firstLine.includes(needle)) score = 1
+          if (score > bestScore) { bestScore = score; best = row }
+        }
+        if (!best || bestScore < 0) return null
+        const r = best.getBoundingClientRect()
+        return { x: r.x, y: r.y, width: r.width, height: r.height }
+      }, needle).catch(() => null)
+      if (!resultBox) await new Promise(r => setTimeout(r, 400))
+    }
   }
   if (!resultBox) throw new Error(`Não encontrei "${contactName}" na busca do WhatsApp Web`)
 

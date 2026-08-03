@@ -929,7 +929,14 @@ export default function Messages() {
     setShowCallMenu(false)
     if (!activeChipId || !activeContact) return
     setSendError(null)
-    setActiveCall({ chipId: activeChipId, callType, phone: activeContact.phone, contactName: activeContact.name })
+    // Busca pelo número sempre que possível: nomes podem colidir (ex: "mae"
+    // e "mae isadora"), números não. Só cai pro nome quando o contato é
+    // identificado por LID ou é um grupo — aí não existe número de telefone
+    // de verdade pra buscar (a conta nem enxerga um).
+    const rawPhone = activeContact.phone || ''
+    const digits = rawPhone.replace(/@.*$/, '').replace(/\D/g, '')
+    const searchQuery = rawPhone.endsWith('@c.us') && digits ? `+${digits}` : activeContact.name
+    setActiveCall({ chipId: activeChipId, callType, phone: activeContact.phone, contactName: searchQuery })
   }
 
   function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
