@@ -97,9 +97,16 @@ async function dismissNoveltiesModal(page) {
 // Abre a conversa do contato (via deep link) e clica no botão real de
 // ligação de voz/vídeo do cabeçalho — o mesmo botão que um humano clicaria,
 // que toca de verdade no aparelho do contato (sem link, sem mensagem).
-async function openChatAndCall(page, phone, callType, onStatus) {
+// Recebe o browser (não uma page fixa): sob CPU sob pressão o Puppeteer às
+// vezes nunca anexa o frame principal de uma page recém-criada ("Requesting
+// main frame too early!" em loop) — nesse caso reusar a mesma page tende a
+// repetir o problema, então a segunda tentativa recria a page do zero.
+async function openChatAndCall(browser, phone, callType, onStatus) {
   const digits = String(phone).replace(/\D/g, '')
   const url = `https://web.whatsapp.com/send?phone=${digits}`
+
+  let page = await browser.newPage()
+  await new Promise(r => setTimeout(r, 500)) // folga pro frame principal anexar
 
   async function safeGoto() {
     try {
@@ -134,8 +141,12 @@ async function openChatAndCall(page, phone, callType, onStatus) {
   let outcome = await waitForOutcome(25)
   if (outcome === 'timeout') {
     // O popup de "Novidades" (numa sessão recém-clonada) pode ter engolido a
-    // abertura automática da conversa do ?phone= — navega de novo agora que
-    // ele já foi fechado durante a espera acima.
+    // abertura automática da conversa do ?phone= — ou o frame principal
+    // nunca anexou por sobrecarga de CPU. Recria a page do zero e tenta de
+    // novo, agora com mais margem.
+    try { await page.close() } catch (_) {}
+    page = await browser.newPage()
+    await new Promise(r => setTimeout(r, 500))
     await safeGoto()
     outcome = await waitForOutcome(70)
   }
@@ -152,11 +163,11 @@ async function openChatAndCall(page, phone, callType, onStatus) {
 
   for (let i = 0; i < 10; i++) {
     const box = await findBoxByAriaLabel(page, labels)
-    if (box) { await realClickByBox(page, box); return true }
+    if (box) { await realClickByBox(page, box); return { called: true, page } }
     await new Promise(r => setTimeout(r, 1000))
   }
   await dumpDiagnostics(page, 'no-call-button')
-  return false
+  return { called: false, page }
 }
 
 // Salva screenshot + texto da página em /tmp pra diagnosticar falhas reais
@@ -207,8 +218,8 @@ class CallBridge {
     const context = this.browser.defaultBrowserContext()
     await context.overridePermissions('https://web.whatsapp.com', ['camera', 'microphone'])
 
-    this.callPage = await this.browser.newPage()
-    const called = await openChatAndCall(this.callPage, phone, this.callType, onStatus)
+    const { called, page } = await openChatAndCall(this.browser, phone, this.callType, onStatus)
+    this.callPage = page
     if (!called) throw new Error('Não encontrei o botão de ligação no cabeçalho da conversa')
     onStatus?.('autenticando_ligando')
 
