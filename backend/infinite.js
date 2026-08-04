@@ -57,17 +57,26 @@ function removeLabel(name) {
 async function listInstances() {
   const { data } = await http().get('/v1/instances')
   const labels = loadLabels()
-  const active = (data.instances || []).map(i => ({
-    name: i.instance,
-    status: i.status,
-    hasQr: Boolean(i.hasQr),
-    createdAt: i.createdAt,
-    label: labels[i.instance]?.label || null,
+  const active = await Promise.all((data.instances || []).map(async i => {
+    const hasQr = Boolean(i.hasQr)
+    let qr = null
+    // GET /v1/instances só informa hasQr — a imagem do QR só vem do endpoint dedicado
+    if (hasQr && i.status === 'qr') {
+      try { qr = (await getInstanceQr(i.instance)).qr || null } catch (e) {}
+    }
+    return {
+      name: i.instance,
+      status: i.status,
+      hasQr,
+      qr,
+      createdAt: i.createdAt,
+      label: labels[i.instance]?.label || null,
+    }
   }))
   const activeNames = new Set(active.map(i => i.name))
   const savedOnly = (data.saved || [])
     .filter(name => !activeNames.has(name))
-    .map(name => ({ name, status: 'disconnected', hasQr: false, createdAt: null, label: labels[name]?.label || null }))
+    .map(name => ({ name, status: 'disconnected', hasQr: false, qr: null, createdAt: null, label: labels[name]?.label || null }))
   return [...active, ...savedOnly]
 }
 
