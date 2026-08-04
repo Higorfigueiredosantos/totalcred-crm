@@ -578,11 +578,11 @@ export default function InfiniteCampaignWizardModal({ onClose, onStart, onResetS
               </div>
 
               {messageType !== 'menu' && (
-                <div className="bg-red-900/10 border border-red-800/30 rounded-lg p-3 text-[11px] text-red-300/80 flex gap-2">
+                <div className="bg-orange-900/10 border border-orange-800/30 rounded-lg p-3 text-[11px] text-orange-300/80 flex gap-2">
                   <AlertCircle size={13} className="shrink-0 mt-0.5" />
-                  Botões, CTA, lista, enquete e carrossel usam um formato experimental (fora da Cloud API oficial) que o
-                  WhatsApp pode aceitar no envio e descartar silenciosamente do lado do destinatário — sem erro. Também há
-                  risco de banimento do número conectado. O tipo "Menu" (texto puro) não tem esse risco.
+                  Botões, CTA, lista, enquete e carrossel usam um formato marcado como experimental pelo próprio Baileys
+                  (fora da Cloud API oficial) — funciona, mas o autor da lib avisa que pode gerar risco de banimento do
+                  número conectado. Use com moderação. O tipo "Menu" (texto puro) não tem esse risco.
                 </div>
               )}
             </div>
