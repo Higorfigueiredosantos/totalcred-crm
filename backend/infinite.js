@@ -1,8 +1,10 @@
 'use strict'
 // Integração com o serviço "Infinite" (baileys_interactive), um microserviço
 // REST separado (infinite-service/) que expõe conexões WhatsApp via Baileys
-// com suporte a botões/listas/carrossel/enquete. Só envio — o serviço não tem
-// webhook de mensagens recebidas, então não há nada a receber aqui.
+// com suporte a botões/listas/carrossel/enquete. Disparo via REST (send*/
+// campanha) e recebimento via webhook (o próprio infinite-service nos chama
+// em /api/infinite/webhook quando chega mensagem) — resposta pelo Mensagens
+// não é suportada, só leitura.
 const axios = require('axios')
 const fs = require('fs')
 const path = require('path')
@@ -13,6 +15,18 @@ const INFINITE_API_KEY = process.env.INFINITE_API_KEY || ''
 const DATA_DIR = path.join(__dirname, 'data')
 const LABELS_FILE = path.join(DATA_DIR, 'infinite_instances.json')
 const HISTORY_FILE = path.join(DATA_DIR, 'infinite_campaigns_history.json')
+
+// Injetado por server.js via init() — evita import circular (infinite.js é
+// exigido antes de broadcast/getConvId/MEDIA_DIR existirem em server.js).
+let _broadcast = () => {}
+let _getConvId = (channel, contact) => `${channel}:${contact}`
+let _mediaDir = DATA_DIR
+
+function init({ broadcast, getConvId, mediaDir }) {
+  if (broadcast) _broadcast = broadcast
+  if (getConvId) _getConvId = getConvId
+  if (mediaDir) _mediaDir = mediaDir
+}
 
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true })
@@ -203,7 +217,7 @@ function resolvePayload(payload, contact) {
   return payload
 }
 
-async function runCampaign(data, broadcast) {
+async function runCampaign(data) {
   const { name, messageType, payload, instanceNames, contacts, delayMin = 5, delayMax = 15 } = data
   campaignState.results = []
   campaignState.paused = false
@@ -214,7 +228,7 @@ async function runCampaign(data, broadcast) {
   const startedAt = Date.now()
   let rrIndex = 0
 
-  broadcast('infinite_campaign', { type: 'started', instances: instanceNames, total: contacts.length })
+  _broadcast('infinite_campaign', { type: 'started', instances: instanceNames, total: contacts.length })
 
   for (let i = 0; i < contacts.length; i++) {
     if (campaignState.stopped) break
@@ -223,13 +237,13 @@ async function runCampaign(data, broadcast) {
     const contact = contacts[i]
 
     if (campaignState.sentNumbers.has(contact.number)) {
-      broadcast('infinite_campaign', { type: 'skipped', number: contact.number, current: i + 1, total: contacts.length })
+      _broadcast('infinite_campaign', { type: 'skipped', number: contact.number, current: i + 1, total: contacts.length })
       continue
     }
 
     const result = { index: i, number: contact.number, name: contact.name || contact.number, status: 'sending' }
     campaignState.results.push(result)
-    broadcast('infinite_campaign', { type: 'progress', contact: result, success, failed, total: contacts.length, current: i + 1 })
+    _broadcast('infinite_campaign', { type: 'progress', contact: result, success, failed, total: contacts.length, current: i + 1 })
 
     try {
       const instanceName = instanceNames[rrIndex % instanceNames.length]
@@ -241,23 +255,23 @@ async function runCampaign(data, broadcast) {
       result.sentAt = Date.now()
       success++
       campaignState.sentNumbers.add(contact.number)
-      broadcast('infinite_campaign', { type: 'result', contact: result, success, failed })
+      _broadcast('infinite_campaign', { type: 'result', contact: result, success, failed })
     } catch (e) {
       result.status = 'failed'
       result.error = e?.response?.data?.error || e.message || 'Erro desconhecido'
       failed++
-      broadcast('infinite_campaign', { type: 'result', contact: result, success, failed })
+      _broadcast('infinite_campaign', { type: 'result', contact: result, success, failed })
     }
 
     if (i < contacts.length - 1 && !campaignState.stopped) {
       const delay = Math.floor(Math.random() * (Math.max(delayMax, delayMin) - delayMin + 1)) + delayMin
-      broadcast('infinite_campaign', { type: 'waiting', delay, next: i + 2 })
+      _broadcast('infinite_campaign', { type: 'waiting', delay, next: i + 2 })
       await sleep(delay * 1000)
     }
   }
 
   const endedAt = Date.now()
-  broadcast('infinite_campaign', { type: 'done', success, failed, total: contacts.length, results: campaignState.results })
+  _broadcast('infinite_campaign', { type: 'done', success, failed, total: contacts.length, results: campaignState.results })
 
   saveHistoryRecord({
     id: startedAt.toString(),
@@ -276,7 +290,63 @@ async function runCampaign(data, broadcast) {
   campaignState.current = null
 }
 
+// ── Mensagens recebidas (webhook do infinite-service) ─────────────────────────
+
+const MEDIA_EXT_MAP = {
+  'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif',
+  'audio/ogg': 'ogg', 'audio/mpeg': 'mp3', 'audio/mp4': 'm4a', 'audio/webm': 'webm', 'audio/aac': 'aac',
+  'video/mp4': 'mp4', 'video/webm': 'webm', 'video/3gpp': '3gp',
+  'application/pdf': 'pdf',
+}
+
+// Chamado pela rota POST /api/infinite/webhook quando o infinite-service repassa
+// uma mensagem recebida. Reaproveita o mesmo evento WS "chip_message" que
+// Mensagens.tsx já consome (chipId prefixado com "infinite:" pra diferenciar
+// visualmente sem duplicar toda a lógica de contato/conversa no frontend).
+function handleWebhookMessage(body) {
+  const {
+    instance, from, author, isGroup, groupName, pushname, contactNumber,
+    body: text, timestamp, msgType, mediaBase64, mediaMimetype,
+  } = body || {}
+  if (!instance || !from) return
+
+  const chipId = `infinite:${instance}`
+  let mediaUrl = null
+  let mediaFileName = null
+
+  if (mediaBase64) {
+    try {
+      const mime = (mediaMimetype || 'application/octet-stream').split(';')[0].trim()
+      const ext = MEDIA_EXT_MAP[mime] || (mime.split('/')[1] || 'bin').replace(/[^a-z0-9]/gi, '')
+      const fname = `infinite_${instance}_${Date.now()}.${ext}`
+      fs.writeFileSync(path.join(_mediaDir, fname), Buffer.from(mediaBase64, 'base64'))
+      mediaUrl = `/api/media/files/${fname}`
+      mediaFileName = fname
+    } catch (e) {
+      console.error('[Infinite] Erro ao salvar mídia recebida:', e.message)
+    }
+  }
+
+  const conversationId = _getConvId(chipId, from)
+  _broadcast('chip_message', {
+    chipId,
+    from,
+    author: author || from,
+    body: text || '',
+    timestamp,
+    isGroup: !!isGroup,
+    groupName: groupName || null,
+    pushname: pushname || null,
+    contactNumber: contactNumber || null,
+    msgType: msgType || 'text',
+    mediaUrl,
+    mediaFileName,
+    conversationId,
+  })
+}
+
 module.exports = {
+  init,
   listInstances,
   createInstance,
   getInstanceStatus,
@@ -290,4 +360,5 @@ module.exports = {
   campaignState,
   loadHistory,
   deleteHistoryRecord,
+  handleWebhookMessage,
 }

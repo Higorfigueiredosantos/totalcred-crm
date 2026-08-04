@@ -338,6 +338,8 @@ function broadcast(type, payload) {
   }
 }
 
+infinite.init({ broadcast, getConvId, mediaDir: MEDIA_DIR })
+
 // ── Webhook storage & fire ────────────────────────────────────────────────────
 const WEBHOOKS_FILE = path.join(__dirname, 'data', 'webhooks.json')
 
@@ -1915,6 +1917,18 @@ app.post('/api/infinite/send', async (req, res) => {
   }
 })
 
+// Webhook chamado pelo próprio infinite-service quando chega mensagem numa
+// instância conectada. Protegido pela mesma chave usada para autenticar as
+// chamadas backend → infinite-service (INFINITE_API_KEY), na direção inversa.
+app.post('/api/infinite/webhook', (req, res) => {
+  const key = req.headers['x-api-key']
+  if (process.env.INFINITE_API_KEY && key !== process.env.INFINITE_API_KEY) {
+    return res.status(401).json({ error: 'unauthorized' })
+  }
+  infinite.handleWebhookMessage(req.body)
+  res.json({ ok: true })
+})
+
 // ── Infinite Campaign Routes ───────────────────────────────────────────────────
 
 app.post('/api/infinite-campaign/start', (req, res) => {
@@ -1927,7 +1941,7 @@ app.post('/api/infinite-campaign/start', (req, res) => {
     return res.status(400).json({ error: 'Nenhum contato informado' })
   }
   res.json({ ok: true, count: data.contacts.length })
-  infinite.runCampaign(data, broadcast)
+  infinite.runCampaign(data)
 })
 
 app.post('/api/infinite-campaign/pause', (_req, res) => {

@@ -6,6 +6,8 @@ export const config = {
   port: parseInt(process.env.PORT ?? '8787', 10),
   apiKey: process.env.API_KEY ?? 'ACFH4RFOTME4RU50R4FKGNW34LDFG8DSQ',
   authFolder: process.env.AUTH_FOLDER ?? 'auth',
+  // URL do CRM que recebe mensagens inbound (webhook) — vazio desativa o repasse
+  webhookUrl: process.env.WEBHOOK_URL ?? '',
   limits: {
     maxButtons: 3,
     maxCarouselCards: 10,

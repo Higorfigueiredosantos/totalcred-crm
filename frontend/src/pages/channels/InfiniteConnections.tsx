@@ -1,7 +1,7 @@
 import { useImperativeHandle, forwardRef, useState } from 'react'
 import {
   Zap, Plus, Trash2, RefreshCw, Wifi, WifiOff,
-  X, AlertCircle, Loader2, Settings,
+  X, AlertCircle, Loader2, Settings, Users,
 } from 'lucide-react'
 import { useInfiniteInstances } from '../../hooks/useInfiniteInstances'
 import { apiFetch } from '../../hooks/useChips'
@@ -25,8 +25,10 @@ export interface InfiniteConnectionsHandle {
   openAddModal: () => void
 }
 
-// Conexões via Infinite (baileys_interactive) — botões/listas/carrossel/enquete,
-// somente envio. Sem temperatura/proxy/config de grupo (não se aplicam aqui).
+// Conexões via Infinite (baileys_interactive) — botões/listas/carrossel/enquete
+// no disparo, e recebimento de mensagens (Mensagens é somente leitura pra
+// esse canal — resposta é só via campanha, no Disparador). Sem
+// temperatura/proxy (não se aplicam aqui).
 const InfiniteConnections = forwardRef<InfiniteConnectionsHandle, {}>((_props, ref) => {
   const { instances, loadInstances } = useInfiniteInstances()
 
@@ -37,6 +39,13 @@ const InfiniteConnections = forwardRef<InfiniteConnectionsHandle, {}>((_props, r
 
   const [configName, setConfigName] = useState<string | null>(null)
   const [configLabel, setConfigLabel] = useState('')
+  const [configGroups, setConfigGroups] = useState(false)
+  // Mesma chave usada pelos chips (chip_group_settings) — o payload de mensagem
+  // recebida via Infinite usa chipId = "infinite:<nome>", então o filtro de
+  // grupo do Mensagens.tsx (que já lê essa chave) funciona sem mudanças lá.
+  const [groupSettings, setGroupSettings] = useState<Record<string, boolean>>(() => {
+    try { return JSON.parse(localStorage.getItem('chip_group_settings') || '{}') } catch { return {} }
+  })
 
   useImperativeHandle(ref, () => ({
     openAddModal: () => setShowAddModal(true),
@@ -73,6 +82,7 @@ const InfiniteConnections = forwardRef<InfiniteConnectionsHandle, {}>((_props, r
 
   function openConfig(inst: InfiniteInstance) {
     setConfigLabel(inst.label || '')
+    setConfigGroups(groupSettings[`infinite:${inst.name}`] ?? false)
     setConfigName(inst.name)
   }
 
@@ -82,6 +92,9 @@ const InfiniteConnections = forwardRef<InfiniteConnectionsHandle, {}>((_props, r
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ label: configLabel.trim() })
     })
+    const updated = { ...groupSettings, [`infinite:${configName}`]: configGroups }
+    localStorage.setItem('chip_group_settings', JSON.stringify(updated))
+    setGroupSettings(updated)
     setConfigName(null)
     loadInstances()
   }
@@ -91,7 +104,7 @@ const InfiniteConnections = forwardRef<InfiniteConnectionsHandle, {}>((_props, r
       <div className="flex items-center justify-between mb-4">
         <div>
           <h2 className="text-base font-semibold text-white">Infinite (Botões/Listas)</h2>
-          <p className="text-xs text-gray-400 mt-0.5">Conexões com suporte a botões, listas, carrossel e enquete — somente envio</p>
+          <p className="text-xs text-gray-400 mt-0.5">Botões, listas, carrossel e enquete no disparo · recebe mensagens (leitura em Mensagens)</p>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={loadInstances}
@@ -194,6 +207,20 @@ const InfiniteConnections = forwardRef<InfiniteConnectionsHandle, {}>((_props, r
                 className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-green-500"
               />
               <p className="text-[11px] text-gray-600 mt-1">Instância: {configName}</p>
+            </div>
+
+            <div className="flex items-center justify-between py-2 border-t border-gray-700">
+              <div>
+                <p className="text-sm text-white flex items-center gap-2">
+                  <Users size={14} className="text-gray-400" /> Receber mensagens de grupos
+                </p>
+                <p className="text-[11px] text-gray-500 mt-0.5">Se desativado, mensagens de grupos não chegam em Mensagens</p>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer shrink-0 ml-3">
+                <input type="checkbox" className="sr-only peer" checked={configGroups}
+                  onChange={e => setConfigGroups(e.target.checked)} />
+                <div className="w-9 h-5 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-green-600" />
+              </label>
             </div>
 
             <div className="flex gap-2 justify-end pt-1 border-t border-gray-700">
