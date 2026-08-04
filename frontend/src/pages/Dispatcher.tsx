@@ -2251,6 +2251,7 @@ export default function Dispatcher() {
         <InfiniteCampaignWizardModal
           onClose={() => setInfiniteWizardOpen(false)}
           onStart={infiniteCampaigns.startCampaign}
+          onResetSent={infiniteCampaigns.resetSent}
         />
       )}
 

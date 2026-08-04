@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react'
 import {
   Zap, Upload, X, AlertCircle, Users, Loader2,
-  FileText, Send, Plus, Trash2,
+  FileText, Send, Plus, Trash2, RefreshCw,
 } from 'lucide-react'
 import { useInfiniteInstances } from '../../hooks/useInfiniteInstances'
 import type { CsvContact, InfiniteMessageType } from '../../types'
@@ -11,6 +11,7 @@ import type { InfiniteCampaignConfig } from './infiniteCampaign'
 interface Props {
   onClose: () => void
   onStart: (config: InfiniteCampaignConfig) => Promise<{ ok: boolean; error?: string }>
+  onResetSent: () => Promise<{ ok: boolean; cleared: number }>
 }
 
 const MESSAGE_TYPES: { value: InfiniteMessageType; label: string; hint: string }[] = [
@@ -30,7 +31,8 @@ type CarouselCard = { title?: string; body?: string; footer?: string; imageUrl?:
 let uidCounter = 0
 const uid = () => `id_${Date.now()}_${uidCounter++}`
 
-export default function InfiniteCampaignWizardModal({ onClose, onStart }: Props) {
+export default function InfiniteCampaignWizardModal({ onClose, onStart, onResetSent }: Props) {
+  const [resettingSent, setResettingSent] = useState(false)
   const { instances } = useInfiniteInstances()
   const connected = instances.filter(i => i.status === 'connected')
 
@@ -157,6 +159,16 @@ export default function InfiniteCampaignWizardModal({ onClose, onStart }: Props)
     if (messageType === 'poll' && (!pollName.trim() || pollOptions.filter(Boolean).length < 2)) return 'Preencha o nome da enquete e ao menos 2 opções.'
     if (messageType === 'carousel' && cards.filter(c => c.title?.trim() || c.body?.trim()).length === 0) return 'Adicione ao menos um card com título ou texto.'
     return null
+  }
+
+  async function handleResetSent() {
+    setResettingSent(true)
+    try {
+      const d = await onResetSent()
+      alert(`Números já enviados limpos: ${d.cleared}. Campanhas futuras poderão reenviar para os mesmos contatos.`)
+    } finally {
+      setResettingSent(false)
+    }
   }
 
   const recipientCount = getActiveContacts().length
@@ -531,6 +543,11 @@ export default function InfiniteCampaignWizardModal({ onClose, onStart }: Props)
                     className="w-16 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-center focus:outline-none focus:border-yellow-500" />
                   <span className="text-gray-500">seg</span>
                 </div>
+                <button type="button" onClick={handleResetSent} disabled={resettingSent}
+                  className="flex items-center gap-1.5 text-[11px] text-gray-400 hover:text-white disabled:opacity-50">
+                  {resettingSent ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+                  Limpar números já enviados (permite reenviar para os mesmos contatos)
+                </button>
               </div>
 
               {recipientCount > 0 && (

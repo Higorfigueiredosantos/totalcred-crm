@@ -130,6 +130,10 @@ export function useInfiniteCampaigns() {
     await apiFetch('/api/infinite-campaign/stop', { method: 'POST' })
   }
 
+  async function resetSent() {
+    return apiFetch('/api/infinite-campaign/reset-sent', { method: 'POST' }) as Promise<{ ok: boolean; cleared: number }>
+  }
+
   async function deleteHistory(id: string) {
     if (!confirm('Remover este registro do histórico?')) return
     await fetch(`/api/infinite-campaign/history/${id}`, { method: 'DELETE' })
@@ -154,7 +158,7 @@ export function useInfiniteCampaigns() {
 
   return {
     items,
-    startCampaign, togglePause, stop,
+    startCampaign, togglePause, stop, resetSent,
     deleteHistory, exportResultsCSV,
   }
 }
