@@ -130,8 +130,11 @@ router.post('/send_image_buttons', async (req: Request, res: Response) => {
     }));
 
     const result = await ctx.sock.sendMessage(jid, {
-      image: imageBuffer,
-      caption: caption ? String(caption) : undefined,
+      // O construtor de nativeButtons do Baileys só reconhece a imagem via
+      // headerImage (vira o header do interactiveMessage) — um campo `image`
+      // solto é ignorado silenciosamente, só os botões saem.
+      text: caption ? String(caption) : '',
+      headerImage: imageBuffer,
       nativeButtons,
       footer: footer ? String(footer) : undefined,
     });
