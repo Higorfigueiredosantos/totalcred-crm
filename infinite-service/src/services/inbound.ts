@@ -48,10 +48,12 @@ function extractContactNumber(jid: string | undefined): string | null {
 }
 
 export async function handleUpsert(instanceName: string, ctx: InstanceContext, upsert: { messages: any[]; type: string }) {
+  console.log(`[Infinite:${instanceName}] messages.upsert type=${upsert?.type} count=${upsert?.messages?.length} webhookUrl=${config.webhookUrl || '(vazio)'}`);
   if (!config.webhookUrl) return;
 
   for (const msg of upsert.messages || []) {
     try {
+      console.log(`[Infinite:${instanceName}] msg key=${JSON.stringify(msg.key)} contentType=${getContentType(msg.message)}`);
       if (!msg.message || msg.key?.fromMe) continue;
 
       const remoteJid: string | undefined = msg.key?.remoteJid;
@@ -64,6 +66,7 @@ export async function handleUpsert(instanceName: string, ctx: InstanceContext, u
       const body = extractText(msg.message);
       const media = detectMedia(msg.message);
       if (!body && !media) continue; // tipo de mensagem que não tratamos (ex: reação, recibo)
+      console.log(`[Infinite:${instanceName}] enviando webhook: from=${remoteJid} body=${body} media=${!!media}`);
 
       let groupName: string | null = null;
       if (isGroup) {
