@@ -17,6 +17,18 @@ services:
       restart_policy:
         condition: any
 
+  infinite:
+    image: totalcred-infinite:latest
+    volumes:
+      - /opt/totalcred/infinite/auth:/app/auth
+      - /opt/totalcred/infinite/.env:/app/.env:ro
+    networks:
+      - crm-internal
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+
   frontend:
     image: totalcred-frontend:latest
     networks:

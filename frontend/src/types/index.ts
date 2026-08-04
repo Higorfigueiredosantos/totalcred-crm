@@ -286,3 +286,48 @@ export interface CsvContact {
   name: string
   vars: Record<string, string>
 }
+
+// ── Infinite (baileys_interactive) types ─────────────────────────────────────
+// Terceira via de conexão/disparo, só envio (sem webhook de mensagens recebidas).
+
+export type InfiniteStatus = 'connecting' | 'connected' | 'disconnected' | 'qr'
+
+export interface InfiniteInstance {
+  name: string
+  label?: string | null
+  status: InfiniteStatus
+  hasQr?: boolean
+  qr?: string | null
+  createdAt?: string | null
+}
+
+export type InfiniteMessageType = 'menu' | 'buttons' | 'interactive' | 'list' | 'poll' | 'carousel'
+
+export interface InfiniteCampaignResult {
+  index: number
+  number: string
+  name?: string
+  status: 'success' | 'failed' | 'sending'
+  via?: string
+  error?: string
+  sentAt?: number
+}
+
+export interface InfiniteCampaignHistoryRecord {
+  id: string
+  name: string
+  messageType: InfiniteMessageType
+  startedAt: number
+  endedAt: number
+  total: number
+  success: number
+  failed: number
+  skipped: number
+  results: InfiniteCampaignResult[]
+}
+
+export interface InfiniteCampaignSettings {
+  instanceNames: string[]
+  delayMin: number
+  delayMax: number
+}
