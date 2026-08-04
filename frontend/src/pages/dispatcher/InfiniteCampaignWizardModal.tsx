@@ -17,6 +17,7 @@ interface Props {
 const MESSAGE_TYPES: { value: InfiniteMessageType; label: string; hint: string }[] = [
   { value: 'buttons', label: 'Botões', hint: 'Até 3 botões de resposta rápida' },
   { value: 'imageButtons', label: 'Imagem + Botões', hint: 'Imagem com legenda e até 3 botões abaixo' },
+  { value: 'imageLink', label: 'Imagem + Link', hint: 'Imagem com descrição e um botão de link (CTA)' },
   { value: 'interactive', label: 'CTA', hint: 'Botões de URL, copiar ou ligar' },
   { value: 'list', label: 'Lista', hint: 'Lista dropdown com seções' },
   { value: 'poll', label: 'Enquete', hint: 'Enquete com opções' },
@@ -51,6 +52,10 @@ export default function InfiniteCampaignWizardModal({ onClose, onStart, onResetS
   // Botões (quick reply) / Imagem + Botões
   const [buttons, setButtons] = useState<{ id: string; text: string }[]>([{ id: 'opt1', text: '' }])
   const [imageB64, setImageB64] = useState('')
+
+  // Imagem + Link (um único botão CTA de URL)
+  const [linkButtonText, setLinkButtonText] = useState('Acessar')
+  const [linkUrl, setLinkUrl] = useState('')
 
   // CTA
   const [ctaButtons, setCtaButtons] = useState<CtaButton[]>([{ type: 'url', text: '', url: '' }])
@@ -149,6 +154,8 @@ export default function InfiniteCampaignWizardModal({ onClose, onStart, onResetS
         return { text, footer: footer || undefined, buttons: buttons.filter(b => b.text.trim()) }
       case 'imageButtons':
         return { image: imageB64, caption: text || undefined, footer: footer || undefined, buttons: buttons.filter(b => b.text.trim()) }
+      case 'imageLink':
+        return { image: imageB64, caption: text || undefined, footer: footer || undefined, buttons: [{ type: 'url', text: linkButtonText, url: linkUrl }] }
       case 'interactive':
         return { text, footer: footer || undefined, buttons: ctaButtons.filter(b => b.text.trim()) }
       case 'list':
@@ -160,12 +167,13 @@ export default function InfiniteCampaignWizardModal({ onClose, onStart, onResetS
       default:
         return {}
     }
-  }, [messageType, title, text, footer, menuOptions, buttons, imageB64, ctaButtons, buttonText, sections, pollName, pollOptions, selectableCount, cards])
+  }, [messageType, title, text, footer, menuOptions, buttons, imageB64, linkButtonText, linkUrl, ctaButtons, buttonText, sections, pollName, pollOptions, selectableCount, cards])
 
   function messageValid(): string | null {
     if (messageType === 'menu' && menuOptions.filter(Boolean).length === 0) return 'Adicione ao menos uma opção do menu.'
     if (messageType === 'buttons' && (!text.trim() || buttons.filter(b => b.text.trim()).length === 0)) return 'Preencha o texto e ao menos um botão.'
     if (messageType === 'imageButtons' && (!imageB64 || buttons.filter(b => b.text.trim()).length === 0)) return 'Adicione uma imagem e ao menos um botão.'
+    if (messageType === 'imageLink' && (!imageB64 || !linkButtonText.trim() || !linkUrl.trim())) return 'Adicione uma imagem, o texto do botão e a URL do link.'
     if (messageType === 'interactive' && (!text.trim() || ctaButtons.filter(b => b.text.trim()).length === 0)) return 'Preencha o texto e ao menos um botão CTA.'
     if (messageType === 'list' && (!text.trim() || !buttonText.trim() || sections.every(s => s.rows.filter(r => r.title.trim()).length === 0))) return 'Preencha o texto, o texto do botão e ao menos um item de lista.'
     if (messageType === 'poll' && (!pollName.trim() || pollOptions.filter(Boolean).length < 2)) return 'Preencha o nome da enquete e ao menos 2 opções.'
@@ -265,14 +273,14 @@ export default function InfiniteCampaignWizardModal({ onClose, onStart, onResetS
                 </div>
               )}
 
-              {/* Botões / Imagem+Botões / CTA / Carrossel usam texto (legenda no caso da imagem) */}
-              {(messageType === 'buttons' || messageType === 'imageButtons' || messageType === 'interactive' || messageType === 'carousel') && (
-                <textarea value={text} onChange={e => setText(e.target.value)} rows={3}
-                  placeholder={messageType === 'carousel' ? 'Texto de introdução (opcional)' : messageType === 'imageButtons' ? 'Legenda da imagem (opcional)' : 'Texto da mensagem *'}
-                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white resize-none focus:outline-none focus:border-yellow-500" />
+              {/* Botões / Imagem+Botões / Imagem+Link / CTA / Carrossel usam texto (legenda no caso da imagem) */}
+              {(messageType === 'buttons' || messageType === 'imageButtons' || messageType === 'imageLink' || messageType === 'interactive' || messageType === 'carousel') && (
+                <textarea value={text} onChange={e => setText(e.target.value)} rows={8}
+                  placeholder={messageType === 'carousel' ? 'Texto de introdução (opcional)' : (messageType === 'imageButtons' || messageType === 'imageLink') ? 'Legenda/descrição da imagem (opcional)' : 'Texto da mensagem *'}
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white resize-y focus:outline-none focus:border-yellow-500" />
               )}
 
-              {messageType === 'imageButtons' && (
+              {(messageType === 'imageButtons' || messageType === 'imageLink') && (
                 <div>
                   <label className="block text-xs font-medium text-gray-400 mb-1.5">Imagem *</label>
                   {imageB64 ? (
@@ -286,6 +294,20 @@ export default function InfiniteCampaignWizardModal({ onClose, onStart, onResetS
                       <input type="file" accept="image/*" className="hidden" onChange={handleImage} />
                     </label>
                   )}
+                </div>
+              )}
+
+              {messageType === 'imageLink' && (
+                <div className="space-y-2">
+                  <label className="block text-xs font-medium text-gray-400">Botão de link (CTA)</label>
+                  <div className="flex gap-2">
+                    <input value={linkButtonText} onChange={e => setLinkButtonText(e.target.value)}
+                      placeholder="Texto do botão (ex: Acessar)"
+                      className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-yellow-500" />
+                    <input value={linkUrl} onChange={e => setLinkUrl(e.target.value)}
+                      placeholder="https://..."
+                      className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-yellow-500" />
+                  </div>
                 </div>
               )}
 

@@ -118,6 +118,7 @@ const SEND_ENDPOINTS = {
   menu: '/v1/messages/send_menu',
   buttons: '/v1/messages/send_buttons_helpers',
   imageButtons: '/v1/messages/send_image_buttons',
+  imageLink: '/v1/messages/send_image_interactive',
   interactive: '/v1/messages/send_interactive_helpers',
   list: '/v1/messages/send_list_helpers',
   poll: '/v1/messages/send_poll',

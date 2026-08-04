@@ -146,6 +146,62 @@ router.post('/send_image_buttons', async (req: Request, res: Response) => {
   }
 });
 
+// --- 2c. IMAGEM + CTA (URL, COPY, CALL) ---
+router.post('/send_image_interactive', async (req: Request, res: Response) => {
+  try {
+    const { instance = 'main', to, image, caption, buttons, footer } = req.body as {
+      instance?: string;
+      to: string;
+      image: string;
+      caption?: string;
+      buttons: Array<{
+        type: 'url' | 'copy' | 'call';
+        text: string;
+        url?: string;
+        copyCode?: string;
+        copyText?: string;
+        phoneNumber?: string;
+      }>;
+      footer?: string;
+    };
+
+    if (!to || !image || !Array.isArray(buttons) || buttons.length === 0) {
+      return res.status(400).json({ ok: false, error: 'missing to/image/buttons' });
+    }
+    const imageBuffer = decodeImage(image);
+    if (!imageBuffer) return res.status(400).json({ ok: false, error: 'invalid_image' });
+
+    const ctx = validateInstance(instance, res);
+    if (!ctx) return;
+
+    const jid = await resolveJid(ctx.sock, to);
+    if (!jid) return res.status(400).json({ ok: false, error: 'invalid_phone' });
+
+    const nativeButtons = buttons.slice(0, config.limits.maxButtons).map((btn, idx) => {
+      const type = (btn.type ?? 'url').toLowerCase();
+      if (type === 'copy' || btn.copyCode || btn.copyText) {
+        return { type: 'copy' as const, text: btn.text ?? 'Copiar', copyText: btn.copyCode ?? btn.copyText ?? '' };
+      }
+      if (type === 'call' || btn.phoneNumber) {
+        return { type: 'call' as const, text: btn.text ?? 'Ligar', phoneNumber: btn.phoneNumber! };
+      }
+      return { type: 'url' as const, text: btn.text ?? 'Abrir', url: btn.url ?? '' };
+    });
+
+    const result = await ctx.sock.sendMessage(jid, {
+      text: caption ? String(caption) : '',
+      headerImage: imageBuffer,
+      nativeButtons,
+      footer: footer ? String(footer) : undefined,
+    });
+
+    return res.json({ ok: true, format: 'imageInteractive', messageId: result?.key?.id });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return res.status(500).json({ ok: false, error: message });
+  }
+});
+
 // --- 3. BOTÕES CTA (URL, COPY, CALL) ---
 router.post('/send_interactive_helpers', async (req: Request, res: Response) => {
   try {

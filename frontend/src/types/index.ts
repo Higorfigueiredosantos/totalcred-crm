@@ -301,7 +301,7 @@ export interface InfiniteInstance {
   createdAt?: string | null
 }
 
-export type InfiniteMessageType = 'menu' | 'buttons' | 'imageButtons' | 'interactive' | 'list' | 'poll' | 'carousel'
+export type InfiniteMessageType = 'menu' | 'buttons' | 'imageButtons' | 'imageLink' | 'interactive' | 'list' | 'poll' | 'carousel'
 
 export interface InfiniteCampaignResult {
   index: number
