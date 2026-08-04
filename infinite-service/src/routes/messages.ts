@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { getInstance } from '../services/whatsapp.js';
-import { toJid, isConnected } from '../utils/helpers.js';
+import { isConnected, resolveJid } from '../utils/helpers.js';
 import { config } from '../config.js';
 
 const router = Router();
@@ -37,7 +37,7 @@ router.post('/send_menu', async (req: Request, res: Response) => {
     const ctx = validateInstance(instance, res);
     if (!ctx) return;
 
-    const jid = toJid(to);
+    const jid = await resolveJid(ctx.sock, to);
     if (!jid) return res.status(400).json({ ok: false, error: 'invalid_phone' });
 
     let menuText = '';
@@ -76,7 +76,7 @@ router.post('/send_buttons_helpers', async (req: Request, res: Response) => {
     const ctx = validateInstance(instance, res);
     if (!ctx) return;
 
-    const jid = toJid(to);
+    const jid = await resolveJid(ctx.sock, to);
     if (!jid) return res.status(400).json({ ok: false, error: 'invalid_phone' });
 
     const nativeButtons = limited.map((btn, idx) => ({
@@ -123,7 +123,7 @@ router.post('/send_interactive_helpers', async (req: Request, res: Response) => 
     const ctx = validateInstance(instance, res);
     if (!ctx) return;
 
-    const jid = toJid(to);
+    const jid = await resolveJid(ctx.sock, to);
     if (!jid) return res.status(400).json({ ok: false, error: 'invalid_phone' });
 
     const nativeButtons = buttons.slice(0, config.limits.maxButtons).map((btn, idx) => {
@@ -172,7 +172,7 @@ router.post('/send_list_helpers', async (req: Request, res: Response) => {
     const ctx = validateInstance(instance, res);
     if (!ctx) return;
 
-    const jid = toJid(to);
+    const jid = await resolveJid(ctx.sock, to);
     if (!jid) return res.status(400).json({ ok: false, error: 'invalid_phone' });
 
     const result = await ctx.sock.sendMessage(jid, {
@@ -217,7 +217,7 @@ router.post('/send_poll', async (req: Request, res: Response) => {
     const ctx = validateInstance(instance, res);
     if (!ctx) return;
 
-    const jid = toJid(to);
+    const jid = await resolveJid(ctx.sock, to);
     if (!jid) return res.status(400).json({ ok: false, error: 'invalid_phone' });
 
     // Formato que funciona no InfiniteAPI/Baileys: poll com name, values e selectableCount
@@ -260,7 +260,7 @@ router.post('/send_carousel_helpers', async (req: Request, res: Response) => {
     const ctx = validateInstance(instance, res);
     if (!ctx) return;
 
-    const jid = toJid(to);
+    const jid = await resolveJid(ctx.sock, to);
     if (!jid) return res.status(400).json({ ok: false, error: 'invalid_phone' });
 
     const formattedCards = limited.map((card, idx) => ({
