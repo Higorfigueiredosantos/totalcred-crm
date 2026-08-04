@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { getInstance } from '../services/whatsapp.js';
-import { isConnected, resolveJid } from '../utils/helpers.js';
+import { isConnected, resolveJid, decodeImage } from '../utils/helpers.js';
 import { config } from '../config.js';
 
 const router = Router();
@@ -92,6 +92,51 @@ router.post('/send_buttons_helpers', async (req: Request, res: Response) => {
     });
 
     return res.json({ ok: true, format: 'nativeButtons', messageId: result?.key?.id });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// --- 2b. IMAGEM + BOTÕES (nativeButtons com legenda de imagem) ---
+router.post('/send_image_buttons', async (req: Request, res: Response) => {
+  try {
+    const { instance = 'main', to, image, caption, buttons, footer } = req.body as {
+      instance?: string;
+      to: string;
+      image: string;
+      caption?: string;
+      buttons: Array<{ id: string; text: string }>;
+      footer?: string;
+    };
+
+    if (!to || !image || !Array.isArray(buttons) || buttons.length === 0) {
+      return res.status(400).json({ ok: false, error: 'missing to/image/buttons' });
+    }
+    const imageBuffer = decodeImage(image);
+    if (!imageBuffer) return res.status(400).json({ ok: false, error: 'invalid_image' });
+    const limited = buttons.slice(0, config.limits.maxButtons);
+
+    const ctx = validateInstance(instance, res);
+    if (!ctx) return;
+
+    const jid = await resolveJid(ctx.sock, to);
+    if (!jid) return res.status(400).json({ ok: false, error: 'invalid_phone' });
+
+    const nativeButtons = limited.map((btn, idx) => ({
+      type: 'reply' as const,
+      id: btn.id ?? `btn_${idx}`,
+      text: btn.text ?? `Botão ${idx + 1}`,
+    }));
+
+    const result = await ctx.sock.sendMessage(jid, {
+      image: imageBuffer,
+      caption: caption ? String(caption) : undefined,
+      nativeButtons,
+      footer: footer ? String(footer) : undefined,
+    });
+
+    return res.json({ ok: true, format: 'imageButtons', messageId: result?.key?.id });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return res.status(500).json({ ok: false, error: message });

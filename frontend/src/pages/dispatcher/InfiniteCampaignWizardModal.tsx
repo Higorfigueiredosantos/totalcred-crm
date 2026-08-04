@@ -16,6 +16,7 @@ interface Props {
 
 const MESSAGE_TYPES: { value: InfiniteMessageType; label: string; hint: string }[] = [
   { value: 'buttons', label: 'Botões', hint: 'Até 3 botões de resposta rápida' },
+  { value: 'imageButtons', label: 'Imagem + Botões', hint: 'Imagem com legenda e até 3 botões abaixo' },
   { value: 'interactive', label: 'CTA', hint: 'Botões de URL, copiar ou ligar' },
   { value: 'list', label: 'Lista', hint: 'Lista dropdown com seções' },
   { value: 'poll', label: 'Enquete', hint: 'Enquete com opções' },
@@ -47,8 +48,9 @@ export default function InfiniteCampaignWizardModal({ onClose, onStart, onResetS
   const [footer, setFooter] = useState('')
   const [title, setTitle] = useState('')
 
-  // Botões (quick reply)
+  // Botões (quick reply) / Imagem + Botões
   const [buttons, setButtons] = useState<{ id: string; text: string }[]>([{ id: 'opt1', text: '' }])
+  const [imageB64, setImageB64] = useState('')
 
   // CTA
   const [ctaButtons, setCtaButtons] = useState<CtaButton[]>([{ type: 'url', text: '', url: '' }])
@@ -83,6 +85,13 @@ export default function InfiniteCampaignWizardModal({ onClose, onStart, onResetS
 
   function getActiveContacts(): CsvContact[] {
     return contactsTab === 'csv' ? csvContacts : parseContacts(contactsText)
+  }
+
+  function handleImage(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]; if (!file) return
+    const reader = new FileReader()
+    reader.onload = ev => setImageB64(ev.target?.result as string)
+    reader.readAsDataURL(file)
   }
 
   function applyPhoneColumn(rawRows: Record<string, string>[], allHeaders: string[], phoneCol: string) {
@@ -138,6 +147,8 @@ export default function InfiniteCampaignWizardModal({ onClose, onStart, onResetS
         return { title: title || undefined, text: text || undefined, options: menuOptions.filter(Boolean), footer: footer || undefined }
       case 'buttons':
         return { text, footer: footer || undefined, buttons: buttons.filter(b => b.text.trim()) }
+      case 'imageButtons':
+        return { image: imageB64, caption: text || undefined, footer: footer || undefined, buttons: buttons.filter(b => b.text.trim()) }
       case 'interactive':
         return { text, footer: footer || undefined, buttons: ctaButtons.filter(b => b.text.trim()) }
       case 'list':
@@ -149,11 +160,12 @@ export default function InfiniteCampaignWizardModal({ onClose, onStart, onResetS
       default:
         return {}
     }
-  }, [messageType, title, text, footer, menuOptions, buttons, ctaButtons, buttonText, sections, pollName, pollOptions, selectableCount, cards])
+  }, [messageType, title, text, footer, menuOptions, buttons, imageB64, ctaButtons, buttonText, sections, pollName, pollOptions, selectableCount, cards])
 
   function messageValid(): string | null {
     if (messageType === 'menu' && menuOptions.filter(Boolean).length === 0) return 'Adicione ao menos uma opção do menu.'
     if (messageType === 'buttons' && (!text.trim() || buttons.filter(b => b.text.trim()).length === 0)) return 'Preencha o texto e ao menos um botão.'
+    if (messageType === 'imageButtons' && (!imageB64 || buttons.filter(b => b.text.trim()).length === 0)) return 'Adicione uma imagem e ao menos um botão.'
     if (messageType === 'interactive' && (!text.trim() || ctaButtons.filter(b => b.text.trim()).length === 0)) return 'Preencha o texto e ao menos um botão CTA.'
     if (messageType === 'list' && (!text.trim() || !buttonText.trim() || sections.every(s => s.rows.filter(r => r.title.trim()).length === 0))) return 'Preencha o texto, o texto do botão e ao menos um item de lista.'
     if (messageType === 'poll' && (!pollName.trim() || pollOptions.filter(Boolean).length < 2)) return 'Preencha o nome da enquete e ao menos 2 opções.'
@@ -253,14 +265,31 @@ export default function InfiniteCampaignWizardModal({ onClose, onStart, onResetS
                 </div>
               )}
 
-              {/* Botões / CTA / Carrossel usam texto */}
-              {(messageType === 'buttons' || messageType === 'interactive' || messageType === 'carousel') && (
+              {/* Botões / Imagem+Botões / CTA / Carrossel usam texto (legenda no caso da imagem) */}
+              {(messageType === 'buttons' || messageType === 'imageButtons' || messageType === 'interactive' || messageType === 'carousel') && (
                 <textarea value={text} onChange={e => setText(e.target.value)} rows={3}
-                  placeholder={messageType === 'carousel' ? 'Texto de introdução (opcional)' : 'Texto da mensagem *'}
+                  placeholder={messageType === 'carousel' ? 'Texto de introdução (opcional)' : messageType === 'imageButtons' ? 'Legenda da imagem (opcional)' : 'Texto da mensagem *'}
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white resize-none focus:outline-none focus:border-yellow-500" />
               )}
 
-              {messageType === 'buttons' && (
+              {messageType === 'imageButtons' && (
+                <div>
+                  <label className="block text-xs font-medium text-gray-400 mb-1.5">Imagem *</label>
+                  {imageB64 ? (
+                    <div className="flex items-center gap-2">
+                      <img src={imageB64} alt="" className="w-16 h-16 object-cover rounded" />
+                      <button onClick={() => setImageB64('')} className="text-red-400 hover:text-red-300"><X size={14} /></button>
+                    </div>
+                  ) : (
+                    <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer hover:text-gray-200">
+                      <Upload size={11} /> Carregar imagem
+                      <input type="file" accept="image/*" className="hidden" onChange={handleImage} />
+                    </label>
+                  )}
+                </div>
+              )}
+
+              {(messageType === 'buttons' || messageType === 'imageButtons') && (
                 <div className="space-y-2">
                   <label className="block text-xs font-medium text-gray-400">Botões (até 3)</label>
                   {buttons.map((b, i) => (

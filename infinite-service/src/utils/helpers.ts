@@ -68,6 +68,20 @@ export function isConnected(ctx: { sock?: unknown; status?: string } | null): bo
 }
 
 /**
+ * Decodifica uma imagem em base64 (com ou sem prefixo data:URL) para Buffer.
+ */
+export function decodeImage(input: string | null | undefined): Buffer | null {
+  if (!input || typeof input !== 'string') return null;
+  const base64 = input.includes(',') ? input.split(',')[1] : input;
+  try {
+    const buf = Buffer.from(base64, 'base64');
+    return buf.length > 0 ? buf : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Verifica se string é URL
  */
 export function isUrl(str: unknown): str is string {

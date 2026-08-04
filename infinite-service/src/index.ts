@@ -8,7 +8,7 @@ import messagesRouter from './routes/messages.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '10mb' }));
 
 function apiKeyMiddleware(req: express.Request, res: express.Response, next: express.NextFunction) {
   const key = req.headers['x-api-key'];
