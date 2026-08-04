@@ -559,6 +559,15 @@ export default function InfiniteCampaignWizardModal({ onClose, onStart }: Props)
                 <AlertCircle size={13} className="shrink-0 mt-0.5" />
                 Instâncias Infinite não recebem confirmação de entrega/leitura — o relatório mostra apenas enviado/falhou.
               </div>
+
+              {messageType !== 'menu' && (
+                <div className="bg-red-900/10 border border-red-800/30 rounded-lg p-3 text-[11px] text-red-300/80 flex gap-2">
+                  <AlertCircle size={13} className="shrink-0 mt-0.5" />
+                  Botões, CTA, lista, enquete e carrossel usam um formato experimental (fora da Cloud API oficial) que o
+                  WhatsApp pode aceitar no envio e descartar silenciosamente do lado do destinatário — sem erro. Também há
+                  risco de banimento do número conectado. O tipo "Menu" (texto puro) não tem esse risco.
+                </div>
+              )}
             </div>
           )}
         </div>
