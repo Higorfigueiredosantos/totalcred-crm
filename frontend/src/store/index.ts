@@ -3,6 +3,17 @@ import { persist, createJSONStorage } from 'zustand/middleware'
 
 let _saveTimeout: ReturnType<typeof setTimeout> | null = null
 
+// O zustand persist chama getItem() de forma assíncrona pra hidratar o store,
+// mas nada impede um set() (ex.: uma mensagem chegando via WS) de disparar
+// setItem() ANTES desse carregamento inicial terminar. Se isso acontecer, o
+// estado ainda vazio/padrão é salvo por cima dos dados reais no servidor —
+// e quando o getItem() em andamento finalmente resolve, ele substitui o
+// estado em memória pelo que acabou de ser salvo (vazio), perdendo os dados
+// de verdade permanentemente. Trava setItem() até o primeiro getItem() (bem
+// ou mal sucedido) terminar, pra nunca gravar por cima de um carregamento
+// ainda em andamento.
+let _hydrated = false
+
 const backendStorage = {
   getItem: async (_name: string): Promise<string | null> => {
     try {
@@ -12,9 +23,12 @@ const backendStorage = {
       return data ? JSON.stringify(data) : null
     } catch {
       return null
+    } finally {
+      _hydrated = true
     }
   },
   setItem: async (_name: string, value: string): Promise<void> => {
+    if (!_hydrated) return
     if (_saveTimeout) clearTimeout(_saveTimeout)
     _saveTimeout = setTimeout(async () => {
       try {

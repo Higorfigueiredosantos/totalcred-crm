@@ -132,7 +132,7 @@ export default function Messages() {
     conversations, contacts, channels, messages, settings,
     activeConversationId, setActiveConversation,
     addMessage, updateMessage, updateConversation, markRead,
-    addConversation, addContact, updateContact, removeChipData,
+    addConversation, addContact, updateContact,
     kanbanCards, kanbanColumns, addKanbanCard,
   } = useStore()
 
@@ -197,30 +197,6 @@ export default function Messages() {
   const recTimerRef       = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => { connectWS() }, [])
-
-  // ── Cleanup orphaned chip data on mount ─────────────────────────────────────
-  useEffect(() => {
-    fetch('/api/chips')
-      .then(r => r.json())
-      .then((chips: { id: string }[]) => {
-        if (!Array.isArray(chips) || chips.length === 0) return
-        const activeIds = new Set(chips.map((c: { id: string }) => c.id))
-        const chipChannelIds = new Set(
-          conversations
-            .filter(c => isChipConv(c.channelId))
-            .map(c => chipIdFromChannelId(c.channelId))
-        )
-        chipChannelIds.forEach(chipId => {
-          // Instâncias Infinite não aparecem em /api/chips (lista só chips
-          // whatsapp-web.js) — sem esse filtro, toda conversa Infinite seria
-          // tratada como órfã e apagada ao abrir a página.
-          if (isInfiniteChipId(chipId)) return
-          if (!activeIds.has(chipId)) removeChipData(chipId)
-        })
-      })
-      .catch(() => {})
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
 
   // ── Meta API inbound ────────────────────────────────────────────────────────
   const handleMetaInbound = useCallback((payload: any) => {
