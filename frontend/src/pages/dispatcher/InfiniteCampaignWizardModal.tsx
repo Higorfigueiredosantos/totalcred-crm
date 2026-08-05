@@ -639,8 +639,9 @@ export default function InfiniteCampaignWizardModal({ onClose, onStart, onResetS
                 <div className="bg-orange-900/10 border border-orange-800/30 rounded-lg p-3 text-[11px] text-orange-300/80 flex gap-2">
                   <AlertCircle size={13} className="shrink-0 mt-0.5" />
                   Botões, CTA, lista, enquete e carrossel usam um formato marcado como experimental pelo próprio Baileys
-                  (fora da Cloud API oficial) — funciona, mas o autor da lib avisa que pode gerar risco de banimento do
-                  número conectado. Use com moderação. O tipo "Menu" (texto puro) não tem esse risco.
+                  (fora da Cloud API oficial) — risco de banimento do número conectado, avisado pela própria lib. Testes
+                  confirmam que a entrega também é inconsistente: funciona para alguns contatos e falha silenciosamente
+                  para outros, sem padrão previsível. O tipo "Menu" (texto puro) é o único com entrega confiável.
                 </div>
               )}
             </div>
