@@ -211,6 +211,10 @@ export default function Messages() {
             .map(c => chipIdFromChannelId(c.channelId))
         )
         chipChannelIds.forEach(chipId => {
+          // Instâncias Infinite não aparecem em /api/chips (lista só chips
+          // whatsapp-web.js) — sem esse filtro, toda conversa Infinite seria
+          // tratada como órfã e apagada ao abrir a página.
+          if (isInfiniteChipId(chipId)) return
           if (!activeIds.has(chipId)) removeChipData(chipId)
         })
       })

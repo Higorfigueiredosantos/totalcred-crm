@@ -325,7 +325,6 @@ function handleWebhookMessage(body) {
     instance, from, author, isGroup, groupName, pushname, contactNumber,
     body: text, timestamp, msgType, mediaBase64, mediaMimetype,
   } = body || {}
-  console.log('[Infinite] webhook mensagem recebida:', JSON.stringify({ instance, from, isGroup, msgType, hasBody: !!text }))
   if (!instance || !from) return
 
   const chipId = `infinite:${instance}`
@@ -389,7 +388,6 @@ function handleAckWebhook(body) {
 }
 
 function handleWebhook(body) {
-  console.log('[Infinite] webhook recebido, kind:', body?.kind || 'message')
   if (body?.kind === 'ack') return handleAckWebhook(body)
   return handleWebhookMessage(body)
 }
