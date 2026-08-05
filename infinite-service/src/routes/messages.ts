@@ -69,8 +69,8 @@ router.post('/send_menu', async (req: Request, res: Response) => {
     });
     if (footer) menuText += `\n_${footer}_`;
 
-    await ctx.sock.sendMessage(jid, { text: menuText.trim() });
-    return res.json({ ok: true, hint: 'User should reply with the option number (1, 2, 3...)' });
+    const result = await ctx.sock.sendMessage(jid, { text: menuText.trim() });
+    return res.json({ ok: true, messageId: result?.key?.id, hint: 'User should reply with the option number (1, 2, 3...)' });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return res.status(500).json({ ok: false, error: message });
