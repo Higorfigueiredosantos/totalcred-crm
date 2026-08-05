@@ -122,6 +122,7 @@ function postWebhook(payload: Record<string, unknown>) {
 // Status do WebMessageInfo (proto.WebMessageInfo.Status): 3=DELIVERY_ACK, 4=READ, 5=PLAYED.
 // Baileys já expõe isso via receipts reais do WhatsApp — não é heurística.
 export async function handleMessagesUpdate(instanceName: string, updates: Array<{ key: any; update: any }>) {
+  console.log(`[Infinite:${instanceName}] messages.update count=${updates?.length} raw=${JSON.stringify(updates)}`);
   if (!config.webhookUrl) return;
   for (const { key, update } of updates || []) {
     try {
