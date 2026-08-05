@@ -1852,6 +1852,7 @@ export default function Dispatcher() {
   const [chipReportItemId, setChipReportItemId] = useState<string | null>(null)
   const [infiniteWizardOpen, setInfiniteWizardOpen] = useState(false)
   const [infiniteReportItemId, setInfiniteReportItemId] = useState<string | null>(null)
+  const [infiniteRedispatch, setInfiniteRedispatch] = useState<{ contacts: { number: string; name?: string }[]; name: string } | null>(null)
   const canUnofficial = can('chipsPage')
   const chipCampaigns = useChipCampaigns()
   const infiniteCampaigns = useInfiniteCampaigns()
@@ -2249,9 +2250,11 @@ export default function Dispatcher() {
 
       {infiniteWizardOpen && (
         <InfiniteCampaignWizardModal
-          onClose={() => setInfiniteWizardOpen(false)}
+          onClose={() => { setInfiniteWizardOpen(false); setInfiniteRedispatch(null) }}
           onStart={infiniteCampaigns.startCampaign}
           onResetSent={infiniteCampaigns.resetSent}
+          prefillContacts={infiniteRedispatch?.contacts}
+          prefillName={infiniteRedispatch?.name}
         />
       )}
 
@@ -2263,6 +2266,11 @@ export default function Dispatcher() {
           onDeleteHistory={reportInfiniteItem.fromHistory ? infiniteCampaigns.deleteHistory : undefined}
           onTogglePause={reportInfiniteItem.status === 'running' ? infiniteCampaigns.togglePause : undefined}
           onStop={reportInfiniteItem.status === 'running' ? infiniteCampaigns.stop : undefined}
+          onRedispatch={(contacts, sourceName) => {
+            setInfiniteRedispatch({ contacts, name: sourceName })
+            setInfiniteReportItemId(null)
+            setInfiniteWizardOpen(true)
+          }}
         />
       )}
 

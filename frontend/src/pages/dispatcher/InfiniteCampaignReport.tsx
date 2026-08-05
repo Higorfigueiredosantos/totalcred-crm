@@ -1,8 +1,8 @@
 import {
   X, BarChart2, CheckCircle, XCircle, Clock,
-  Pause, Play, Square, Trash2, Download, AlertTriangle,
+  Pause, Play, Square, Trash2, Download, AlertTriangle, RefreshCw,
 } from 'lucide-react'
-import type { InfiniteCampaignItem } from './infiniteCampaign'
+import { isLikelyUndelivered, type InfiniteCampaignItem } from './infiniteCampaign'
 
 interface Props {
   item: InfiniteCampaignItem
@@ -11,10 +11,11 @@ interface Props {
   onDeleteHistory?: (id: string) => void
   onTogglePause?: () => void
   onStop?: () => void
+  onRedispatch?: (contacts: { number: string; name?: string }[], sourceName: string) => void
 }
 
 export default function InfiniteCampaignReport({
-  item, onClose, onExportCSV, onDeleteHistory, onTogglePause, onStop,
+  item, onClose, onExportCSV, onDeleteHistory, onTogglePause, onStop, onRedispatch,
 }: Props) {
   const total = item.stats.total || item.results.length || 1
   const success = item.results.filter(r => r.status === 'success').length
@@ -22,6 +23,7 @@ export default function InfiniteCampaignReport({
   // ack: 3=DELIVERY_ACK, 4=READ, 5=PLAYED (proto.WebMessageInfo.Status do Baileys)
   const delivered = item.results.filter(r => (r.ack ?? 0) >= 3).length
   const read = item.results.filter(r => (r.ack ?? 0) >= 4).length
+  const undelivered = item.results.filter(r => isLikelyUndelivered(r, item.messageType))
 
   const funnel = [
     { label: 'Total',        value: total,                       pct: 100,                                                       color: 'bg-purple-500', icon: '👥' },
@@ -123,13 +125,17 @@ export default function InfiniteCampaignReport({
                         </tr>
                       </thead>
                       <tbody>
-                        {item.results.map((r, i) => (
+                        {item.results.map((r, i) => {
+                          const suspect = isLikelyUndelivered(r, item.messageType)
+                          return (
                           <tr key={i} className="border-t border-gray-800/60">
                             <td className="px-3 py-1.5 font-mono">{r.number}</td>
                             <td className="px-3 py-1.5 max-w-[100px] truncate">{r.name || '—'}</td>
                             <td className="px-3 py-1.5 text-gray-500">{r.via || '—'}</td>
                             <td className="px-3 py-1.5">
-                              {r.status === 'success'
+                              {suspect
+                                ? <span className="flex items-center gap-1 text-orange-400" title="Enviado há mais de 5 minutos sem confirmação de entrega — típico de bloqueio no iPhone"><AlertTriangle size={10} /> Provável não entregue (iOS)</span>
+                                : r.status === 'success'
                                 ? <span className="flex items-center gap-1 text-green-400"><CheckCircle size={10} /> Enviado</span>
                                 : r.status === 'failed'
                                 ? <span className="flex items-center gap-1 text-red-400"><XCircle size={10} /> Falha</span>
@@ -142,10 +148,25 @@ export default function InfiniteCampaignReport({
                                 : <span className="text-gray-500">Enviado</span>}
                             </td>
                           </tr>
-                        ))}
+                          )
+                        })}
                       </tbody>
                     </table>
                   </div>
+
+                  {undelivered.length > 0 && onRedispatch && (
+                    <div className="mt-3 bg-orange-900/10 border border-orange-800/30 rounded-lg p-3 flex items-center justify-between gap-3">
+                      <div className="text-[11px] text-orange-200/90">
+                        <p className="font-medium">{undelivered.length} contato(s) provavelmente não receberam</p>
+                        <p className="text-orange-300/70 mt-0.5">Enviado há mais de 5min sem confirmação de entrega — típico de bloqueio no iPhone para esse tipo de mensagem.</p>
+                      </div>
+                      <button
+                        onClick={() => onRedispatch(undelivered.map(r => ({ number: r.number, name: r.name })), item.name)}
+                        className="flex items-center gap-1.5 px-3 py-2 bg-orange-700 hover:bg-orange-600 text-white text-xs rounded-lg shrink-0 whitespace-nowrap">
+                        <RefreshCw size={13} /> Redisparar com outro tipo
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

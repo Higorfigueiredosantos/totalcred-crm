@@ -12,6 +12,8 @@ interface Props {
   onClose: () => void
   onStart: (config: InfiniteCampaignConfig) => Promise<{ ok: boolean; error?: string }>
   onResetSent: () => Promise<{ ok: boolean; cleared: number }>
+  prefillContacts?: { number: string; name?: string }[]
+  prefillName?: string
 }
 
 // Botões/CTA/Carrossel/Imagem+Botões/Imagem+Link usam o formato experimental do
@@ -41,7 +43,7 @@ type CarouselCard = { title?: string; body?: string; footer?: string; imageUrl?:
 let uidCounter = 0
 const uid = () => `id_${Date.now()}_${uidCounter++}`
 
-export default function InfiniteCampaignWizardModal({ onClose, onStart, onResetSent }: Props) {
+export default function InfiniteCampaignWizardModal({ onClose, onStart, onResetSent, prefillContacts, prefillName }: Props) {
   const [resettingSent, setResettingSent] = useState(false)
   const { instances } = useInfiniteInstances()
   const connected = instances.filter(i => i.status === 'connected')
@@ -49,8 +51,10 @@ export default function InfiniteCampaignWizardModal({ onClose, onStart, onResetS
   const [step, setStep] = useState(1)
   const [starting, setStarting] = useState(false)
 
-  const [name, setName] = useState('')
-  const [messageType, setMessageType] = useState<InfiniteMessageType>('buttons')
+  const [name, setName] = useState(prefillName ? `${prefillName} - redisparo` : '')
+  // Redisparo usa um tipo confiável por padrão (o problema original é justamente
+  // um tipo não confiável que não chegou no destinatário).
+  const [messageType, setMessageType] = useState<InfiniteMessageType>(prefillContacts?.length ? 'list' : 'buttons')
 
   // Campos comuns
   const [text, setText] = useState('')
@@ -84,7 +88,9 @@ export default function InfiniteCampaignWizardModal({ onClose, onStart, onResetS
   const [cards, setCards] = useState<CarouselCard[]>([{ title: '', body: '', imageUrl: '', buttons: [] }])
 
   const [contactsTab, setContactsTab] = useState<'manual' | 'csv'>('manual')
-  const [contactsText, setContactsText] = useState('')
+  const [contactsText, setContactsText] = useState(
+    prefillContacts?.length ? prefillContacts.map(c => `${c.number},${c.name || ''}`).join('\n') : ''
+  )
   const [csvContacts, setCsvContacts] = useState<CsvContact[]>([])
   const [csvFileName, setCsvFileName] = useState('')
   const [csvRawRows, setCsvRawRows] = useState<Record<string, string>[]>([])

@@ -26,6 +26,25 @@ export interface InfiniteCampaignItem {
   fromHistory: boolean
 }
 
+// Tipos que usam o formato experimental (native_flow) — só esses ficam
+// "travados em enviado" quando o WhatsApp descarta do lado do destinatário
+// (confirmado: acontece consistentemente em iPhone, nunca em Menu/Lista/Enquete,
+// que usam formatos nativos/legados do protocolo).
+const UNRELIABLE_TYPES: InfiniteMessageType[] = ['buttons', 'imageButtons', 'imageLink', 'interactive', 'carousel']
+
+// Tempo de espera antes de considerar que um envio "sucesso" sem confirmação de
+// entrega provavelmente não chegou — recibos de entrega normalmente chegam em
+// segundos quando o destinatário tem alguma conectividade.
+const UNDELIVERED_THRESHOLD_MS = 5 * 60 * 1000
+
+export function isLikelyUndelivered(result: InfiniteCampaignResult, messageType: InfiniteMessageType): boolean {
+  if (result.status !== 'success') return false
+  if (!UNRELIABLE_TYPES.includes(messageType)) return false
+  if ((result.ack ?? 0) >= 3) return false
+  if (!result.sentAt) return false
+  return Date.now() - result.sentAt > UNDELIVERED_THRESHOLD_MS
+}
+
 const NAMES_KEY = 'infinite_campaign_names'
 
 export function saveCampaignName(startedAtMs: number, name: string) {
