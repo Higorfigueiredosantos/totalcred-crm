@@ -49,6 +49,13 @@ function extractContactNumber(jid: string | undefined): string | null {
 
 export async function handleUpsert(instanceName: string, ctx: InstanceContext, upsert: { messages: any[]; type: string }) {
   if (!config.webhookUrl) return;
+  // O Baileys reenvia todo o histórico de conversas (potencialmente milhares
+  // de mensagens antigas) pelo mesmo evento messages.upsert sempre que a
+  // instância reconecta, marcado com type:'append' (mensagens novas de
+  // verdade vêm como type:'notify'). Sem esse filtro, cada reconexão gera um
+  // webhook — e uma conversa "nova" no CRM — pra cada mensagem antiga,
+  // inundando o pipeline e atrasando/escondendo mensagens reais.
+  if (upsert.type !== 'notify') return;
 
   for (const msg of upsert.messages || []) {
     try {
