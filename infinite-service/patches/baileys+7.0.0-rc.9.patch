@@ -1,0 +1,29 @@
+diff --git a/node_modules/baileys/lib/Socket/messages-send.js b/node_modules/baileys/lib/Socket/messages-send.js
+index fa20505..e91f510 100644
+--- a/node_modules/baileys/lib/Socket/messages-send.js
++++ b/node_modules/baileys/lib/Socket/messages-send.js
+@@ -993,6 +993,12 @@ export const makeMessagesSocket = (config) => {
+                         // Use nested structure: biz > interactive > native_flow
+                         // For buttons, carousels, and other interactive messages
+                         const interactiveType = 'native_flow';
++                        // getButtonArgs() foi extraída de tráfego real do app oficial
++                        // (comentário original: "Based on official WhatsApp client
++                        // traffic") mas nunca era chamada — o código usava um valor
++                        // fixo (v:'9', name:'mixed') diferente do que a própria lib
++                        // reverse-engineered como correto. Usa o valor real aqui.
++                        const nativeFlowAttrs = getButtonArgs(message);
+                         stanza.content.push({
+                             tag: 'biz',
+                             attrs: {},
+@@ -1006,10 +1012,7 @@ export const makeMessagesSocket = (config) => {
+                                     content: [
+                                         {
+                                             tag: interactiveType,
+-                                            attrs: {
+-                                                v: '9',
+-                                                name: 'mixed'
+-                                            }
++                                            attrs: nativeFlowAttrs
+                                         }
+                                     ]
+                                 }
