@@ -584,6 +584,18 @@ export default function InfiniteCampaignWizardModal({ onClose, onStart, onResetS
                 )}
               </div>
 
+              <div className="bg-yellow-900/20 border border-yellow-700/40 rounded-lg p-3 flex items-center justify-between gap-3">
+                <div className="text-[11px] text-yellow-200/90">
+                  <p className="font-medium">Testando com o mesmo número várias vezes?</p>
+                  <p className="text-yellow-300/70 mt-0.5">Depois do 1º envio bem-sucedido a um número, campanhas seguintes pulam esse número automaticamente (sem enviar, sem erro).</p>
+                </div>
+                <button type="button" onClick={handleResetSent} disabled={resettingSent}
+                  className="flex items-center gap-1.5 px-3 py-2 bg-yellow-700 hover:bg-yellow-600 disabled:opacity-50 text-white text-xs rounded-lg shrink-0 whitespace-nowrap">
+                  {resettingSent ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+                  Limpar já enviados
+                </button>
+              </div>
+
               <div className="space-y-2">
                 <label className="block text-xs font-medium text-gray-400">Delay entre envios (segundos)</label>
                 <div className="flex items-center gap-2 text-xs text-gray-300">
@@ -594,11 +606,6 @@ export default function InfiniteCampaignWizardModal({ onClose, onStart, onResetS
                     className="w-16 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-center focus:outline-none focus:border-yellow-500" />
                   <span className="text-gray-500">seg</span>
                 </div>
-                <button type="button" onClick={handleResetSent} disabled={resettingSent}
-                  className="flex items-center gap-1.5 text-[11px] text-gray-400 hover:text-white disabled:opacity-50">
-                  {resettingSent ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
-                  Limpar números já enviados (permite reenviar para os mesmos contatos)
-                </button>
               </div>
 
               {recipientCount > 0 && (

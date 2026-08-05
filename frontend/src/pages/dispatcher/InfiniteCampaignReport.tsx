@@ -1,6 +1,6 @@
 import {
   X, BarChart2, CheckCircle, XCircle, Clock,
-  Pause, Play, Square, Trash2, Download,
+  Pause, Play, Square, Trash2, Download, AlertTriangle,
 } from 'lucide-react'
 import type { InfiniteCampaignItem } from './infiniteCampaign'
 
@@ -29,6 +29,7 @@ export default function InfiniteCampaignReport({
   ]
 
   const successRate = total > 1 ? Math.round((success / (item.stats.current || total)) * 100) : (success > 0 ? 100 : 0)
+  const allSkipped = item.status === 'done' && item.results.length === 0 && item.stats.total > 0 && success === 0 && failed === 0
 
   return (
     <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
@@ -57,6 +58,13 @@ export default function InfiniteCampaignReport({
             <button onClick={onClose} className="text-gray-400 hover:text-white p-1"><X size={18} /></button>
           </div>
         </div>
+
+        {allSkipped && (
+          <div className="mx-5 mt-4 bg-yellow-900/20 border border-yellow-700/40 rounded-lg p-3 flex items-start gap-2 text-xs text-yellow-200/90">
+            <AlertTriangle size={14} className="shrink-0 mt-0.5 text-yellow-400" />
+            <span>Nenhum contato foi enviado de verdade — todos foram pulados porque já tinham sido enviados com sucesso antes. Use "Limpar números já enviados" no assistente de nova campanha antes de reenviar para os mesmos contatos.</span>
+          </div>
+        )}
 
         <div className="flex-1 overflow-y-auto">
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-0">
