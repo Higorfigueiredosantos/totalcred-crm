@@ -19,16 +19,21 @@ export default function InfiniteCampaignReport({
   const total = item.stats.total || item.results.length || 1
   const success = item.results.filter(r => r.status === 'success').length
   const failed = item.results.filter(r => r.status === 'failed').length
+  // ack: 3=DELIVERY_ACK, 4=READ, 5=PLAYED (proto.WebMessageInfo.Status do Baileys)
+  const delivered = item.results.filter(r => (r.ack ?? 0) >= 3).length
+  const read = item.results.filter(r => (r.ack ?? 0) >= 4).length
 
-  // Sem confirmação de entrega/leitura — o serviço Infinite não expõe ACK.
   const funnel = [
     { label: 'Total',        value: total,                       pct: 100,                                                       color: 'bg-purple-500', icon: '👥' },
     { label: 'Processados',  value: item.stats.current || total, pct: Math.round(((item.stats.current || total) / total) * 100), color: 'bg-purple-400', icon: '📤' },
     { label: 'Enviados',     value: success,                     pct: Math.round((success / total) * 100),                       color: 'bg-blue-500',   icon: '✈️' },
+    { label: 'Entregues',    value: delivered,                   pct: Math.round((delivered / total) * 100),                     color: 'bg-green-500',  icon: '✅' },
+    { label: 'Lidos',        value: read,                        pct: Math.round((read / total) * 100),                          color: 'bg-teal-400',   icon: '👁' },
     { label: 'Falhas',       value: failed,                      pct: Math.round((failed / total) * 100),                        color: 'bg-red-500',    icon: '❌' },
   ]
 
   const successRate = total > 1 ? Math.round((success / (item.stats.current || total)) * 100) : (success > 0 ? 100 : 0)
+  const deliveryRate = success > 0 ? Math.round((delivered / success) * 100) : 0
   const allSkipped = item.status === 'done' && item.results.length === 0 && item.stats.total > 0 && success === 0 && failed === 0
 
   return (
@@ -41,7 +46,7 @@ export default function InfiniteCampaignReport({
               <p className="font-semibold text-white">{item.name}</p>
               <span className="text-xs px-2 py-0.5 bg-yellow-900/40 text-yellow-300 rounded-full">Relatório · Via Infinite</span>
             </div>
-            <p className="text-xs text-gray-500 mt-0.5">Envio/falha por destinatário — sem confirmação de entrega/leitura</p>
+            <p className="text-xs text-gray-500 mt-0.5">Envio, entrega e leitura por destinatário (recibos reais do WhatsApp)</p>
           </div>
           <div className="flex items-center gap-2">
             {item.status === 'running' && onTogglePause && (
@@ -114,6 +119,7 @@ export default function InfiniteCampaignReport({
                           <th className="text-left px-3 py-2">Nome</th>
                           <th className="text-left px-3 py-2">Instância</th>
                           <th className="text-left px-3 py-2">Status</th>
+                          <th className="text-left px-3 py-2">Ack</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -128,6 +134,12 @@ export default function InfiniteCampaignReport({
                                 : r.status === 'failed'
                                 ? <span className="flex items-center gap-1 text-red-400"><XCircle size={10} /> Falha</span>
                                 : <span className="flex items-center gap-1 text-yellow-400"><Clock size={10} /> Enviando</span>}
+                            </td>
+                            <td className="px-3 py-1.5 text-gray-500">
+                              {r.status !== 'success' ? '—'
+                                : (r.ack ?? 0) >= 4 ? <span className="text-blue-400">Lido</span>
+                                : (r.ack ?? 0) >= 3 ? <span className="text-gray-300">Entregue</span>
+                                : <span className="text-gray-500">Enviado</span>}
                             </td>
                           </tr>
                         ))}
@@ -146,6 +158,16 @@ export default function InfiniteCampaignReport({
                 </p>
                 <p className="text-sm text-gray-300 mt-1">Taxa de Envio</p>
                 <p className="text-xs text-gray-500">{success} de {item.stats.current || total} enviados</p>
+              </div>
+
+              <div className="h-px bg-gray-800" />
+
+              <div className="text-center">
+                <p className={`text-4xl font-bold ${deliveryRate >= 80 ? 'text-green-400' : deliveryRate >= 40 ? 'text-amber-400' : 'text-red-400'}`}>
+                  {deliveryRate}%
+                </p>
+                <p className="text-sm text-gray-300 mt-1">Taxa de Entrega</p>
+                <p className="text-xs text-gray-500">{delivered} de {success} entregues</p>
               </div>
 
               <div className="h-px bg-gray-800" />

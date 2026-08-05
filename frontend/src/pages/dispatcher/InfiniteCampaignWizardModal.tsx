@@ -638,11 +638,6 @@ export default function InfiniteCampaignWizardModal({ onClose, onStart, onResetS
                 ))}
               </div>
 
-              <div className="bg-yellow-900/10 border border-yellow-800/30 rounded-lg p-3 text-[11px] text-yellow-300/80 flex gap-2">
-                <AlertCircle size={13} className="shrink-0 mt-0.5" />
-                Instâncias Infinite não recebem confirmação de entrega/leitura — o relatório mostra apenas enviado/falhou.
-              </div>
-
               {!RELIABLE_TYPES.includes(messageType) && (
                 <div className="bg-orange-900/10 border border-orange-800/30 rounded-lg p-3 text-[11px] text-orange-300/80 flex gap-2">
                   <AlertCircle size={13} className="shrink-0 mt-0.5" />

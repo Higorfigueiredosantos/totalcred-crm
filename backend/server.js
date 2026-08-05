@@ -1925,7 +1925,7 @@ app.post('/api/infinite/webhook', (req, res) => {
   if (process.env.INFINITE_API_KEY && key !== process.env.INFINITE_API_KEY) {
     return res.status(401).json({ error: 'unauthorized' })
   }
-  infinite.handleWebhookMessage(req.body)
+  infinite.handleWebhook(req.body)
   res.json({ ok: true })
 })
 

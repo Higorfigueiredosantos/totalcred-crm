@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import type { InstanceContext } from '../types/whatsapp.js';
-import { handleUpsert } from './inbound.js';
+import { handleUpsert, handleMessagesUpdate } from './inbound.js';
 
 const instances = new Map<string, InstanceContext>();
 
@@ -91,6 +91,10 @@ export async function createInstance(
 
     sock.ev.on('messages.upsert', (upsert: unknown) => {
       handleUpsert(name, ctx, upsert as { messages: any[]; type: string }).catch(() => {});
+    });
+
+    sock.ev.on('messages.update', (updates: unknown) => {
+      handleMessagesUpdate(name, updates as Array<{ key: any; update: any }>).catch(() => {});
     });
 
     sock.ev.on('connection.update', ((update: unknown) => {

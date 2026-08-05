@@ -77,6 +77,15 @@ export function useInfiniteCampaigns() {
       addLog(`🔀 Instâncias em rotação: ${(p.instances as string[]).join(', ')}`)
     }
     if (p.type === 'skipped') addLog(`⏭️ ${p.number} — já enviado anteriormente`)
+    if (p.type === 'ack') {
+      setCurrent(prev => {
+        if (!prev) return prev
+        const next = prev.results.map(r => r.messageId === p.contact?.messageId ? { ...r, ack: p.contact.ack } : r)
+        return { ...prev, results: next }
+      })
+      const label = p.contact?.ack >= 4 ? 'Lido' : 'Entregue'
+      addLog(`✓✓ ${label} — ${p.contact?.number}`)
+    }
     if (p.type === 'waiting') { startWait(p.delay); addLog(`⏱️ Aguardando ${p.delay}s`) }
     if (p.type === 'paused') { setCurrent(prev => prev ? { ...prev, paused: p.paused } : prev); addLog(p.paused ? '⏸️ Pausado' : '▶️ Retomado') }
     if (p.type === 'stopped') { setCurrent(prev => prev ? { ...prev, status: 'done', paused: false, endedAt: Date.now() } : prev); addLog('🛑 Interrompido.') }

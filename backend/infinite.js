@@ -167,6 +167,18 @@ const campaignState = {
   current: null,
 }
 
+// messageId (do WhatsApp) -> result object, pra correlacionar webhooks de ACK
+// (entregue/lido) que chegam depois do envio. Cresce por campanha; limitado
+// pra não vazar memória em uso prolongado do servidor.
+const messageIdIndex = new Map()
+function indexMessageId(messageId, result) {
+  messageIdIndex.set(messageId, result)
+  if (messageIdIndex.size > 5000) {
+    const oldest = messageIdIndex.keys().next().value
+    messageIdIndex.delete(oldest)
+  }
+}
+
 function loadHistory() {
   try {
     if (fs.existsSync(HISTORY_FILE)) return JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'))
@@ -250,10 +262,14 @@ async function runCampaign(data) {
       const instanceName = instanceNames[rrIndex % instanceNames.length]
       rrIndex++
       const resolved = resolvePayload(payload, contact)
-      await sendMessage(messageType, instanceName, contact.number, resolved)
+      const sent = await sendMessage(messageType, instanceName, contact.number, resolved)
       result.status = 'success'
       result.via = instanceName
       result.sentAt = Date.now()
+      if (sent?.messageId) {
+        result.messageId = sent.messageId
+        indexMessageId(sent.messageId, result)
+      }
       success++
       campaignState.sentNumbers.add(contact.number)
       _broadcast('infinite_campaign', { type: 'result', contact: result, success, failed })
@@ -346,6 +362,36 @@ function handleWebhookMessage(body) {
   })
 }
 
+// Chamado pra webhooks kind:'ack' — status 3=DELIVERY_ACK, 4=READ, 5=PLAYED
+// (proto.WebMessageInfo.Status do Baileys, recibo real do WhatsApp). Atualiza
+// o resultado da campanha (em memória, se ainda estiver na lista atual) e o
+// histórico em disco (se a campanha já tiver sido salva), e avisa o frontend.
+function handleAckWebhook(body) {
+  const { messageId, status } = body || {}
+  if (!messageId || typeof status !== 'number') return
+
+  const result = messageIdIndex.get(messageId)
+  if (result && (result.ack ?? 0) < status) {
+    result.ack = status
+    _broadcast('infinite_campaign', { type: 'ack', contact: result })
+  }
+
+  try {
+    const list = loadHistory()
+    let changed = false
+    for (const record of list) {
+      const r = (record.results || []).find(x => x.messageId === messageId)
+      if (r && (r.ack ?? 0) < status) { r.ack = status; changed = true }
+    }
+    if (changed) fs.writeFileSync(HISTORY_FILE, JSON.stringify(list, null, 2))
+  } catch (e) { console.error('[Infinite] Erro ao salvar ack no histórico:', e.message) }
+}
+
+function handleWebhook(body) {
+  if (body?.kind === 'ack') return handleAckWebhook(body)
+  return handleWebhookMessage(body)
+}
+
 module.exports = {
   init,
   listInstances,
@@ -362,4 +408,6 @@ module.exports = {
   loadHistory,
   deleteHistoryRecord,
   handleWebhookMessage,
+  handleAckWebhook,
+  handleWebhook,
 }

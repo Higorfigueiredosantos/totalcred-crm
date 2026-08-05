@@ -311,6 +311,8 @@ export interface InfiniteCampaignResult {
   via?: string
   error?: string
   sentAt?: number
+  messageId?: string
+  ack?: number // proto.WebMessageInfo.Status do Baileys: 3=entregue, 4=lido, 5=reproduzido (áudio/vídeo)
 }
 
 export interface InfiniteCampaignHistoryRecord {
