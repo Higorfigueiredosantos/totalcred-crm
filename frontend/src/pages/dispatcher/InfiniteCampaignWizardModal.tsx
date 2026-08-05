@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react'
 import {
   Zap, Upload, X, AlertCircle, Users, Loader2,
-  FileText, Send, Plus, Trash2, RefreshCw,
+  FileText, Send, Plus, Trash2, RefreshCw, CheckCircle2,
 } from 'lucide-react'
 import { useInfiniteInstances } from '../../hooks/useInfiniteInstances'
 import type { CsvContact, InfiniteMessageType } from '../../types'
@@ -14,13 +14,21 @@ interface Props {
   onResetSent: () => Promise<{ ok: boolean; cleared: number }>
 }
 
+// Botões/CTA/Carrossel/Imagem+Botões/Imagem+Link usam o formato experimental do
+// Baileys (viewOnceMessage + interactiveMessage) — o próprio código-fonte da lib
+// marca esse caminho como "may not work reliably", e na prática falha bastante
+// em iPhone (iOS). Lista usa o formato legado (listMessage), que a lib comenta
+// explicitamente como "works on all platforms" — e Enquete é um tipo nativo do
+// protocolo do WhatsApp, não uma simulação. Esses dois não têm o mesmo risco.
+const RELIABLE_TYPES: InfiniteMessageType[] = ['menu', 'list', 'poll']
+
 const MESSAGE_TYPES: { value: InfiniteMessageType; label: string; hint: string }[] = [
   { value: 'buttons', label: 'Botões', hint: 'Até 3 botões de resposta rápida' },
   { value: 'imageButtons', label: 'Imagem + Botões', hint: 'Imagem com legenda e até 3 botões abaixo' },
   { value: 'imageLink', label: 'Imagem + Link', hint: 'Imagem com descrição e um botão de link (CTA)' },
   { value: 'interactive', label: 'CTA', hint: 'Botões de URL, copiar ou ligar' },
-  { value: 'list', label: 'Lista', hint: 'Lista dropdown com seções' },
-  { value: 'poll', label: 'Enquete', hint: 'Enquete com opções' },
+  { value: 'list', label: 'Lista', hint: 'Lista dropdown com seções — formato confiável, funciona em iOS' },
+  { value: 'poll', label: 'Enquete', hint: 'Enquete com opções — formato nativo do WhatsApp, funciona em iOS' },
   { value: 'carousel', label: 'Carrossel', hint: 'Cards com imagem e botões' },
   { value: 'menu', label: 'Menu', hint: 'Menu numerado em texto puro' },
 ]
@@ -635,13 +643,21 @@ export default function InfiniteCampaignWizardModal({ onClose, onStart, onResetS
                 Instâncias Infinite não recebem confirmação de entrega/leitura — o relatório mostra apenas enviado/falhou.
               </div>
 
-              {messageType !== 'menu' && (
+              {!RELIABLE_TYPES.includes(messageType) && (
                 <div className="bg-orange-900/10 border border-orange-800/30 rounded-lg p-3 text-[11px] text-orange-300/80 flex gap-2">
                   <AlertCircle size={13} className="shrink-0 mt-0.5" />
-                  Botões, CTA, lista, enquete e carrossel usam um formato marcado como experimental pelo próprio Baileys
-                  (fora da Cloud API oficial) — risco de banimento do número conectado, avisado pela própria lib. Testes
-                  confirmam que a entrega também é inconsistente: funciona para alguns contatos e falha silenciosamente
-                  para outros, sem padrão previsível. O tipo "Menu" (texto puro) é o único com entrega confiável.
+                  Botões, CTA, imagem+botões, imagem+link e carrossel usam um formato marcado como experimental pelo
+                  próprio código-fonte do Baileys ("may not work reliably") — risco de banimento do número conectado, e
+                  na prática falham bastante em iPhone (iOS): testes confirmam entrega inconsistente, funciona pra
+                  alguns contatos e falha silenciosamente pra outros. Pra público com iPhone, prefira "Lista" ou
+                  "Enquete" (formatos nativos/legados do WhatsApp, sem esse problema) ou "Menu" (texto puro).
+                </div>
+              )}
+              {(messageType === 'list' || messageType === 'poll') && (
+                <div className="bg-green-900/10 border border-green-800/30 rounded-lg p-3 text-[11px] text-green-300/80 flex gap-2">
+                  <CheckCircle2 size={13} className="shrink-0 mt-0.5" />
+                  Este tipo usa um formato compatível com todas as plataformas (inclusive iPhone/iOS) — sem o mesmo
+                  risco de entrega inconsistente dos tipos com botão.
                 </div>
               )}
             </div>
