@@ -2,9 +2,9 @@
 // Integração com o serviço "Infinite" (baileys_interactive), um microserviço
 // REST separado (infinite-service/) que expõe conexões WhatsApp via Baileys
 // com suporte a botões/listas/carrossel/enquete. Disparo via REST (send*/
-// campanha) e recebimento via webhook (o próprio infinite-service nos chama
-// em /api/infinite/webhook quando chega mensagem) — resposta pelo Mensagens
-// não é suportada, só leitura.
+// campanha), recebimento via webhook (o próprio infinite-service nos chama em
+// /api/infinite/webhook quando chega mensagem) e resposta de texto normal
+// pelo Mensagens (envio de mídia avulsa pelo chat ainda não é suportado).
 const axios = require('axios')
 const fs = require('fs')
 const path = require('path')
@@ -129,6 +129,7 @@ async function removeInstance(name) {
 // ── Envio de mensagens ────────────────────────────────────────────────────────
 
 const SEND_ENDPOINTS = {
+  text: '/v1/messages/send_text',
   menu: '/v1/messages/send_menu',
   buttons: '/v1/messages/send_buttons_helpers',
   imageButtons: '/v1/messages/send_image_buttons',

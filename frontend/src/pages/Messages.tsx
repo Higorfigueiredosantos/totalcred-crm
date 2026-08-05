@@ -720,9 +720,11 @@ export default function Messages() {
   const activeChannel = channels.find(c => c.id === activeConv?.channelId)
   const activeChipId  = activeConv && isChipConv(activeConv.channelId) ? chipIdFromChannelId(activeConv.channelId) : null
   const isGroupConv   = activeContact?.phone?.endsWith('@g.us') ?? false
-  // Instâncias Infinite são só recebimento — não há endpoint de resposta pelo
-  // Mensagens (disparo é só via campanha, no Disparador).
-  const isReadOnlyInfinite = isInfiniteChipId(activeChipId)
+  const isInfiniteConv = isInfiniteChipId(activeChipId)
+  // Instâncias Infinite respondem texto normal pelo Mensagens, mas ainda não
+  // têm endpoint de envio de mídia avulsa (só campanha, no Disparador, suporta
+  // imagem por enquanto).
+  const infiniteNoMedia = isInfiniteConv
 
   // ── Start private conversation from a group message sender ──────────────────
   const startPrivateConv = useCallback((senderNum: string) => {
@@ -832,7 +834,18 @@ export default function Messages() {
     updateConversation(activeConv.id, { lastMessage: msgText, lastMessageAt: msg.timestamp })
 
     try {
-      if (activeChipId) {
+      if (activeChipId && isInfiniteChipId(activeChipId)) {
+        const chatId = activeContact?.phone ?? ''
+        if (!chatId) throw new Error('ID do contato não encontrado')
+        const instanceName = infiniteNameFromChipId(activeChipId)
+        const r = await apiFetch('/api/infinite/send', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ instanceName, type: 'text', to: chatId, payload: { text: msgText } })
+        })
+        const d = await r.json()
+        if (!r.ok || d.error) throw new Error(d.error || 'Erro ao enviar via Infinite')
+        updateMessage(msgId, { status: 'sent', wamid: d.messageId })
+      } else if (activeChipId) {
         const chatId = activeContact?.phone ?? ''
         if (!chatId) throw new Error('ID do contato não encontrado')
         const r = await apiFetch('/api/chips/send', {
@@ -1461,8 +1474,8 @@ export default function Messages() {
 
                       {/* Attachment: files */}
                       <button type="button" onClick={() => fileInputRef.current?.click()}
-                        disabled={isPrivateMode || isRecording || isReadOnlyInfinite}
-                        title="Enviar imagem / vídeo / documento"
+                        disabled={isPrivateMode || isRecording || infiniteNoMedia}
+                        title={infiniteNoMedia ? 'Envio de mídia avulsa via Infinite ainda não suportado' : 'Enviar imagem / vídeo / documento'}
                         className="p-2.5 text-gray-500 hover:text-gray-300 hover:bg-gray-800 rounded-xl transition-colors disabled:opacity-30 shrink-0">
                         <Paperclip size={16} />
                       </button>
@@ -1473,7 +1486,7 @@ export default function Messages() {
                       {/* Mic: record audio */}
                       <button type="button"
                         onClick={isRecording ? stopRecording : startRecording}
-                        disabled={isPrivateMode || !!mediaPending || isReadOnlyInfinite}
+                        disabled={isPrivateMode || !!mediaPending || infiniteNoMedia}
                         title={isRecording ? 'Parar gravação' : 'Gravar áudio'}
                         className={`p-2.5 rounded-xl transition-colors disabled:opacity-30 shrink-0 ${
                           isRecording ? 'bg-red-600 text-white animate-pulse' : 'text-gray-500 hover:text-red-400 hover:bg-gray-800'
@@ -1491,7 +1504,7 @@ export default function Messages() {
                           if (e.key === 'Escape') setQuickReplySuggestions([])
                         }}
                         rows={1}
-                        disabled={isReadOnlyInfinite}
+                        disabled={infiniteNoMedia && !!mediaPending}
                         style={{ maxHeight: 120 }}
                         className={`flex-1 border rounded-xl px-3 py-2 text-sm text-white focus:outline-none resize-none disabled:opacity-50 disabled:cursor-not-allowed ${
                           isPrivateMode
@@ -1499,17 +1512,15 @@ export default function Messages() {
                             : 'bg-gray-800 border-gray-700 focus:border-indigo-500 placeholder-gray-600'
                         }`}
                         placeholder={
-                          isReadOnlyInfinite
-                            ? '👁️ Somente leitura — instâncias Infinite não recebem respostas por aqui. Use o Disparador para enviar.'
-                            : mediaPending
+                          mediaPending
                             ? 'Legenda (opcional)…'
                             : isPrivateMode
                               ? '📝 Nota interna (não enviada ao contato)...'
-                              : (text.startsWith('/') ? 'Digite / para ver respostas rápidas...' : (activeChipId ? `Responder via chip ${activeChipId}… (Enter)` : 'Mensagem… (Enter)'))
+                              : (text.startsWith('/') ? 'Digite / para ver respostas rápidas...' : (isInfiniteConv ? `Responder via Infinite ${infiniteNameFromChipId(activeChipId!)}… (Enter)` : activeChipId ? `Responder via chip ${activeChipId}… (Enter)` : 'Mensagem… (Enter)'))
                         }
                       />
                       <button onClick={handleSend}
-                        disabled={sending || (!text.trim() && !mediaPending) || isReadOnlyInfinite}
+                        disabled={sending || (!text.trim() && !mediaPending)}
                         className={`p-2.5 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl shrink-0 ${
                           isPrivateMode ? 'bg-amber-700 hover:bg-amber-600' : 'bg-indigo-600 hover:bg-indigo-500'
                         }`}>

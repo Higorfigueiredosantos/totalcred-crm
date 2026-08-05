@@ -26,9 +26,9 @@ export interface InfiniteConnectionsHandle {
 }
 
 // Conexões via Infinite (baileys_interactive) — botões/listas/carrossel/enquete
-// no disparo, e recebimento de mensagens (Mensagens é somente leitura pra
-// esse canal — resposta é só via campanha, no Disparador). Sem
-// temperatura/proxy (não se aplicam aqui).
+// no disparo, recebimento de mensagens e resposta de texto normal pelo
+// Mensagens (envio de mídia avulsa pelo chat ainda não é suportado, só via
+// campanha). Sem temperatura/proxy (não se aplicam aqui).
 const InfiniteConnections = forwardRef<InfiniteConnectionsHandle, {}>((_props, ref) => {
   const { instances, loadInstances } = useInfiniteInstances()
 
@@ -104,7 +104,7 @@ const InfiniteConnections = forwardRef<InfiniteConnectionsHandle, {}>((_props, r
       <div className="flex items-center justify-between mb-4">
         <div>
           <h2 className="text-base font-semibold text-white">Infinite (Botões/Listas)</h2>
-          <p className="text-xs text-gray-400 mt-0.5">Botões, listas, carrossel e enquete no disparo · recebe mensagens (leitura em Mensagens)</p>
+          <p className="text-xs text-gray-400 mt-0.5">Botões, listas, carrossel e enquete no disparo · recebe e responde texto normal em Mensagens</p>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={loadInstances}

@@ -18,6 +18,26 @@ function validateInstance(instanceName: string, res: Response): ReturnType<typeo
   return ctx;
 }
 
+// --- 0. TEXTO PURO (resposta avulsa pelo Mensagens do CRM) ---
+router.post('/send_text', async (req: Request, res: Response) => {
+  try {
+    const { instance = 'main', to, text } = req.body as { instance?: string; to: string; text: string };
+    if (!to || !text) return res.status(400).json({ ok: false, error: 'missing to/text' });
+
+    const ctx = validateInstance(instance, res);
+    if (!ctx) return;
+
+    const jid = await resolveJid(ctx.sock, to);
+    if (!jid) return res.status(400).json({ ok: false, error: 'invalid_phone' });
+
+    const result = await ctx.sock.sendMessage(jid, { text: String(text) });
+    return res.json({ ok: true, messageId: result?.key?.id });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return res.status(500).json({ ok: false, error: message });
+  }
+});
+
 // --- 1. MENU TEXTO (opções numeradas) ---
 router.post('/send_menu', async (req: Request, res: Response) => {
   try {
