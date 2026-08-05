@@ -118,12 +118,20 @@ export async function handleUpsert(instanceName: string, ctx: InstanceContext, u
   }
 }
 
-function postWebhook(payload: Record<string, unknown>) {
-  return fetch(config.webhookUrl, {
+async function postWebhook(payload: Record<string, unknown>) {
+  // fetch() só rejeita em erro de rede — um 401/500 do backend resolve
+  // normalmente e passava batido sem log nenhum (ex.: chave de API divergente
+  // entre os dois lados falharia em silêncio, mensagem "enviada" pro webhook
+  // mas descartada do outro lado).
+  const res = await fetch(config.webhookUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...(config.apiKey ? { 'x-api-key': config.apiKey } : {}) },
     body: JSON.stringify(payload),
   });
+  if (!res.ok) {
+    console.error(`[Infinite] Webhook rejeitado pelo backend: HTTP ${res.status}`);
+  }
+  return res;
 }
 
 // Status do WebMessageInfo (proto.WebMessageInfo.Status): 3=DELIVERY_ACK, 4=READ, 5=PLAYED.

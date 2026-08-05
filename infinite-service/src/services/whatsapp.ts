@@ -75,6 +75,19 @@ export async function createInstance(
       printQRInTerminal: false,
       version,
       browser: Browsers.windows('Chrome'),
+      // O padrão do Baileys baixa o histórico completo de conversas a cada
+      // reconexão (syncFullHistory: true) — em contas com muito histórico
+      // isso significa milhares de mensagens antigas competindo por recursos
+      // com a própria inicialização da sessão, e foi a causa raiz de dois
+      // problemas observados: mensagens antigas sendo tratadas como novas
+      // (endereçado à parte, filtrando por upsert.type) e timeouts do
+      // "circuit breaker" de query interno do Baileys (CircuitTimeoutError em
+      // 'init queries', sempre no mesmo timeout de 60s do default), que
+      // deixavam a conexão "conectada" mas incapaz de processar mensagens
+      // novas de verdade. Como é uma API só de envio/recepção ao vivo (sem
+      // necessidade de histórico), desativar isso resolve as duas causas.
+      syncFullHistory: false,
+      shouldSyncHistoryMessage: () => false,
     }) as InstanceContext['sock'];
 
     const ctx: InstanceContext = {
@@ -119,21 +132,30 @@ export async function createInstance(
         ctx.status = 'disconnected';
         ctx.qr = null;
 
-        if (code === DisconnectReason.loggedOut || code === DisconnectReason.connectionReplaced) {
+        // Sessão inválida/substituída em outro lugar — reconectar automaticamente
+        // só reproduziria o mesmo erro num loop. Precisa de novo QR/intervenção.
+        if (
+          code === DisconnectReason.loggedOut ||
+          code === DisconnectReason.connectionReplaced ||
+          code === DisconnectReason.badSession
+        ) {
           closeSocket(ctx.sock);
           instances.delete(name);
           return;
         }
 
-        // 515 = restartRequired: pairing concluído, WA pede reinício. Recriar socket com o mesmo auth.
-        if (code === DisconnectReason.restartRequired) {
-          const folder = ctx.authFolder;
-          closeSocket(ctx.sock);
-          instances.delete(name);
-          setTimeout(() => {
-            createInstance(name, folder).catch(() => {});
-          }, 2000);
-        }
+        // Qualquer outro motivo (perda de conexão, timeout, serviço
+        // indisponível, 515/restartRequired, ou até sem código nenhum) é, na
+        // prática, recuperável — reconectar sozinho evita depender de alguém
+        // notar e reconectar manualmente pela API, que é como esses casos
+        // vinham sendo tratados até agora (só restartRequired reconectava
+        // automático, o resto ficava "desconectado" esperando ação manual).
+        const folder = ctx.authFolder;
+        closeSocket(ctx.sock);
+        instances.delete(name);
+        setTimeout(() => {
+          createInstance(name, folder).catch(() => {});
+        }, 3000);
       }
     }));
 
