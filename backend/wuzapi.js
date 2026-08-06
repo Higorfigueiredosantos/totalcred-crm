@@ -124,7 +124,15 @@ async function createInstance(name, label) {
     await userClient(entry.token).post('/webhook', { webhookurl: WUZAPI_WEBHOOK_URL, events: ['Message', 'ReadReceipt'] })
   } catch (e) { console.error('[Wuzapi] Falha ao configurar webhook:', e.message) }
 
-  await userClient(entry.token).post('/session/connect', { Subscribe: ['Message'], Immediate: false })
+  try {
+    await userClient(entry.token).post('/session/connect', { Subscribe: ['Message'], Immediate: false })
+  } catch (e) {
+    // whatsmeow reconecta sessões salvas sozinho ao subir o container — se a
+    // gente chamar /session/connect de novo nesse meio tempo, o wuzapi
+    // responde erro "already connected". Não é falha, é o estado que já
+    // queríamos alcançar.
+    if (!/already connected/i.test(e?.response?.data?.error || e.message || '')) throw e
+  }
 
   let qr = null
   try {
