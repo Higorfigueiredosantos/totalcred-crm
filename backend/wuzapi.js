@@ -260,15 +260,17 @@ async function sendButtons(instanceName, to, payload = {}) {
 //
 // O wuzapi manda o evento cru do whatsmeow: postmap.event.Info (struct Go
 // sem json tag — chaves em PascalCase) e postmap.event.Message (proto com
-// tags camelCase). JID (Chat/Sender) também é um struct sem tag, {User,
-// Server,...} — não vem como string pronta "numero@servidor" como no
-// Baileys, precisa ser montado aqui. Confirmado lendo o código-fonte do
-// wuzapi e do whatsmeow (a documentação pública do projeto está incompleta
-// nesse ponto). "instanceName" e "userID" vêm no nível raiz do payload
-// porque o container está configurado com WEBHOOK_FORMAT=json.
-function jidString(jid) {
-  if (!jid || !jid.User) return null
-  return `${jid.User}@${jid.Server || 's.whatsapp.net'}`
+// tags camelCase). "instanceName" e "userID" vêm no nível raiz do payload
+// porque o container está configurado com WEBHOOK_FORMAT=json. Confirmado
+// testando direto contra o serviço (a documentação pública está incompleta
+// nesse ponto): Chat/Sender/SenderAlt já vêm como STRING pronta
+// "numero@servidor" (não um struct {User,Server} como o código-fonte do
+// whatsmeow sugeria) — e contatos com "LID" (endereçamento novo e mais
+// privado do WhatsApp) mandam o Chat/Sender como "id@lid", com o número de
+// telefone de verdade só disponível em SenderAlt.
+function preferPhoneJid(primary, alt) {
+  if (typeof alt === 'string' && alt.endsWith('@s.whatsapp.net')) return alt
+  return primary || null
 }
 
 function extractText(msg) {
@@ -299,15 +301,21 @@ function handleWebhookMessage(body) {
   const info = body.event?.Info
   const msg = body.event?.Message
   if (!instanceName || !info || info.IsFromMe) return
+  if (!info.Chat) return
 
-  const chat = jidString(info.Chat)
-  if (!chat) return
   const isGroup = !!info.IsGroup
-  const author = isGroup ? (jidString(info.Sender) || chat) : chat
+  // Em DM, Chat e Sender são o mesmo contato — resolve pro JID de telefone
+  // real quando o WhatsApp endereçou por LID. Em grupo, o Chat (grupo em si)
+  // não tem ambiguidade; só o autor (Sender) pode vir como LID.
+  const chat = isGroup ? info.Chat : preferPhoneJid(info.Chat, info.SenderAlt)
+  const author = isGroup ? preferPhoneJid(info.Sender, info.SenderAlt) : chat
+  if (!chat) return
 
   const text = extractText(msg)
   const media = detectMedia(msg)
   if (!text && !media) return // tipo de mensagem que não tratamos (reação, recibo, etc.)
+
+  console.log('[Wuzapi] mensagem recebida:', JSON.stringify({ instanceName, chat, author, isGroup, text }))
 
   _broadcast('chip_message', {
     chipId: `wuzapi:${instanceName}`,
@@ -318,7 +326,7 @@ function handleWebhookMessage(body) {
     isGroup,
     groupName: null,
     pushname: info.PushName || null,
-    contactNumber: isGroup ? null : info.Chat?.User || null,
+    contactNumber: isGroup ? null : chat.split('@')[0],
     msgType: media?.type || 'text',
     mediaUrl: null,
     mediaFileName: null,
