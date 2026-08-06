@@ -273,6 +273,34 @@ function preferPhoneJid(primary, alt) {
   return primary || null
 }
 
+// Resposta de botão nativo (o formato que o wuzapi usa pra enviar botões) —
+// o proto marca esse campo como "oneof" no Go, então pode vir aninhado de
+// mais de um jeito dependendo de como o encoding/json padrão (não o
+// protojson) serializa a interface. Tenta os caminhos plausíveis; se nenhum
+// bater, cai no log de depuração em handleWebhookMessage pra descobrir o
+// formato real no próximo teste.
+function extractNativeFlowResponse(msg) {
+  const candidates = [
+    msg?.interactiveResponseMessage?.nativeFlowResponseMessage,
+    msg?.interactiveResponseMessage?.NativeFlowResponseMessage,
+    msg?.interactiveResponseMessage?.InteractiveResponseMessage?.NativeFlowResponseMessage,
+    msg?.interactiveResponseMessage?.InteractiveResponseMessage?.nativeFlowResponseMessage,
+  ]
+  const flow = candidates.find(Boolean)
+  if (!flow) return null
+
+  const paramsRaw = flow.paramsJSON || flow.paramsJson || flow.ParamsJSON
+  if (typeof paramsRaw === 'string') {
+    try {
+      const parsed = JSON.parse(paramsRaw)
+      return parsed.display_text || parsed.id || paramsRaw
+    } catch {
+      return paramsRaw
+    }
+  }
+  return flow.name || flow.Name || null
+}
+
 function extractText(msg) {
   if (!msg) return ''
   if (typeof msg.conversation === 'string') return msg.conversation
@@ -282,6 +310,8 @@ function extractText(msg) {
   if (msg.documentMessage?.caption) return msg.documentMessage.caption
   if (msg.buttonsResponseMessage?.selectedDisplayText) return msg.buttonsResponseMessage.selectedDisplayText
   if (msg.listResponseMessage?.title) return msg.listResponseMessage.title
+  const nativeFlow = extractNativeFlowResponse(msg)
+  if (nativeFlow) return nativeFlow
   return ''
 }
 
@@ -313,7 +343,16 @@ function handleWebhookMessage(body) {
 
   const text = extractText(msg)
   const media = detectMedia(msg)
-  if (!text && !media) return // tipo de mensagem que não tratamos (reação, recibo, etc.)
+  if (!text && !media) {
+    // Provavelmente reação/recibo (ignorado de propósito) — ou um formato de
+    // resposta de botão que a extração ainda não reconhece. Loga a forma
+    // crua pra descobrir rápido no próximo teste real, sem precisar
+    // adivinhar de novo.
+    if (msg && Object.keys(msg).length > 0) {
+      console.log('[Wuzapi] mensagem sem texto/mídia reconhecidos, chaves:', JSON.stringify(Object.keys(msg)), JSON.stringify(msg).slice(0, 1000))
+    }
+    return
+  }
 
   console.log('[Wuzapi] mensagem recebida:', JSON.stringify({ instanceName, chat, author, isGroup, text }))
 
@@ -402,6 +441,37 @@ function resolvePayload(payload, contact) {
   return payload
 }
 
+// Campanha roda inteira no servidor — sem isso, a mensagem enviada nunca
+// aparecia na conversa em Mensagens, então quando a resposta do botão
+// chegava não tinha nenhum contexto do que foi mandado (igual abrir uma
+// conversa do zero com só a resposta, sem a pergunta). Reaproveita o mesmo
+// evento "chip_outbound" que os chips normais já usam pra ecoar mensagem
+// enviada por fora da UI (envio via API/campanha).
+function describeButtonPayload(payload) {
+  const lines = [payload?.text || '']
+  const buttons = payload?.buttons || []
+  if (buttons.length) {
+    lines.push(buttons.map(b => (b.type === 'url' ? `🔗 ${b.text}` : `▫️ ${b.text}`)).join('   '))
+  }
+  return lines.filter(Boolean).join('\n')
+}
+
+function broadcastOutboundEcho(instanceName, to, payload, messageId) {
+  const phone = cleanPhone(to)
+  if (phone.length < 10) return
+  const chat = `${phone}@s.whatsapp.net`
+  const chipId = `wuzapi:${instanceName}`
+  _broadcast('chip_outbound', {
+    chipId,
+    to: chat,
+    message: describeButtonPayload(payload),
+    msgId: messageId || undefined,
+    type: 'text',
+    timestamp: Date.now(),
+    conversationId: _getConvId(chipId, chat),
+  })
+}
+
 async function runCampaign(data) {
   const { name, payload, instanceNames, contacts, delayMin = 5, delayMax = 15 } = data
   campaignState.results = []
@@ -442,6 +512,7 @@ async function runCampaign(data) {
       success++
       campaignState.sentNumbers.add(contact.number)
       _broadcast('wuzapi_campaign', { type: 'result', contact: result, success, failed })
+      broadcastOutboundEcho(instanceName, contact.number, resolved, sent?.messageId)
     } catch (e) {
       result.status = 'failed'
       result.error = e?.response?.data?.error || e.message || 'Erro desconhecido'
