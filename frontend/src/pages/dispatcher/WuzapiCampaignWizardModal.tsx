@@ -1,12 +1,12 @@
 import { useState } from 'react'
 import {
   FlaskConical, Upload, X, AlertCircle, Users, Loader2,
-  FileText, Send, Plus, Trash2, RefreshCw, CheckCircle2, Image as ImageIcon,
+  FileText, Send, Plus, Trash2, RefreshCw, CheckCircle2, Image as ImageIcon, Link2,
 } from 'lucide-react'
 import { useWuzapiInstances } from '../../hooks/useWuzapiInstances'
 import type { CsvContact } from '../../types'
 import { parseContacts, parseCsvRaw, buildContacts } from './chipCampaign'
-import type { WuzapiCampaignConfig, WuzapiMessageType } from './wuzapiCampaign'
+import type { WuzapiButton, WuzapiCampaignConfig, WuzapiMessageType } from './wuzapiCampaign'
 
 interface Props {
   onClose: () => void
@@ -15,17 +15,16 @@ interface Props {
 }
 
 const MESSAGE_TYPES: { value: WuzapiMessageType; label: string; hint: string }[] = [
-  { value: 'buttons', label: 'Botões', hint: 'Até 3 botões de resposta rápida' },
-  { value: 'link', label: 'Link no Botão', hint: 'Um botão que abre uma URL' },
+  { value: 'buttons', label: 'Botões', hint: 'Até 3 botões — cada um normal ou de link' },
   { value: 'imageButtons', label: 'Imagem + Botões', hint: 'Imagem com legenda e até 3 botões' },
-  { value: 'imageLink', label: 'Imagem + Link', hint: 'Imagem com legenda e um botão de link' },
 ]
 
 let uidCounter = 0
 const uid = () => `id_${Date.now()}_${uidCounter++}`
 
 // Wizard de campanha via Wuzapi (BETA) — comparar entrega de botões nativos
-// (e variações com link/imagem) contra o Infinite/Baileys.
+// contra o Infinite/Baileys. Cada botão escolhe individualmente se é normal
+// (resposta rápida) ou de link (abre uma URL).
 export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSent }: Props) {
   const [resettingSent, setResettingSent] = useState(false)
   const { instances } = useWuzapiInstances()
@@ -39,12 +38,9 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
   const [text, setText] = useState('')
   const [footer, setFooter] = useState('')
   const [imageB64, setImageB64] = useState('')
-  const [buttons, setButtons] = useState<{ id: string; text: string }[]>([{ id: 'opt1', text: '' }])
-  const [linkButtonText, setLinkButtonText] = useState('Acessar')
-  const [linkUrl, setLinkUrl] = useState('')
+  const [buttons, setButtons] = useState<WuzapiButton[]>([{ id: 'opt1', text: '', type: 'reply' }])
 
-  const hasImage = messageType === 'imageButtons' || messageType === 'imageLink'
-  const hasLink = messageType === 'link' || messageType === 'imageLink'
+  const hasImage = messageType === 'imageButtons'
 
   const [contactsTab, setContactsTab] = useState<'manual' | 'csv'>('manual')
   const [contactsText, setContactsText] = useState('')
@@ -68,6 +64,10 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
     const reader = new FileReader()
     reader.onload = ev => setImageB64(ev.target?.result as string)
     reader.readAsDataURL(file)
+  }
+
+  function updateButton(id: string, data: Partial<WuzapiButton>) {
+    setButtons(bs => bs.map(b => b.id === id ? { ...b, ...data } : b))
   }
 
   function applyPhoneColumn(rawRows: Record<string, string>[], allHeaders: string[], phoneCol: string) {
@@ -117,23 +117,26 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
     setCsvDups(0)
   }
 
+  const activeButtons = buttons.filter(b => b.text.trim())
+
   function messageValid(): string | null {
     if (!text.trim()) return 'Preencha o texto da mensagem.'
     if (hasImage && !imageB64) return 'Adicione uma imagem.'
-    if (hasLink) {
-      if (!linkButtonText.trim() || !linkUrl.trim()) return 'Preencha o texto do botão e a URL do link.'
-    } else if (buttons.filter(b => b.text.trim()).length === 0) {
-      return 'Adicione ao menos um botão.'
-    }
+    if (activeButtons.length === 0) return 'Adicione ao menos um botão.'
+    const badLink = activeButtons.find(b => b.type === 'url' && !b.url?.trim())
+    if (badLink) return `Preencha a URL do botão "${badLink.text}".`
     return null
   }
 
   function buildPayload() {
-    const base = { text, footer: footer || undefined, image: hasImage ? imageB64 : undefined }
-    if (hasLink) {
-      return { ...base, buttons: [{ id: 'link', text: linkButtonText, type: 'url' as const, url: linkUrl }] }
+    return {
+      text,
+      footer: footer || undefined,
+      image: hasImage ? imageB64 : undefined,
+      buttons: activeButtons.map(b => b.type === 'url'
+        ? { id: b.id, text: b.text, type: 'url' as const, url: b.url!.trim() }
+        : { id: b.id, text: b.text, type: 'reply' as const }),
     }
-    return { ...base, buttons: buttons.filter(b => b.text.trim()).map(b => ({ ...b, type: 'reply' as const })) }
   }
 
   async function handleResetSent() {
@@ -249,45 +252,50 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-orange-500" />
               </div>
 
-              {hasLink ? (
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-xs text-gray-400 mb-1.5">Texto do botão</label>
-                    <input value={linkButtonText} maxLength={20} onChange={e => setLinkButtonText(e.target.value)}
-                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-orange-500" />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-400 mb-1.5">URL</label>
-                    <input value={linkUrl} onChange={e => setLinkUrl(e.target.value)}
-                      placeholder="https://..."
-                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-orange-500" />
-                  </div>
-                </div>
-              ) : (
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1.5">Botões (até 3)</label>
-                  <div className="space-y-2">
-                    {buttons.map((btn, i) => (
-                      <div key={btn.id} className="flex gap-2">
+              <div>
+                <label className="block text-xs text-gray-400 mb-1.5">Botões (até 3)</label>
+                <div className="space-y-2">
+                  {buttons.map((btn, i) => (
+                    <div key={btn.id} className="bg-gray-800/60 border border-gray-700 rounded-lg p-2.5 space-y-2">
+                      <div className="flex gap-2">
                         <input value={btn.text} maxLength={20}
-                          onChange={e => setButtons(bs => bs.map(b => b.id === btn.id ? { ...b, text: e.target.value } : b))}
+                          onChange={e => updateButton(btn.id, { text: e.target.value })}
                           placeholder={`Botão ${i + 1} (máx. 20 caracteres)`}
-                          className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-orange-500" />
+                          className="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-orange-500" />
                         {buttons.length > 1 && (
                           <button onClick={() => setButtons(bs => bs.filter(b => b.id !== btn.id))}
-                            className="p-2 text-red-400 hover:bg-gray-800 rounded-lg"><Trash2 size={14} /></button>
+                            className="p-2 text-red-400 hover:bg-gray-900 rounded-lg"><Trash2 size={14} /></button>
                         )}
                       </div>
-                    ))}
-                    {buttons.length < 3 && (
-                      <button onClick={() => setButtons(bs => [...bs, { id: uid(), text: '' }])}
-                        className="flex items-center gap-1.5 text-xs text-orange-400 hover:text-orange-300">
-                        <Plus size={12} /> Adicionar botão
-                      </button>
-                    )}
-                  </div>
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => updateButton(btn.id, { type: 'reply' })}
+                          className={`flex-1 py-1.5 text-xs rounded-lg font-medium transition-colors ${
+                            (btn.type ?? 'reply') === 'reply' ? 'bg-orange-600 text-white' : 'bg-gray-900 text-gray-400 hover:text-gray-200'
+                          }`}>
+                          Normal
+                        </button>
+                        <button onClick={() => updateButton(btn.id, { type: 'url' })}
+                          className={`flex-1 flex items-center justify-center gap-1 py-1.5 text-xs rounded-lg font-medium transition-colors ${
+                            btn.type === 'url' ? 'bg-orange-600 text-white' : 'bg-gray-900 text-gray-400 hover:text-gray-200'
+                          }`}>
+                          <Link2 size={11} /> Link
+                        </button>
+                      </div>
+                      {btn.type === 'url' && (
+                        <input value={btn.url || ''} onChange={e => updateButton(btn.id, { url: e.target.value })}
+                          placeholder="https://..."
+                          className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-orange-500" />
+                      )}
+                    </div>
+                  ))}
+                  {buttons.length < 3 && (
+                    <button onClick={() => setButtons(bs => [...bs, { id: uid(), text: '', type: 'reply' }])}
+                      className="flex items-center gap-1.5 text-xs text-orange-400 hover:text-orange-300">
+                      <Plus size={12} /> Adicionar botão
+                    </button>
+                  )}
                 </div>
-              )}
+              </div>
             </>
           )}
 
@@ -377,7 +385,7 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
 
               <div className="bg-gray-800/50 rounded-lg p-3 text-xs text-gray-400 space-y-1">
                 <p className="flex items-center gap-1.5"><FileText size={11} /> {recipientCount} destinatário(s)</p>
-                <p className="flex items-center gap-1.5"><CheckCircle2 size={11} /> Mensagem: {MESSAGE_TYPES.find(m => m.value === messageType)?.label}</p>
+                <p className="flex items-center gap-1.5"><CheckCircle2 size={11} /> Mensagem: {MESSAGE_TYPES.find(m => m.value === messageType)?.label} · {activeButtons.length} botão(ões)</p>
               </div>
 
               <div className="flex items-center justify-between border-t border-gray-800 pt-3">

@@ -1,8 +1,9 @@
 import type { CsvContact, WuzapiCampaignResult } from '../../types'
 
-// Os 4 formatos são todos o mesmo endpoint (/chat/send/buttons) do lado do
-// wuzapi — só muda se tem Image e o "type" de cada botão (reply x cta_url).
-export type WuzapiMessageType = 'buttons' | 'link' | 'imageButtons' | 'imageLink'
+// Os 2 formatos são o mesmo endpoint (/chat/send/buttons) do lado do wuzapi —
+// só muda se tem Image. Cada botão individualmente escolhe se é normal
+// (reply) ou de link (cta_url), então não precisa de um tipo "link" separado.
+export type WuzapiMessageType = 'buttons' | 'imageButtons'
 
 export interface WuzapiButton {
   id: string
