@@ -7,7 +7,7 @@ import {
   Send, Play, RefreshCw, Upload, Image, Flame, Zap,
   X, ChevronDown, ChevronUp, Info, AlertTriangle, FileText, Users, Check,
   BarChart2, Hash, List, Video, File as FileIcon, Globe, Loader2, Smartphone,
-  Pause, Square, Sparkles,
+  Pause, Square, Sparkles, FlaskConical,
 } from 'lucide-react'
 import { getTemplates, sendTextMessage, sendTemplateMessage, uploadMedia, getTemplateAnalytics } from '../api/whatsapp'
 import { onWSMessage } from '../api/websocket'
@@ -19,6 +19,9 @@ import ChipCampaignReport from './dispatcher/ChipCampaignReport'
 import { useInfiniteCampaigns } from './dispatcher/useInfiniteCampaigns'
 import InfiniteCampaignWizardModal from './dispatcher/InfiniteCampaignWizardModal'
 import InfiniteCampaignReport from './dispatcher/InfiniteCampaignReport'
+import { useWuzapiCampaigns } from './dispatcher/useWuzapiCampaigns'
+import WuzapiCampaignWizardModal from './dispatcher/WuzapiCampaignWizardModal'
+import WuzapiCampaignReport from './dispatcher/WuzapiCampaignReport'
 
 // ═══════════════════════════════════════════════════════════════════
 // UTILITIES
@@ -1790,8 +1793,8 @@ async function executeBlast(
 // ── Type chooser (Oficial vs Não Oficial) ──────────────────────────────────────
 
 function CampaignTypeChooser({
-  showUnofficial, onClose, onPickOfficial, onPickUnofficial, onPickInfinite,
-}: { showUnofficial: boolean; onClose: () => void; onPickOfficial: () => void; onPickUnofficial: () => void; onPickInfinite: () => void }) {
+  showUnofficial, onClose, onPickOfficial, onPickUnofficial, onPickInfinite, onPickWuzapi,
+}: { showUnofficial: boolean; onClose: () => void; onPickOfficial: () => void; onPickUnofficial: () => void; onPickInfinite: () => void; onPickWuzapi: () => void }) {
   return (
     <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
       <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-md">
@@ -1835,6 +1838,20 @@ function CampaignTypeChooser({
               </div>
             </button>
           )}
+          {showUnofficial && (
+            <button onClick={onPickWuzapi}
+              className="w-full flex items-start gap-3 p-4 bg-gray-800 hover:bg-gray-750 border border-gray-700 hover:border-orange-600 rounded-xl text-left transition-colors">
+              <div className="w-9 h-9 rounded-lg bg-orange-900/50 flex items-center justify-center shrink-0">
+                <FlaskConical size={16} className="text-orange-400" />
+              </div>
+              <div>
+                <p className="text-sm font-semibold text-white flex items-center gap-1.5">
+                  Wuzapi <span className="text-[9px] font-bold uppercase tracking-wide bg-orange-500/20 text-orange-400 px-1 py-0.5 rounded">Beta</span>
+                </p>
+                <p className="text-xs text-gray-400 mt-0.5">Disparo de botões via whatsmeow, teste de comparação com o Infinite.</p>
+              </div>
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -1853,13 +1870,17 @@ export default function Dispatcher() {
   const [infiniteWizardOpen, setInfiniteWizardOpen] = useState(false)
   const [infiniteReportItemId, setInfiniteReportItemId] = useState<string | null>(null)
   const [infiniteRedispatch, setInfiniteRedispatch] = useState<{ contacts: { number: string; name?: string }[]; name: string } | null>(null)
+  const [wuzapiWizardOpen, setWuzapiWizardOpen] = useState(false)
+  const [wuzapiReportItemId, setWuzapiReportItemId] = useState<string | null>(null)
   const canUnofficial = can('chipsPage')
   const chipCampaigns = useChipCampaigns()
   const infiniteCampaigns = useInfiniteCampaigns()
+  const wuzapiCampaigns = useWuzapiCampaigns()
 
   const reportBlast = blasts.find(b => b.id === reportBlastId)
   const reportChipItem = chipCampaigns.items.find(i => i.id === chipReportItemId)
   const reportInfiniteItem = infiniteCampaigns.items.find(i => i.id === infiniteReportItemId)
+  const reportWuzapiItem = wuzapiCampaigns.items.find(i => i.id === wuzapiReportItemId)
 
   async function runBlast(blast: Blast) {
     if (runningBlasts.has(blast.id)) return
@@ -1918,7 +1939,7 @@ export default function Dispatcher() {
         </button>
       </div>
 
-      {blasts.length === 0 && chipCampaigns.items.length === 0 && infiniteCampaigns.items.length === 0 ? (
+      {blasts.length === 0 && chipCampaigns.items.length === 0 && infiniteCampaigns.items.length === 0 && wuzapiCampaigns.items.length === 0 ? (
         <div className="border-2 border-dashed border-gray-800 rounded-xl p-12 text-center">
           <Send size={32} className="text-gray-700 mx-auto mb-3" />
           <p className="text-gray-400 mb-4">Nenhuma campanha criada</p>
@@ -2114,6 +2135,99 @@ export default function Dispatcher() {
             )
           })}
 
+          {wuzapiCampaigns.items.map(item => {
+            const isRunning = item.status === 'running'
+            const progress = item.stats.total > 0
+              ? Math.round(((item.stats.success + item.stats.failed) / item.stats.total) * 100)
+              : 0
+
+            return (
+              <div key={item.id} className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+                <div className="p-5">
+                  <div className="flex items-start justify-between mb-4">
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <p className="font-medium text-white">{item.name}</p>
+                        <span className="flex items-center gap-1 text-xs px-2 py-0.5 bg-orange-900/30 text-orange-400 rounded-full">
+                          <FlaskConical size={10} /> Via Wuzapi (Beta)
+                        </span>
+                        {isRunning && item.paused && (
+                          <span className="text-xs px-2 py-0.5 bg-yellow-900/30 text-yellow-400 rounded-full">Pausado</span>
+                        )}
+                      </div>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        {item.instanceNames.length > 0 ? `${item.instanceNames.length} instância(s)` : 'Instâncias em rotação'}
+                        {` · ${new Date(item.createdAt).toLocaleString('pt-BR')}`}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className={`text-xs px-2 py-1 rounded-full font-medium ${isRunning ? statusStyle.running : statusStyle.done}`}>
+                        {isRunning ? 'Executando' : 'Concluído'}
+                      </span>
+                      <button onClick={() => setWuzapiReportItemId(item.id)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-xs text-gray-300 rounded-lg border border-gray-700"
+                        title="Relatório detalhado">
+                        <BarChart2 size={12} /> Relatório
+                      </button>
+                      {isRunning && (
+                        <>
+                          <button onClick={wuzapiCampaigns.togglePause}
+                            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs text-white rounded-lg ${item.paused ? 'bg-green-700 hover:bg-green-600' : 'bg-yellow-700 hover:bg-yellow-600'}`}>
+                            {item.paused ? <><Play size={12} /> Retomar</> : <><Pause size={12} /> Pausar</>}
+                          </button>
+                          <button onClick={wuzapiCampaigns.stop}
+                            className="flex items-center gap-1.5 px-3 py-1.5 bg-red-800 hover:bg-red-700 text-xs text-white rounded-lg">
+                            <Square size={12} /> Parar
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-4 sm:grid-cols-8 gap-2 mb-3">
+                    {[
+                      { label: 'Total',     value: item.stats.total,   color: 'text-gray-300' },
+                      { label: 'Enviados',  value: item.stats.success, color: 'text-blue-400' },
+                      { label: 'Falhas',    value: item.stats.failed,  color: 'text-red-400' },
+                    ].map(s => (
+                      <div key={s.label} className="bg-gray-800 rounded-lg p-2 text-center col-span-2 sm:col-span-1">
+                        <p className={`text-lg font-bold ${s.color}`}>{s.value}</p>
+                        <p className="text-[10px] text-gray-500">{s.label}</p>
+                      </div>
+                    ))}
+                  </div>
+
+                  {item.stats.total > 0 && (
+                    <div className="mb-2">
+                      <div className="flex justify-between text-xs text-gray-500 mb-1">
+                        <span>{isRunning ? 'Enviando...' : 'Concluído'}</span>
+                        <span>{progress}%</span>
+                      </div>
+                      <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                        <div className={`h-full transition-all duration-500 ${isRunning ? 'bg-blue-500' : 'bg-green-500'}`}
+                          style={{ width: `${progress}%` }} />
+                      </div>
+                    </div>
+                  )}
+
+                  {item.log.length > 0 && (
+                    <button onClick={() => setExpandedLog(expandedLog === item.id ? null : item.id)}
+                      className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-300 mt-2">
+                      {expandedLog === item.id ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                      {expandedLog === item.id ? 'Ocultar log' : `Ver log (${item.log.length} eventos)`}
+                    </button>
+                  )}
+                </div>
+
+                {expandedLog === item.id && item.log.length > 0 && (
+                  <div className="border-t border-gray-800 bg-gray-950 p-3 max-h-48 overflow-y-auto">
+                    {item.log.map((line, i) => <p key={i} className="text-xs font-mono mb-0.5 text-gray-500">{line}</p>)}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+
           {[...blasts].reverse().map(blast => {
             const isRunning = runningBlasts.has(blast.id)
             const progress = blast.stats.total > 0
@@ -2225,6 +2339,7 @@ export default function Dispatcher() {
           onPickOfficial={() => { setChooserOpen(false); setModal(true) }}
           onPickUnofficial={() => { setChooserOpen(false); setChipWizardOpen(true) }}
           onPickInfinite={() => { setChooserOpen(false); setInfiniteWizardOpen(true) }}
+          onPickWuzapi={() => { setChooserOpen(false); setWuzapiWizardOpen(true) }}
         />
       )}
 
@@ -2271,6 +2386,25 @@ export default function Dispatcher() {
             setInfiniteReportItemId(null)
             setInfiniteWizardOpen(true)
           }}
+        />
+      )}
+
+      {wuzapiWizardOpen && (
+        <WuzapiCampaignWizardModal
+          onClose={() => setWuzapiWizardOpen(false)}
+          onStart={wuzapiCampaigns.startCampaign}
+          onResetSent={wuzapiCampaigns.resetSent}
+        />
+      )}
+
+      {reportWuzapiItem && (
+        <WuzapiCampaignReport
+          item={reportWuzapiItem}
+          onClose={() => setWuzapiReportItemId(null)}
+          onExportCSV={item => wuzapiCampaigns.exportResultsCSV(item.results, `${item.name || 'campanha'}.csv`)}
+          onDeleteHistory={reportWuzapiItem.fromHistory ? wuzapiCampaigns.deleteHistory : undefined}
+          onTogglePause={reportWuzapiItem.status === 'running' ? wuzapiCampaigns.togglePause : undefined}
+          onStop={reportWuzapiItem.status === 'running' ? wuzapiCampaigns.stop : undefined}
         />
       )}
 

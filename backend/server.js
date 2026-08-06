@@ -24,6 +24,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100
 
 const { CallBridge } = require('./callBridge')
 const infinite = require('./infinite')
+const wuzapi = require('./wuzapi')
 
 const app = express()
 const server = http.createServer(app)
@@ -339,6 +340,7 @@ function broadcast(type, payload) {
 }
 
 infinite.init({ broadcast, getConvId, mediaDir: MEDIA_DIR })
+wuzapi.init({ broadcast })
 
 // ── Webhook storage & fire ────────────────────────────────────────────────────
 const WEBHOOKS_FILE = path.join(__dirname, 'data', 'webhooks.json')
@@ -1974,6 +1976,132 @@ app.get('/api/infinite-campaign/history', (_req, res) => res.json(infinite.loadH
 app.delete('/api/infinite-campaign/history/:id', (req, res) => {
   try {
     infinite.deleteHistoryRecord(req.params.id)
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ── Wuzapi Routes (BETA — teste de entrega de botões via whatsmeow) ───────────
+
+app.get('/api/wuzapi/instances', async (_req, res) => {
+  try {
+    res.json(await wuzapi.listInstances())
+  } catch (e) {
+    res.status(502).json({ error: e?.response?.data?.error || e.message || 'Falha ao consultar Wuzapi' })
+  }
+})
+
+app.post('/api/wuzapi/instances', async (req, res) => {
+  const { name, label } = req.body || {}
+  if (!name) return res.status(400).json({ error: 'name obrigatório' })
+  try {
+    res.json(await wuzapi.createInstance(String(name).trim(), label))
+  } catch (e) {
+    res.status(502).json({ error: e?.response?.data?.error || e.message || 'Falha ao criar instância' })
+  }
+})
+
+app.get('/api/wuzapi/instances/:name', async (req, res) => {
+  try {
+    res.json(await wuzapi.getInstanceStatus(req.params.name))
+  } catch (e) {
+    res.status(e?.response?.status || 502).json({ error: e?.response?.data?.error || e.message })
+  }
+})
+
+app.get('/api/wuzapi/instances/:name/qr', async (req, res) => {
+  try {
+    res.json(await wuzapi.getInstanceQr(req.params.name))
+  } catch (e) {
+    res.status(e?.response?.status || 502).json({ error: e?.response?.data?.error || e.message })
+  }
+})
+
+app.post('/api/wuzapi/instances/:name/disconnect', async (req, res) => {
+  try {
+    res.json(await wuzapi.disconnectInstance(req.params.name))
+  } catch (e) {
+    res.status(502).json({ error: e?.response?.data?.error || e.message })
+  }
+})
+
+app.post('/api/wuzapi/instances/:name/logout', async (req, res) => {
+  try {
+    res.json(await wuzapi.logoutInstance(req.params.name))
+  } catch (e) {
+    res.status(502).json({ error: e?.response?.data?.error || e.message })
+  }
+})
+
+app.delete('/api/wuzapi/instances/:name', async (req, res) => {
+  try {
+    res.json(await wuzapi.removeInstance(req.params.name))
+  } catch (e) {
+    res.status(502).json({ error: e?.response?.data?.error || e.message })
+  }
+})
+
+app.put('/api/wuzapi/instances/:name/label', (req, res) => {
+  wuzapi.setLabel(req.params.name, req.body?.label || '')
+  res.json({ ok: true })
+})
+
+app.post('/api/wuzapi/send', async (req, res) => {
+  const { instanceName, to, payload } = req.body || {}
+  if (!instanceName || !to) return res.status(400).json({ error: 'instanceName/to obrigatórios' })
+  try {
+    res.json(await wuzapi.sendButtons(instanceName, to, payload || {}))
+  } catch (e) {
+    res.status(502).json({ error: e?.response?.data?.error || e.message })
+  }
+})
+
+// ── Wuzapi Campaign Routes ─────────────────────────────────────────────────────
+
+app.post('/api/wuzapi-campaign/start', (req, res) => {
+  const data = req.body || {}
+  if (wuzapi.campaignState.current) return res.status(400).json({ error: 'Campanha já em andamento' })
+  if (!Array.isArray(data.instanceNames) || data.instanceNames.length === 0) {
+    return res.status(400).json({ error: 'Selecione ao menos uma instância' })
+  }
+  if (!Array.isArray(data.contacts) || data.contacts.length === 0) {
+    return res.status(400).json({ error: 'Nenhum contato informado' })
+  }
+  res.json({ ok: true, count: data.contacts.length })
+  wuzapi.runCampaign(data)
+})
+
+app.post('/api/wuzapi-campaign/pause', (_req, res) => {
+  wuzapi.campaignState.paused = !wuzapi.campaignState.paused
+  broadcast('wuzapi_campaign', { type: 'paused', paused: wuzapi.campaignState.paused })
+  res.json({ paused: wuzapi.campaignState.paused })
+})
+
+app.post('/api/wuzapi-campaign/stop', (_req, res) => {
+  wuzapi.campaignState.stopped = true
+  broadcast('wuzapi_campaign', { type: 'stopped' })
+  res.json({ ok: true })
+})
+
+app.post('/api/wuzapi-campaign/reset-sent', (_req, res) => {
+  const count = wuzapi.campaignState.sentNumbers.size
+  wuzapi.campaignState.sentNumbers.clear()
+  res.json({ ok: true, cleared: count })
+})
+
+app.get('/api/wuzapi-campaign/results', (_req, res) => res.json(wuzapi.campaignState.results))
+
+app.get('/api/wuzapi-campaign/stats', (_req, res) => res.json({
+  running: wuzapi.campaignState.running,
+  paused: wuzapi.campaignState.paused,
+}))
+
+app.get('/api/wuzapi-campaign/history', (_req, res) => res.json(wuzapi.loadHistory()))
+
+app.delete('/api/wuzapi-campaign/history/:id', (req, res) => {
+  try {
+    wuzapi.deleteHistoryRecord(req.params.id)
     res.json({ ok: true })
   } catch (e) {
     res.status(500).json({ error: e.message })

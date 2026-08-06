@@ -29,6 +29,21 @@ services:
       restart_policy:
         condition: any
 
+  # Wuzapi (BETA) — whatsmeow, testado apenas pra comparar entrega de botões
+  # nativos com o Infinite (Baileys). Imagem oficial, sem build próprio.
+  wuzapi:
+    image: asternic/wuzapi:latest
+    command: ["--datadir=/app/data"]
+    volumes:
+      - /opt/totalcred/wuzapi/data:/app/data
+      - /opt/totalcred/wuzapi/.env:/app/.env:ro
+    networks:
+      - crm-internal
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+
   frontend:
     image: totalcred-frontend:latest
     networks:

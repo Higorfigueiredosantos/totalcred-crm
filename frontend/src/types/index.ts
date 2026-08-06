@@ -333,3 +333,40 @@ export interface InfiniteCampaignSettings {
   delayMin: number
   delayMax: number
 }
+
+// ── Wuzapi (BETA) — whatsmeow, teste de entrega de botões nativos ────────────
+
+export type WuzapiStatus = 'connecting' | 'connected' | 'disconnected' | 'qr'
+
+export interface WuzapiInstance {
+  name: string
+  label?: string | null
+  status: WuzapiStatus
+  hasQr?: boolean
+  qr?: string | null
+  jid?: string | null
+}
+
+export interface WuzapiCampaignResult {
+  index: number
+  number: string
+  name?: string
+  status: 'success' | 'failed' | 'sending'
+  via?: string
+  error?: string
+  sentAt?: number
+  messageId?: string
+}
+
+export interface WuzapiCampaignHistoryRecord {
+  id: string
+  name: string
+  messageType: 'buttons'
+  startedAt: number
+  endedAt: number
+  total: number
+  success: number
+  failed: number
+  skipped: number
+  results: WuzapiCampaignResult[]
+}
