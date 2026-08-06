@@ -176,24 +176,29 @@ function cleanPhone(number) {
   return String(number || '').replace(/\D/g, '')
 }
 
-// payload: { text, footer, buttons: [{ id, text }] }
+// payload: { text, footer, image?, buttons: [{ id, text, type?: 'reply'|'url', url? }] }
+// Um único endpoint (/chat/send/buttons) cobre os 4 formatos do wizard —
+// botões simples, link no botão (cta_url), imagem+botões e imagem+link —
+// a única diferença é presença de Image e o "type" de cada botão.
 async function sendButtons(instanceName, to, payload = {}) {
   const entry = loadRegistry()[instanceName]
   if (!entry) throw new Error('Instância não encontrada')
   const phone = cleanPhone(to)
   if (phone.length < 10) throw new Error('Número inválido')
 
-  const buttons = (payload.buttons || []).filter(b => b?.text?.trim()).slice(0, 3).map((b, idx) => ({
-    type: 'reply',
-    title: String(b.text).slice(0, 20),
-    id: b.id || `btn_${idx}`,
-  }))
+  const buttons = (payload.buttons || []).filter(b => b?.text?.trim()).slice(0, 3).map((b, idx) => {
+    if (b.type === 'url' && b.url?.trim()) {
+      return { type: 'cta_url', title: String(b.text).slice(0, 20), id: b.id || `btn_${idx}`, url: b.url.trim() }
+    }
+    return { type: 'reply', title: String(b.text).slice(0, 20), id: b.id || `btn_${idx}` }
+  })
   if (buttons.length === 0) throw new Error('Adicione ao menos um botão')
 
   const { data } = await userClient(entry.token).post('/chat/send/buttons', {
     Phone: phone,
     Body: payload.text || '',
     Footer: payload.footer || undefined,
+    Image: payload.image || undefined,
     Buttons: buttons,
   })
   if (!data) throw new Error('Falha ao enviar')

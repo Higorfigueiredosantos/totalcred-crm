@@ -1,8 +1,19 @@
 import type { CsvContact, WuzapiCampaignResult } from '../../types'
 
+// Os 4 formatos são todos o mesmo endpoint (/chat/send/buttons) do lado do
+// wuzapi — só muda se tem Image e o "type" de cada botão (reply x cta_url).
+export type WuzapiMessageType = 'buttons' | 'link' | 'imageButtons' | 'imageLink'
+
+export interface WuzapiButton {
+  id: string
+  text: string
+  type?: 'reply' | 'url'
+  url?: string
+}
+
 export interface WuzapiCampaignConfig {
   name: string
-  payload: { text: string; footer?: string; buttons: { id: string; text: string }[] }
+  payload: { text: string; footer?: string; image?: string; buttons: WuzapiButton[] }
   contacts: CsvContact[]
   instanceNames: string[]
   delayMin: number

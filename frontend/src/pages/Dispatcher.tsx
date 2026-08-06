@@ -7,7 +7,7 @@ import {
   Send, Play, RefreshCw, Upload, Image, Flame, Zap,
   X, ChevronDown, ChevronUp, Info, AlertTriangle, FileText, Users, Check,
   BarChart2, Hash, List, Video, File as FileIcon, Globe, Loader2, Smartphone,
-  Pause, Square, Sparkles, FlaskConical,
+  Pause, Square, Sparkles, FlaskConical, Trash2,
 } from 'lucide-react'
 import { getTemplates, sendTextMessage, sendTemplateMessage, uploadMedia, getTemplateAnalytics } from '../api/whatsapp'
 import { onWSMessage } from '../api/websocket'
@@ -2180,6 +2180,13 @@ export default function Dispatcher() {
                             <Square size={12} /> Parar
                           </button>
                         </>
+                      )}
+                      {item.fromHistory && (
+                        <button onClick={() => wuzapiCampaigns.deleteHistory(item.id)}
+                          className="p-1.5 bg-red-900/40 hover:bg-red-800/60 text-red-400 rounded-lg"
+                          title="Apagar do histórico">
+                          <Trash2 size={13} />
+                        </button>
                       )}
                     </div>
                   </div>
