@@ -1,11 +1,10 @@
 'use strict'
 // Integração com o serviço "Wuzapi" (asternic/wuzapi, biblioteca whatsmeow),
-// usada em BETA só pra comparar a entrega de mensagens com botão nativo
-// contra o que já temos no Infinite (Baileys). Imagem oficial do Docker Hub,
-// sem build próprio. Diferente do Infinite, o wuzapi modela cada número
+// usada em BETA como teste de entrega de mensagens com botão nativo. Imagem
+// oficial do Docker Hub, sem build próprio. O wuzapi modela cada número
 // conectado como um "usuário" com um token próprio — mantemos um registro
-// local (nome amigável -> token/id) pra expor a mesma interface simples de
-// instâncias que o resto do app já usa.
+// local (nome amigável -> token/id) pra expor uma interface simples de
+// instâncias.
 const axios = require('axios')
 const crypto = require('crypto')
 const fs = require('fs')

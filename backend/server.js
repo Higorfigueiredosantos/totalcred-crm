@@ -23,7 +23,6 @@ const multer = require('multer')
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } })
 
 const { CallBridge } = require('./callBridge')
-const infinite = require('./infinite')
 const wuzapi = require('./wuzapi')
 
 const app = express()
@@ -339,7 +338,6 @@ function broadcast(type, payload) {
   }
 }
 
-infinite.init({ broadcast, getConvId, mediaDir: MEDIA_DIR })
 wuzapi.init({ broadcast })
 
 // ── Webhook storage & fire ────────────────────────────────────────────────────
@@ -1844,143 +1842,6 @@ app.get('/api/chip-campaign/stats', (_req, res) => res.json({
   riskLevel: chipCampaignState.tickMonitor.getBanRiskLevel(),
 }))
 
-// ── Infinite Routes (baileys_interactive — somente envio) ─────────────────────
-
-app.get('/api/infinite/instances', async (_req, res) => {
-  try {
-    res.json(await infinite.listInstances())
-  } catch (e) {
-    res.status(502).json({ error: e?.response?.data?.error || e.message || 'Falha ao consultar Infinite' })
-  }
-})
-
-app.post('/api/infinite/instances', async (req, res) => {
-  const { name, label } = req.body || {}
-  if (!name) return res.status(400).json({ error: 'name obrigatório' })
-  try {
-    res.json(await infinite.createInstance(String(name).trim(), label))
-  } catch (e) {
-    res.status(502).json({ error: e?.response?.data?.error || e.message || 'Falha ao criar instância' })
-  }
-})
-
-app.get('/api/infinite/instances/:name', async (req, res) => {
-  try {
-    res.json(await infinite.getInstanceStatus(req.params.name))
-  } catch (e) {
-    res.status(e?.response?.status || 502).json({ error: e?.response?.data?.error || e.message })
-  }
-})
-
-app.get('/api/infinite/instances/:name/qr', async (req, res) => {
-  try {
-    res.json(await infinite.getInstanceQr(req.params.name))
-  } catch (e) {
-    res.status(e?.response?.status || 502).json({ error: e?.response?.data?.error || e.message })
-  }
-})
-
-app.post('/api/infinite/instances/:name/disconnect', async (req, res) => {
-  try {
-    res.json(await infinite.disconnectInstance(req.params.name))
-  } catch (e) {
-    res.status(502).json({ error: e?.response?.data?.error || e.message })
-  }
-})
-
-app.post('/api/infinite/instances/:name/logout', async (req, res) => {
-  try {
-    res.json(await infinite.logoutInstance(req.params.name))
-  } catch (e) {
-    res.status(502).json({ error: e?.response?.data?.error || e.message })
-  }
-})
-
-app.delete('/api/infinite/instances/:name', async (req, res) => {
-  try {
-    res.json(await infinite.removeInstance(req.params.name))
-  } catch (e) {
-    res.status(502).json({ error: e?.response?.data?.error || e.message })
-  }
-})
-
-app.put('/api/infinite/instances/:name/label', (req, res) => {
-  infinite.setLabel(req.params.name, req.body?.label || '')
-  res.json({ ok: true })
-})
-
-app.post('/api/infinite/send', async (req, res) => {
-  const { instanceName, type, to, payload } = req.body || {}
-  if (!instanceName || !type || !to) return res.status(400).json({ error: 'instanceName/type/to obrigatórios' })
-  try {
-    res.json(await infinite.sendMessage(type, instanceName, to, payload || {}))
-  } catch (e) {
-    res.status(502).json({ error: e?.response?.data?.error || e.message })
-  }
-})
-
-// Webhook chamado pelo próprio infinite-service quando chega mensagem numa
-// instância conectada. Protegido pela mesma chave usada para autenticar as
-// chamadas backend → infinite-service (INFINITE_API_KEY), na direção inversa.
-app.post('/api/infinite/webhook', (req, res) => {
-  const key = req.headers['x-api-key']
-  if (process.env.INFINITE_API_KEY && key !== process.env.INFINITE_API_KEY) {
-    return res.status(401).json({ error: 'unauthorized' })
-  }
-  infinite.handleWebhook(req.body)
-  res.json({ ok: true })
-})
-
-// ── Infinite Campaign Routes ───────────────────────────────────────────────────
-
-app.post('/api/infinite-campaign/start', (req, res) => {
-  const data = req.body || {}
-  if (infinite.campaignState.current) return res.status(400).json({ error: 'Campanha já em andamento' })
-  if (!Array.isArray(data.instanceNames) || data.instanceNames.length === 0) {
-    return res.status(400).json({ error: 'Selecione ao menos uma instância' })
-  }
-  if (!Array.isArray(data.contacts) || data.contacts.length === 0) {
-    return res.status(400).json({ error: 'Nenhum contato informado' })
-  }
-  res.json({ ok: true, count: data.contacts.length })
-  infinite.runCampaign(data)
-})
-
-app.post('/api/infinite-campaign/pause', (_req, res) => {
-  infinite.campaignState.paused = !infinite.campaignState.paused
-  broadcast('infinite_campaign', { type: 'paused', paused: infinite.campaignState.paused })
-  res.json({ paused: infinite.campaignState.paused })
-})
-
-app.post('/api/infinite-campaign/stop', (_req, res) => {
-  infinite.campaignState.stopped = true
-  broadcast('infinite_campaign', { type: 'stopped' })
-  res.json({ ok: true })
-})
-
-app.post('/api/infinite-campaign/reset-sent', (_req, res) => {
-  const count = infinite.campaignState.sentNumbers.size
-  infinite.campaignState.sentNumbers.clear()
-  res.json({ ok: true, cleared: count })
-})
-
-app.get('/api/infinite-campaign/results', (_req, res) => res.json(infinite.campaignState.results))
-
-app.get('/api/infinite-campaign/stats', (_req, res) => res.json({
-  running: infinite.campaignState.running,
-  paused: infinite.campaignState.paused,
-}))
-
-app.get('/api/infinite-campaign/history', (_req, res) => res.json(infinite.loadHistory()))
-
-app.delete('/api/infinite-campaign/history/:id', (req, res) => {
-  try {
-    infinite.deleteHistoryRecord(req.params.id)
-    res.json({ ok: true })
-  } catch (e) {
-    res.status(500).json({ error: e.message })
-  }
-})
 
 // ── Wuzapi Routes (BETA — teste de entrega de botões via whatsmeow) ───────────
 

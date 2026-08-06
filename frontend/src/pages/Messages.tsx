@@ -12,7 +12,7 @@ import {
   Send, Search, Check, CheckCheck, Clock, AlertCircle, Archive,
   Smartphone, Lock, Tag, User, Phone, Calendar, ChevronRight, ChevronLeft, X, Edit2,
   Paperclip, FileText, Image, Video, Users, Download, Mic,
-  Smile, StopCircle, Trash2, MoreVertical, Zap,
+  Smile, StopCircle, Trash2, MoreVertical,
 } from 'lucide-react'
 import { sendTextMessage, markMessageRead, uploadMedia, sendMediaMessage } from '../api/whatsapp'
 import { onWSMessage, connectWS } from '../api/websocket'
@@ -31,14 +31,6 @@ const EMOJI_GROUPS: { label: string; emojis: string[] }[] = [
 const CHIP_PREFIX = 'chip:'
 const isChipConv = (channelId: string) => channelId?.startsWith(CHIP_PREFIX)
 const chipIdFromChannelId = (channelId: string) => channelId?.slice(CHIP_PREFIX.length)
-
-// Instâncias Infinite chegam pelo mesmo canal "chip:" (mesma infraestrutura de
-// conversa/contato), só com chipId sub-prefixado — evita duplicar toda a
-// lógica de contato/conversa só pra ter uma segunda origem de mensagens.
-// Só recebe (sem resposta pelo Mensagens — disparo é só via Disparador).
-const INFINITE_CHIP_PREFIX = 'infinite:'
-const isInfiniteChipId = (chipId: string | null | undefined) => !!chipId && chipId.startsWith(INFINITE_CHIP_PREFIX)
-const infiniteNameFromChipId = (chipId: string) => chipId.slice(INFINITE_CHIP_PREFIX.length)
 
 function statusIcon(status: string) {
   if (status === 'sending')   return <Clock size={13} className="text-white/50" />
@@ -651,7 +643,7 @@ export default function Messages() {
         seen.add(conv.channelId)
         if (isChipConv(conv.channelId)) {
           const chipId = chipIdFromChannelId(conv.channelId)
-          result.push({ id: conv.channelId, name: isInfiniteChipId(chipId) ? `Infinite: ${infiniteNameFromChipId(chipId)}` : `Chip: ${chipId}` })
+          result.push({ id: conv.channelId, name: `Chip: ${chipId}` })
         } else {
           const ch = channels.find(c => c.id === conv.channelId)
           result.push({ id: conv.channelId, name: ch?.name ?? conv.channelId.slice(0, 10) + '…' })
@@ -700,12 +692,6 @@ export default function Messages() {
   const activeChannel = channels.find(c => c.id === activeConv?.channelId)
   const activeChipId  = activeConv && isChipConv(activeConv.channelId) ? chipIdFromChannelId(activeConv.channelId) : null
   const isGroupConv   = activeContact?.phone?.endsWith('@g.us') ?? false
-  const isInfiniteConv = isInfiniteChipId(activeChipId)
-  // Instâncias Infinite respondem texto normal pelo Mensagens, mas ainda não
-  // têm endpoint de envio de mídia avulsa (só campanha, no Disparador, suporta
-  // imagem por enquanto).
-  const infiniteNoMedia = isInfiniteConv
-
   // ── Start private conversation from a group message sender ──────────────────
   const startPrivateConv = useCallback((senderNum: string) => {
     setGroupMsgMenu(null)
@@ -814,18 +800,7 @@ export default function Messages() {
     updateConversation(activeConv.id, { lastMessage: msgText, lastMessageAt: msg.timestamp })
 
     try {
-      if (activeChipId && isInfiniteChipId(activeChipId)) {
-        const chatId = activeContact?.phone ?? ''
-        if (!chatId) throw new Error('ID do contato não encontrado')
-        const instanceName = infiniteNameFromChipId(activeChipId)
-        const r = await apiFetch('/api/infinite/send', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ instanceName, type: 'text', to: chatId, payload: { text: msgText } })
-        })
-        const d = await r.json()
-        if (!r.ok || d.error) throw new Error(d.error || 'Erro ao enviar via Infinite')
-        updateMessage(msgId, { status: 'sent', wamid: d.messageId })
-      } else if (activeChipId) {
+      if (activeChipId) {
         const chatId = activeContact?.phone ?? ''
         if (!chatId) throw new Error('ID do contato não encontrado')
         const r = await apiFetch('/api/chips/send', {
@@ -1089,7 +1064,6 @@ export default function Messages() {
             const isActive = conv.id === activeConversationId
             const isChip = isChipConv(conv.channelId)
             const chipId = isChip ? chipIdFromChannelId(conv.channelId) : null
-            const isInfinite = isInfiniteChipId(chipId)
             const channel = !isChip ? channels.find(c => c.id === conv.channelId) : null
             const convLabels = (conv.tags || []).map(t => (settings.labels || []).find(l => l.id === t)).filter(Boolean)
             const isGroup = contact?.phone?.endsWith('@g.us')
@@ -1102,8 +1076,8 @@ export default function Messages() {
                       {isGroup ? <Users size={16} /> : (contact?.name[0]?.toUpperCase() ?? '?')}
                     </div>
                     {isChip && (
-                      <span className={`absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center ${isInfinite ? 'bg-yellow-600' : 'bg-green-600'}`}>
-                        {isInfinite ? <Zap size={9} className="text-white" /> : <Smartphone size={9} className="text-white" />}
+                      <span className="absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center bg-green-600">
+                        <Smartphone size={9} className="text-white" />
                       </span>
                     )}
                   </div>
@@ -1133,7 +1107,7 @@ export default function Messages() {
                       </div>
                     )}
                     <p className="text-[10px] text-gray-600 truncate mt-0.5">
-                      {isGroup ? '👥 Grupo' : ''}{isChip ? (isInfinite ? ` ⚡ Infinite: ${infiniteNameFromChipId(chipId!)}` : ` 📱 chip:${chipId}`) : channel ? ` 🔗 ${channel.name}` : ''}
+                      {isGroup ? '👥 Grupo' : ''}{isChip ? ` 📱 chip:${chipId}` : channel ? ` 🔗 ${channel.name}` : ''}
                     </p>
                   </div>
                 </div>
@@ -1174,16 +1148,14 @@ export default function Messages() {
                       : formatWaNumber(activeContact?.waNumber || activeContact?.phone)
                     }
                     {activeChipId
-                      ? isInfiniteChipId(activeChipId)
-                        ? <span className="flex items-center gap-1 text-yellow-400 ml-1"><Zap size={10} /> Infinite: {infiniteNameFromChipId(activeChipId)}</span>
-                        : <span className="flex items-center gap-1 text-green-400 ml-1"><Smartphone size={10} /> chip:{activeChipId}</span>
+                      ? <span className="flex items-center gap-1 text-green-400 ml-1"><Smartphone size={10} /> chip:{activeChipId}</span>
                       : activeChannel && <span className="ml-1 text-gray-500">· {activeChannel.name}</span>
                     }
                   </p>
                 </div>
               </div>
               <div className="flex gap-2">
-                {activeChipId && !isGroupConv && !isInfiniteChipId(activeChipId) && (
+                {activeChipId && !isGroupConv && (
                   <div className="relative" ref={callMenuRef}>
                     <button onClick={() => setShowCallMenu(v => !v)}
                       className="flex items-center gap-1 px-3 py-1.5 text-xs bg-gray-800 text-gray-300 hover:bg-gray-700 rounded-lg">
@@ -1454,8 +1426,8 @@ export default function Messages() {
 
                       {/* Attachment: files */}
                       <button type="button" onClick={() => fileInputRef.current?.click()}
-                        disabled={isPrivateMode || isRecording || infiniteNoMedia}
-                        title={infiniteNoMedia ? 'Envio de mídia avulsa via Infinite ainda não suportado' : 'Enviar imagem / vídeo / documento'}
+                        disabled={isPrivateMode || isRecording}
+                        title="Enviar imagem / vídeo / documento"
                         className="p-2.5 text-gray-500 hover:text-gray-300 hover:bg-gray-800 rounded-xl transition-colors disabled:opacity-30 shrink-0">
                         <Paperclip size={16} />
                       </button>
@@ -1466,7 +1438,7 @@ export default function Messages() {
                       {/* Mic: record audio */}
                       <button type="button"
                         onClick={isRecording ? stopRecording : startRecording}
-                        disabled={isPrivateMode || !!mediaPending || infiniteNoMedia}
+                        disabled={isPrivateMode || !!mediaPending}
                         title={isRecording ? 'Parar gravação' : 'Gravar áudio'}
                         className={`p-2.5 rounded-xl transition-colors disabled:opacity-30 shrink-0 ${
                           isRecording ? 'bg-red-600 text-white animate-pulse' : 'text-gray-500 hover:text-red-400 hover:bg-gray-800'
@@ -1484,7 +1456,6 @@ export default function Messages() {
                           if (e.key === 'Escape') setQuickReplySuggestions([])
                         }}
                         rows={1}
-                        disabled={infiniteNoMedia && !!mediaPending}
                         style={{ maxHeight: 120 }}
                         className={`flex-1 border rounded-xl px-3 py-2 text-sm text-white focus:outline-none resize-none disabled:opacity-50 disabled:cursor-not-allowed ${
                           isPrivateMode
@@ -1496,7 +1467,7 @@ export default function Messages() {
                             ? 'Legenda (opcional)…'
                             : isPrivateMode
                               ? '📝 Nota interna (não enviada ao contato)...'
-                              : (text.startsWith('/') ? 'Digite / para ver respostas rápidas...' : (isInfiniteConv ? `Responder via Infinite ${infiniteNameFromChipId(activeChipId!)}… (Enter)` : activeChipId ? `Responder via chip ${activeChipId}… (Enter)` : 'Mensagem… (Enter)'))
+                              : (text.startsWith('/') ? 'Digite / para ver respostas rápidas...' : (activeChipId ? `Responder via chip ${activeChipId}… (Enter)` : 'Mensagem… (Enter)'))
                         }
                       />
                       <button onClick={handleSend}
@@ -1539,7 +1510,7 @@ export default function Messages() {
                         <p className="text-xs text-gray-400 break-all">{activeContact?.phone}</p>
                       </div>
                     </div>
-                    {activeChipId && !isInfiniteChipId(activeChipId) && (
+                    {activeChipId && (
                       <button
                         onClick={fetchGroupMembers}
                         disabled={loadingMembers}
@@ -1595,7 +1566,7 @@ export default function Messages() {
                         <p className="text-[10px] text-gray-500">Canal</p>
                         <p className="text-xs text-gray-300">
                           {activeChipId
-                            ? isInfiniteChipId(activeChipId) ? `⚡ Infinite: ${infiniteNameFromChipId(activeChipId)}` : `📱 Chip: ${activeChipId}`
+                            ? `📱 Chip: ${activeChipId}`
                             : activeChannel?.name ?? '—'}
                         </p>
                       </div>

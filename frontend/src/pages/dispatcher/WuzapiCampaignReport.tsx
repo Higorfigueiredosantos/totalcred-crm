@@ -15,7 +15,7 @@ interface Props {
 
 // Relatório da campanha via Wuzapi (BETA) — funil reduzido (sem
 // Entregues/Lidos, já que não há confirmação de entrega vinda do whatsmeow
-// nesse teste, diferente do Infinite que tem ACK real via webhook).
+// configurada nesse teste).
 export default function WuzapiCampaignReport({
   item, onClose, onExportCSV, onDeleteHistory, onTogglePause, onStop,
 }: Props) {

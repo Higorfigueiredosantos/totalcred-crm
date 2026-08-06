@@ -4,11 +4,10 @@ import { useAuthStore } from '../store/auth'
 import type { Channel, ProxyConfig } from '../types'
 import {
   Plus, Trash2, RefreshCw, Copy, CheckCircle, XCircle, Edit2, Shield,
-  ChevronDown, ChevronUp, Loader2, Download, Zap, X, Smartphone, Globe, Sparkles, FlaskConical
+  ChevronDown, ChevronUp, Loader2, Download, Zap, X, Smartphone, Globe, FlaskConical
 } from 'lucide-react'
 import { v4 as uuid } from '../utils/uuid'
 import ChipConnections, { type ChipConnectionsHandle } from './channels/ChipConnections'
-import InfiniteConnections, { type InfiniteConnectionsHandle } from './channels/InfiniteConnections'
 import WuzapiConnections, { type WuzapiConnectionsHandle } from './channels/WuzapiConnections'
 
 const defaultProxy: ProxyConfig = {
@@ -109,8 +108,8 @@ function ProxySection({ proxy, onChange }: { proxy: ProxyConfig; onChange: (p: P
 // ── Type chooser (Oficial vs Não Oficial) ──────────────────────────────────────
 
 function ChannelTypeChooser({
-  showUnofficial, onClose, onPickOfficial, onPickUnofficial, onPickInfinite, onPickWuzapi,
-}: { showUnofficial: boolean; onClose: () => void; onPickOfficial: () => void; onPickUnofficial: () => void; onPickInfinite: () => void; onPickWuzapi: () => void }) {
+  showUnofficial, onClose, onPickOfficial, onPickUnofficial, onPickWuzapi,
+}: { showUnofficial: boolean; onClose: () => void; onPickOfficial: () => void; onPickUnofficial: () => void; onPickWuzapi: () => void }) {
   return (
     <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
       <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-md">
@@ -139,18 +138,6 @@ function ChannelTypeChooser({
               <div>
                 <p className="text-sm font-semibold text-white">API Não Oficial (QR Code)</p>
                 <p className="text-xs text-gray-400 mt-0.5">Conecta um número via WhatsApp Web, escaneando um QR Code.</p>
-              </div>
-            </button>
-          )}
-          {showUnofficial && (
-            <button onClick={onPickInfinite}
-              className="w-full flex items-start gap-3 p-4 bg-gray-800 hover:bg-gray-750 border border-gray-700 hover:border-yellow-600 rounded-xl text-left transition-colors">
-              <div className="w-9 h-9 rounded-lg bg-yellow-900/50 flex items-center justify-center shrink-0">
-                <Sparkles size={16} className="text-yellow-400" />
-              </div>
-              <div>
-                <p className="text-sm font-semibold text-white">Infinite (Botões/Listas)</p>
-                <p className="text-xs text-gray-400 mt-0.5">Conecta via QR Code com suporte a botões, listas, carrossel e enquete. Somente envio.</p>
               </div>
             </button>
           )}
@@ -554,7 +541,6 @@ export default function Channels() {
   const [importCh, setImportCh] = useState<Channel | null>(null)
   const [chooserOpen, setChooserOpen] = useState(false)
   const chipConnectionsRef = useRef<ChipConnectionsHandle>(null)
-  const infiniteConnectionsRef = useRef<InfiniteConnectionsHandle>(null)
   const wuzapiConnectionsRef = useRef<WuzapiConnectionsHandle>(null)
   const canUnofficial = can('chipsPage')
 
@@ -735,10 +721,7 @@ export default function Channels() {
 
       {canUnofficial && (
         <div>
-          <InfiniteConnections ref={infiniteConnectionsRef} />
-          <div className="mt-10 pt-8 border-t border-gray-800">
-            <WuzapiConnections ref={wuzapiConnectionsRef} />
-          </div>
+          <WuzapiConnections ref={wuzapiConnectionsRef} />
         </div>
       )}
       </div>
@@ -749,7 +732,6 @@ export default function Channels() {
           onClose={() => setChooserOpen(false)}
           onPickOfficial={() => { setChooserOpen(false); setModal({ open: true }) }}
           onPickUnofficial={() => { setChooserOpen(false); chipConnectionsRef.current?.openAddModal() }}
-          onPickInfinite={() => { setChooserOpen(false); infiniteConnectionsRef.current?.openAddModal() }}
           onPickWuzapi={() => { setChooserOpen(false); wuzapiConnectionsRef.current?.openAddModal() }}
         />
       )}

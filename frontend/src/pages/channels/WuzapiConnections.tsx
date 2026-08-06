@@ -25,10 +25,10 @@ export interface WuzapiConnectionsHandle {
   openAddModal: () => void
 }
 
-// Conexões via Wuzapi (whatsmeow) — BETA, só pra testar entrega de botões
-// nativos em comparação com o Infinite (Baileys). Sem recebimento de
-// mensagens, sem resposta pelo Mensagens — só disparo de botão via
-// Disparador. Se não funcionar bem, o plano é remover essa integração.
+// Conexões via Wuzapi (whatsmeow) — BETA, teste de entrega de botões
+// nativos. Sem recebimento de mensagens, sem resposta pelo Mensagens — só
+// disparo de botão via Disparador. Se não funcionar bem, o plano é remover
+// essa integração.
 const WuzapiConnections = forwardRef<WuzapiConnectionsHandle, {}>((_props, ref) => {
   const { instances, loadInstances } = useWuzapiInstances()
 

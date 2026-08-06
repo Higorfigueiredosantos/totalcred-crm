@@ -22,9 +22,9 @@ const MESSAGE_TYPES: { value: WuzapiMessageType; label: string; hint: string }[]
 let uidCounter = 0
 const uid = () => `id_${Date.now()}_${uidCounter++}`
 
-// Wizard de campanha via Wuzapi (BETA) — comparar entrega de botões nativos
-// contra o Infinite/Baileys. Cada botão escolhe individualmente se é normal
-// (resposta rápida) ou de link (abre uma URL).
+// Wizard de campanha via Wuzapi (BETA) — teste de entrega de botões nativos.
+// Cada botão escolhe individualmente se é normal (resposta rápida) ou de
+// link (abre uma URL).
 export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSent }: Props) {
   const [resettingSent, setResettingSent] = useState(false)
   const { instances } = useWuzapiInstances()

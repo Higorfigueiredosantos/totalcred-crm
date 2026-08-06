@@ -24,8 +24,9 @@ function historyToItem(rec: WuzapiCampaignHistoryRecord): WuzapiCampaignItem {
   }
 }
 
-// Estado + ações da campanha via Wuzapi (BETA), mesmo shape de "lista de
-// itens" do Infinite. Só existe uma campanha Wuzapi ativa por vez.
+// Estado + ações da campanha via Wuzapi (BETA), no mesmo shape de "lista de
+// itens" usado pelas outras campanhas. Só existe uma campanha Wuzapi ativa
+// por vez.
 export function useWuzapiCampaigns() {
   const [current, setCurrent] = useState<WuzapiCampaignItem | null>(null)
   const [history, setHistory] = useState<WuzapiCampaignHistoryRecord[]>([])
