@@ -75,7 +75,10 @@ async function listInstances() {
     const remote = remoteUsers.find(u => u.token === entry.token)
     if (!remote) return { name, label: entry.label || null, status: 'disconnected', hasQr: false, qr: null }
     const hasQr = Boolean(remote.qrcode)
-    const status = remote.connected ? 'connected' : (hasQr ? 'qr' : 'disconnected')
+    // "connected" no wuzapi só indica que o socket com o WhatsApp está aberto
+    // — fica true mesmo antes de escanear o QR. "loggedIn" é quem confirma
+    // que o número está de fato pareado/autenticado.
+    const status = remote.loggedIn ? 'connected' : (hasQr ? 'qr' : (remote.connected ? 'connecting' : 'disconnected'))
     return {
       name,
       label: entry.label || null,
@@ -122,8 +125,9 @@ async function getInstanceStatus(name) {
   const entry = loadRegistry()[name]
   if (!entry) throw new Error('Instância não encontrada')
   const { data } = await userClient(entry.token).get('/session/status')
-  const connected = Boolean(data?.data?.Connected)
-  return { instance: name, status: connected ? 'connected' : 'disconnected' }
+  const d = data?.data || {}
+  const loggedIn = Boolean(d.LoggedIn ?? d.loggedIn)
+  return { instance: name, status: loggedIn ? 'connected' : 'disconnected' }
 }
 
 async function getInstanceQr(name) {
