@@ -62,7 +62,9 @@ async function listInstances() {
   let remoteUsers = []
   try {
     const { data } = await admin().get('/admin/users')
-    remoteUsers = Array.isArray(data) ? data : []
+    // Respostas do wuzapi vêm envelopadas em {code, data, success}, não no
+    // formato plano documentado — confirmado testando direto contra o serviço.
+    remoteUsers = Array.isArray(data?.data) ? data.data : []
   } catch (e) {
     // Sem conseguir falar com o wuzapi, ainda mostra as instâncias salvas como desconectadas
     return names.map(name => ({ name, label: registry[name].label || null, status: 'disconnected', hasQr: false, qr: null }))
@@ -96,7 +98,7 @@ async function createInstance(name, label) {
       token,
       events: 'Message,ReadReceipt',
     })
-    entry = { token, userId: data?.id ?? null, label: label || null }
+    entry = { token, userId: data?.data?.id ?? null, label: label || null }
     registry[name] = entry
     saveRegistry(registry)
   } else if (label && label !== entry.label) {
