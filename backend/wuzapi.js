@@ -12,15 +12,20 @@ const path = require('path')
 
 const WUZAPI_URL = process.env.WUZAPI_URL || 'http://wuzapi:8080'
 const WUZAPI_ADMIN_TOKEN = process.env.WUZAPI_ADMIN_TOKEN || ''
+// URL que o próprio wuzapi chama quando chega mensagem — precisa ser
+// alcançável a partir do container do wuzapi (rede crm-internal).
+const WUZAPI_WEBHOOK_URL = process.env.WUZAPI_WEBHOOK_URL || 'http://backend:3001/api/wuzapi/webhook'
 
 const DATA_DIR = path.join(__dirname, 'data')
 const INSTANCES_FILE = path.join(DATA_DIR, 'wuzapi_instances.json')
 const HISTORY_FILE = path.join(DATA_DIR, 'wuzapi_campaigns_history.json')
 
 let _broadcast = () => {}
+let _getConvId = (channel, contact) => `${channel}:${contact}`
 
-function init({ broadcast }) {
+function init({ broadcast, getConvId }) {
   if (broadcast) _broadcast = broadcast
+  if (getConvId) _getConvId = getConvId
 }
 
 function ensureDataDir() {
@@ -85,6 +90,8 @@ async function listInstances() {
       hasQr,
       qr: hasQr ? remote.qrcode : null,
       jid: remote.jid || null,
+      proxyUrl: remote.proxy_config?.proxy_url || remote.proxy_url || null,
+      proxyEnabled: Boolean(remote.proxy_config?.enabled),
     }
   })
 }
@@ -98,6 +105,7 @@ async function createInstance(name, label) {
     const { data } = await admin().post('/admin/users', {
       name,
       token,
+      webhook: WUZAPI_WEBHOOK_URL,
       events: 'Message,ReadReceipt',
     })
     entry = { token, userId: data?.data?.id ?? null, label: label || null }
@@ -108,6 +116,13 @@ async function createInstance(name, label) {
     registry[name] = entry
     saveRegistry(registry)
   }
+
+  // Garante o webhook configurado mesmo pra instâncias criadas antes dessa
+  // funcionalidade existir (o registro local não muda, então precisa
+  // reconfirmar do lado do wuzapi a cada (re)conexão).
+  try {
+    await userClient(entry.token).post('/webhook', { webhookurl: WUZAPI_WEBHOOK_URL, events: ['Message', 'ReadReceipt'] })
+  } catch (e) { console.error('[Wuzapi] Falha ao configurar webhook:', e.message) }
 
   await userClient(entry.token).post('/session/connect', { Subscribe: ['Message'], Immediate: false })
 
@@ -169,10 +184,39 @@ function setLabel(name, label) {
   saveRegistry(registry)
 }
 
+// O wuzapi recusa mudar o proxy enquanto a sessão está conectada ("cannot
+// set proxy while connected") — o erro sobe pra quem chamou decidir
+// desconectar antes.
+async function setProxy(name, proxyUrl, enabled) {
+  const entry = loadRegistry()[name]
+  if (!entry) throw new Error('Instância não encontrada')
+  await userClient(entry.token).post('/session/proxy', {
+    proxy_url: enabled ? String(proxyUrl || '').trim() : '',
+    enable: !!enabled,
+  })
+  return { ok: true }
+}
+
 // ── Envio de botões ───────────────────────────────────────────────────────────
 
 function cleanPhone(number) {
   return String(number || '').replace(/\D/g, '')
+}
+
+// Texto simples — usado pra responder pelo Mensagens (equivalente ao envio
+// normal de um chip comum).
+async function sendText(instanceName, to, text) {
+  const entry = loadRegistry()[instanceName]
+  if (!entry) throw new Error('Instância não encontrada')
+  const phone = cleanPhone(to)
+  if (phone.length < 10) throw new Error('Número inválido')
+
+  const { data } = await userClient(entry.token).post('/chat/send/text', {
+    Phone: phone,
+    Body: text || '',
+  })
+  if (!data) throw new Error('Falha ao enviar')
+  return { ok: true, messageId: data?.Id || data?.data?.Id || null }
 }
 
 // payload: { text, footer, image?, buttons: [{ id, text, type?: 'reply'|'url', url? }] }
@@ -202,6 +246,84 @@ async function sendButtons(instanceName, to, payload = {}) {
   })
   if (!data) throw new Error('Falha ao enviar')
   return { ok: true, messageId: data?.Id || data?.data?.Id || null }
+}
+
+// ── Mensagens recebidas (webhook do wuzapi) ──────────────────────────────────
+//
+// O wuzapi manda o evento cru do whatsmeow: postmap.event.Info (struct Go
+// sem json tag — chaves em PascalCase) e postmap.event.Message (proto com
+// tags camelCase). JID (Chat/Sender) também é um struct sem tag, {User,
+// Server,...} — não vem como string pronta "numero@servidor" como no
+// Baileys, precisa ser montado aqui. Confirmado lendo o código-fonte do
+// wuzapi e do whatsmeow (a documentação pública do projeto está incompleta
+// nesse ponto). "instanceName" e "userID" vêm no nível raiz do payload
+// porque o container está configurado com WEBHOOK_FORMAT=json.
+function jidString(jid) {
+  if (!jid || !jid.User) return null
+  return `${jid.User}@${jid.Server || 's.whatsapp.net'}`
+}
+
+function extractText(msg) {
+  if (!msg) return ''
+  if (typeof msg.conversation === 'string') return msg.conversation
+  if (msg.extendedTextMessage?.text) return msg.extendedTextMessage.text
+  if (msg.imageMessage?.caption) return msg.imageMessage.caption
+  if (msg.videoMessage?.caption) return msg.videoMessage.caption
+  if (msg.documentMessage?.caption) return msg.documentMessage.caption
+  if (msg.buttonsResponseMessage?.selectedDisplayText) return msg.buttonsResponseMessage.selectedDisplayText
+  if (msg.listResponseMessage?.title) return msg.listResponseMessage.title
+  return ''
+}
+
+function detectMedia(msg) {
+  if (!msg) return null
+  if (msg.imageMessage) return { type: 'image', mimetype: msg.imageMessage.mimetype || null }
+  if (msg.videoMessage) return { type: 'video', mimetype: msg.videoMessage.mimetype || null }
+  if (msg.audioMessage) return { type: 'audio', mimetype: msg.audioMessage.mimetype || null }
+  if (msg.documentMessage) return { type: 'document', mimetype: msg.documentMessage.mimetype || null }
+  if (msg.stickerMessage) return { type: 'image', mimetype: msg.stickerMessage.mimetype || null }
+  return null
+}
+
+function handleWebhookMessage(body) {
+  if (body?.type !== 'Message') return
+  const instanceName = body.instanceName
+  const info = body.event?.Info
+  const msg = body.event?.Message
+  if (!instanceName || !info || info.IsFromMe) return
+
+  const chat = jidString(info.Chat)
+  if (!chat) return
+  const isGroup = !!info.IsGroup
+  const author = isGroup ? (jidString(info.Sender) || chat) : chat
+
+  const text = extractText(msg)
+  const media = detectMedia(msg)
+  if (!text && !media) return // tipo de mensagem que não tratamos (reação, recibo, etc.)
+
+  _broadcast('chip_message', {
+    chipId: `wuzapi:${instanceName}`,
+    from: chat,
+    author,
+    body: text || '',
+    timestamp: info.Timestamp ? Math.floor(new Date(info.Timestamp).getTime() / 1000) : Math.floor(Date.now() / 1000),
+    isGroup,
+    groupName: null,
+    pushname: info.PushName || null,
+    contactNumber: isGroup ? null : info.Chat?.User || null,
+    msgType: media?.type || 'text',
+    mediaUrl: null,
+    mediaFileName: null,
+    conversationId: _getConvId(`wuzapi:${instanceName}`, chat),
+  })
+}
+
+function handleWebhook(body) {
+  try {
+    handleWebhookMessage(body)
+  } catch (e) {
+    console.error('[Wuzapi] Erro processando webhook:', e.message)
+  }
 }
 
 // ── Campanha (só tipo "buttons" por enquanto — é o único motivo do teste) ────
@@ -347,7 +469,10 @@ module.exports = {
   logoutInstance,
   removeInstance,
   setLabel,
+  setProxy,
+  sendText,
   sendButtons,
+  handleWebhook,
   runCampaign,
   campaignState,
   loadHistory,

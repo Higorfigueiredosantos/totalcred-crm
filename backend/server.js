@@ -338,7 +338,7 @@ function broadcast(type, payload) {
   }
 }
 
-wuzapi.init({ broadcast })
+wuzapi.init({ broadcast, getConvId })
 
 // ── Webhook storage & fire ────────────────────────────────────────────────────
 const WEBHOOKS_FILE = path.join(__dirname, 'data', 'webhooks.json')
@@ -1908,6 +1908,17 @@ app.put('/api/wuzapi/instances/:name/label', (req, res) => {
   res.json({ ok: true })
 })
 
+// O wuzapi rejeita mudar proxy com a sessão conectada — o erro sobe direto
+// pro frontend explicar que precisa desconectar antes.
+app.put('/api/wuzapi/instances/:name/proxy', async (req, res) => {
+  const { proxyUrl, enabled } = req.body || {}
+  try {
+    res.json(await wuzapi.setProxy(req.params.name, proxyUrl, !!enabled))
+  } catch (e) {
+    res.status(502).json({ error: e?.response?.data?.error || e.message })
+  }
+})
+
 app.post('/api/wuzapi/send', async (req, res) => {
   const { instanceName, to, payload } = req.body || {}
   if (!instanceName || !to) return res.status(400).json({ error: 'instanceName/to obrigatórios' })
@@ -1916,6 +1927,23 @@ app.post('/api/wuzapi/send', async (req, res) => {
   } catch (e) {
     res.status(502).json({ error: e?.response?.data?.error || e.message })
   }
+})
+
+app.post('/api/wuzapi/send-text', async (req, res) => {
+  const { instanceName, to, text } = req.body || {}
+  if (!instanceName || !to) return res.status(400).json({ error: 'instanceName/to obrigatórios' })
+  try {
+    res.json(await wuzapi.sendText(instanceName, to, text || ''))
+  } catch (e) {
+    res.status(502).json({ error: e?.response?.data?.error || e.message })
+  }
+})
+
+// Webhook chamado pelo próprio wuzapi quando chega mensagem numa instância
+// conectada. Roda na rede interna (crm-internal), não exposta publicamente.
+app.post('/api/wuzapi/webhook', (req, res) => {
+  wuzapi.handleWebhook(req.body)
+  res.json({ ok: true })
 })
 
 // ── Wuzapi Campaign Routes ─────────────────────────────────────────────────────

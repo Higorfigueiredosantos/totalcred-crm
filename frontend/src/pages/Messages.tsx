@@ -800,7 +800,18 @@ export default function Messages() {
     updateConversation(activeConv.id, { lastMessage: msgText, lastMessageAt: msg.timestamp })
 
     try {
-      if (activeChipId) {
+      if (activeChipId?.startsWith('wuzapi:')) {
+        const chatId = activeContact?.phone ?? ''
+        if (!chatId) throw new Error('ID do contato não encontrado')
+        const instanceName = activeChipId.slice('wuzapi:'.length)
+        const r = await apiFetch('/api/wuzapi/send-text', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ instanceName, to: chatId, text: msgText })
+        })
+        const d = await r.json()
+        if (!r.ok || d.error) throw new Error(d.error || 'Erro ao enviar via Wuzapi')
+        updateMessage(msgId, { status: 'sent', wamid: d.messageId })
+      } else if (activeChipId) {
         const chatId = activeContact?.phone ?? ''
         if (!chatId) throw new Error('ID do contato não encontrado')
         const r = await apiFetch('/api/chips/send', {

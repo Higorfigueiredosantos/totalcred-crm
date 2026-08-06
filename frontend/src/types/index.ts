@@ -298,6 +298,8 @@ export interface WuzapiInstance {
   hasQr?: boolean
   qr?: string | null
   jid?: string | null
+  proxyUrl?: string | null
+  proxyEnabled?: boolean
 }
 
 export interface WuzapiCampaignResult {

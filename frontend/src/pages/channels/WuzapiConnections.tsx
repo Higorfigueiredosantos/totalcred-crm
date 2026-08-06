@@ -1,7 +1,7 @@
 import { useImperativeHandle, forwardRef, useState } from 'react'
 import {
   FlaskConical, Plus, Trash2, RefreshCw, Wifi, WifiOff,
-  X, AlertCircle, Loader2, Settings,
+  X, AlertCircle, Loader2, Settings, Shield, PowerOff,
 } from 'lucide-react'
 import { useWuzapiInstances } from '../../hooks/useWuzapiInstances'
 import { apiFetch } from '../../hooks/useChips'
@@ -25,10 +25,9 @@ export interface WuzapiConnectionsHandle {
   openAddModal: () => void
 }
 
-// Conexões via Wuzapi (whatsmeow) — BETA, teste de entrega de botões
-// nativos. Sem recebimento de mensagens, sem resposta pelo Mensagens — só
-// disparo de botão via Disparador. Se não funcionar bem, o plano é remover
-// essa integração.
+// Conexões via Wuzapi (whatsmeow) — BETA. Recebe mensagens (chegam em
+// Mensagens igual a um chip normal) e dispara botões via Disparador. Se não
+// funcionar bem, o plano é remover essa integração.
 const WuzapiConnections = forwardRef<WuzapiConnectionsHandle, {}>((_props, ref) => {
   const { instances, loadInstances } = useWuzapiInstances()
 
@@ -39,6 +38,10 @@ const WuzapiConnections = forwardRef<WuzapiConnectionsHandle, {}>((_props, ref) 
 
   const [configName, setConfigName] = useState<string | null>(null)
   const [configLabel, setConfigLabel] = useState('')
+  const [configProxyUrl, setConfigProxyUrl] = useState('')
+  const [configProxyEnabled, setConfigProxyEnabled] = useState(false)
+  const [configStatus, setConfigStatus] = useState<WuzapiStatus>('disconnected')
+  const [savingProxy, setSavingProxy] = useState(false)
 
   useImperativeHandle(ref, () => ({
     openAddModal: () => setShowAddModal(true),
@@ -78,6 +81,9 @@ const WuzapiConnections = forwardRef<WuzapiConnectionsHandle, {}>((_props, ref) 
 
   function openConfig(inst: WuzapiInstance) {
     setConfigLabel(inst.label || '')
+    setConfigProxyUrl(inst.proxyUrl || '')
+    setConfigProxyEnabled(!!inst.proxyEnabled)
+    setConfigStatus(inst.status)
     setConfigName(inst.name)
   }
 
@@ -87,8 +93,32 @@ const WuzapiConnections = forwardRef<WuzapiConnectionsHandle, {}>((_props, ref) 
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ label: configLabel.trim() })
     })
-    setConfigName(null)
-    loadInstances()
+
+    setSavingProxy(true)
+    try {
+      const r = await apiFetch(`/api/wuzapi/instances/${encodeURIComponent(configName)}/proxy`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ proxyUrl: configProxyUrl.trim(), enabled: configProxyEnabled })
+      })
+      if (r?.error) throw new Error(r.error)
+      setConfigName(null)
+    } catch (e: any) {
+      alert(
+        /connected|conectad/i.test(e.message || '')
+          ? 'Não é possível trocar o proxy com a instância conectada. Desconecte primeiro (botão abaixo) e tente de novo.'
+          : `Erro ao salvar proxy: ${e.message}`
+      )
+    } finally {
+      setSavingProxy(false)
+      loadInstances()
+    }
+  }
+
+  async function disconnectFromConfig() {
+    if (!configName) return
+    await apiFetch(`/api/wuzapi/instances/${encodeURIComponent(configName)}/disconnect`, { method: 'POST' })
+    setConfigStatus('disconnected')
+    setTimeout(loadInstances, 300)
   }
 
   return (
@@ -98,7 +128,7 @@ const WuzapiConnections = forwardRef<WuzapiConnectionsHandle, {}>((_props, ref) 
           <h2 className="text-base font-semibold text-white flex items-center gap-2">
             Wuzapi <span className="text-[10px] font-bold uppercase tracking-wide bg-orange-500/20 text-orange-400 px-1.5 py-0.5 rounded">Beta</span>
           </h2>
-          <p className="text-xs text-gray-400 mt-0.5">Teste de botões nativos via whatsmeow — só disparo, sem recebimento</p>
+          <p className="text-xs text-gray-400 mt-0.5">WhatsApp via whatsmeow — recebe e envia mensagens, com suporte a botões nativos</p>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={loadInstances}
@@ -203,14 +233,45 @@ const WuzapiConnections = forwardRef<WuzapiConnectionsHandle, {}>((_props, ref) 
               <p className="text-[11px] text-gray-600 mt-1">Instância: {configName}</p>
             </div>
 
+            <div className="border-t border-gray-700 pt-4 space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-white flex items-center gap-2">
+                  <Shield size={14} className="text-gray-400" /> Proxy da instância
+                </p>
+                <label className="relative inline-flex items-center cursor-pointer shrink-0 ml-3">
+                  <input type="checkbox" className="sr-only peer" checked={configProxyEnabled}
+                    onChange={e => setConfigProxyEnabled(e.target.checked)} />
+                  <div className="w-9 h-5 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-orange-600" />
+                </label>
+              </div>
+              {configProxyEnabled && (
+                <input
+                  value={configProxyUrl}
+                  onChange={e => setConfigProxyUrl(e.target.value)}
+                  placeholder="socks5://usuario:senha@host:porta"
+                  className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-orange-500 font-mono"
+                />
+              )}
+              <p className="text-[11px] text-gray-500">O proxy passa a ser responsável por todas as ações desse canal (envio, recebimento, QR).</p>
+              {configStatus !== 'disconnected' && (
+                <div className="flex items-center justify-between bg-yellow-900/20 border border-yellow-800/40 rounded-lg px-3 py-2">
+                  <span className="text-[11px] text-yellow-300">Desconecte antes de trocar o proxy</span>
+                  <button onClick={disconnectFromConfig}
+                    className="flex items-center gap-1 text-[11px] text-yellow-400 hover:text-yellow-200 underline">
+                    <PowerOff size={11} /> Desconectar
+                  </button>
+                </div>
+              )}
+            </div>
+
             <div className="flex gap-2 justify-end pt-1 border-t border-gray-700">
               <button onClick={() => setConfigName(null)}
                 className="px-3 py-1.5 text-sm text-gray-400 hover:text-white">
                 Cancelar
               </button>
-              <button onClick={saveConfig}
-                className="px-4 py-1.5 bg-orange-600 hover:bg-orange-500 text-white text-sm rounded-lg">
-                Salvar
+              <button onClick={saveConfig} disabled={savingProxy}
+                className="flex items-center gap-1.5 px-4 py-1.5 bg-orange-600 hover:bg-orange-500 disabled:opacity-50 text-white text-sm rounded-lg">
+                {savingProxy && <Loader2 size={13} className="animate-spin" />} Salvar
               </button>
             </div>
           </div>
@@ -246,7 +307,7 @@ const WuzapiConnections = forwardRef<WuzapiConnectionsHandle, {}>((_props, ref) 
               <p className="flex items-center gap-1.5"><AlertCircle size={11} className="text-yellow-400 shrink-0" />
                 Um QR Code aparecerá no card da instância em alguns segundos.</p>
               <p className="flex items-center gap-1.5"><FlaskConical size={11} className="text-orange-400 shrink-0" />
-                Beta: só envia botão via Disparador, não recebe mensagens.</p>
+                Beta: mensagens recebidas chegam em Mensagens; botões são disparados pelo Disparador.</p>
             </div>
 
             <div className="flex gap-2 justify-end">
