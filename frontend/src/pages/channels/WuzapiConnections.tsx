@@ -1,7 +1,7 @@
 import { useImperativeHandle, forwardRef, useState } from 'react'
 import {
   FlaskConical, Plus, Trash2, RefreshCw, Wifi, WifiOff,
-  X, AlertCircle, Loader2, Settings, Shield, PowerOff,
+  X, AlertCircle, Loader2, Settings, Shield, PowerOff, Users,
 } from 'lucide-react'
 import { useWuzapiInstances } from '../../hooks/useWuzapiInstances'
 import { apiFetch } from '../../hooks/useChips'
@@ -41,7 +41,14 @@ const WuzapiConnections = forwardRef<WuzapiConnectionsHandle, {}>((_props, ref) 
   const [configProxyUrl, setConfigProxyUrl] = useState('')
   const [configProxyEnabled, setConfigProxyEnabled] = useState(false)
   const [configStatus, setConfigStatus] = useState<WuzapiStatus>('disconnected')
+  const [configGroups, setConfigGroups] = useState(false)
   const [savingProxy, setSavingProxy] = useState(false)
+  // Mesma chave usada pelos chips (chip_group_settings) — a mensagem
+  // recebida via Wuzapi usa chipId = "wuzapi:<nome>", então o filtro de
+  // grupo do Mensagens.tsx (que já lê essa chave) funciona sem mudanças lá.
+  const [groupSettings, setGroupSettings] = useState<Record<string, boolean>>(() => {
+    try { return JSON.parse(localStorage.getItem('chip_group_settings') || '{}') } catch { return {} }
+  })
 
   useImperativeHandle(ref, () => ({
     openAddModal: () => setShowAddModal(true),
@@ -84,6 +91,7 @@ const WuzapiConnections = forwardRef<WuzapiConnectionsHandle, {}>((_props, ref) 
     setConfigProxyUrl(inst.proxyUrl || '')
     setConfigProxyEnabled(!!inst.proxyEnabled)
     setConfigStatus(inst.status)
+    setConfigGroups(groupSettings[`wuzapi:${inst.name}`] ?? false)
     setConfigName(inst.name)
   }
 
@@ -93,6 +101,10 @@ const WuzapiConnections = forwardRef<WuzapiConnectionsHandle, {}>((_props, ref) 
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ label: configLabel.trim() })
     })
+
+    const updated = { ...groupSettings, [`wuzapi:${configName}`]: configGroups }
+    localStorage.setItem('chip_group_settings', JSON.stringify(updated))
+    setGroupSettings(updated)
 
     setSavingProxy(true)
     try {
@@ -231,6 +243,20 @@ const WuzapiConnections = forwardRef<WuzapiConnectionsHandle, {}>((_props, ref) 
                 className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-orange-500"
               />
               <p className="text-[11px] text-gray-600 mt-1">Instância: {configName}</p>
+            </div>
+
+            <div className="flex items-center justify-between py-1 border-t border-gray-700 pt-4">
+              <div>
+                <p className="text-sm text-white flex items-center gap-2">
+                  <Users size={14} className="text-gray-400" /> Receber mensagens de grupos
+                </p>
+                <p className="text-[11px] text-gray-500 mt-0.5">Se desativado, mensagens de grupos não chegam em Mensagens</p>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer shrink-0 ml-3">
+                <input type="checkbox" className="sr-only peer" checked={configGroups}
+                  onChange={e => setConfigGroups(e.target.checked)} />
+                <div className="w-9 h-5 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-orange-600" />
+              </label>
             </div>
 
             <div className="border-t border-gray-700 pt-4 space-y-2">
