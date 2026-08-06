@@ -12,9 +12,11 @@ export interface WuzapiButton {
   url?: string
 }
 
+export interface WuzapiPayload { text: string; footer?: string; image?: string; buttons: WuzapiButton[] }
+
 export interface WuzapiCampaignConfig {
   name: string
-  payload: { text: string; footer?: string; image?: string; buttons: WuzapiButton[] }
+  payload: WuzapiPayload
   contacts: CsvContact[]
   instanceNames: string[]
   delayMin: number
@@ -34,6 +36,7 @@ export interface WuzapiCampaignItem {
   waiting: number
   paused: boolean
   fromHistory: boolean
+  payload?: WuzapiPayload
 }
 
 const NAMES_KEY = 'wuzapi_campaign_names'

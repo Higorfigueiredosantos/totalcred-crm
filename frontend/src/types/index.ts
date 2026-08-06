@@ -324,4 +324,10 @@ export interface WuzapiCampaignHistoryRecord {
   failed: number
   skipped: number
   results: WuzapiCampaignResult[]
+  payload?: {
+    text: string
+    footer?: string
+    image?: string
+    buttons: { id: string; text: string; type?: 'reply' | 'url'; url?: string }[]
+  }
 }

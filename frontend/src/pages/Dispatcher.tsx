@@ -1937,8 +1937,8 @@ export default function Dispatcher() {
 
             return (
               <div key={item.id} className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-                <div className="p-5">
-                  <div className="flex items-start justify-between mb-4">
+                <div className="p-3">
+                  <div className="flex items-start justify-between mb-2.5">
                     <div>
                       <div className="flex items-center gap-2 flex-wrap">
                         <p className="font-medium text-white">{item.name}</p>
@@ -1959,18 +1959,18 @@ export default function Dispatcher() {
                         {isRunning ? 'Executando' : 'Concluído'}
                       </span>
                       <button onClick={() => setChipReportItemId(item.id)}
-                        className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-xs text-gray-300 rounded-lg border border-gray-700"
+                        className="flex items-center gap-1 px-2 py-1 bg-gray-800 hover:bg-gray-700 text-xs text-gray-300 rounded-lg border border-gray-700"
                         title="Relatório detalhado">
                         <BarChart2 size={12} /> Relatório
                       </button>
                       {isRunning && (
                         <>
                           <button onClick={chipCampaigns.togglePause}
-                            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs text-white rounded-lg ${item.paused ? 'bg-green-700 hover:bg-green-600' : 'bg-yellow-700 hover:bg-yellow-600'}`}>
+                            className={`flex items-center gap-1 px-2 py-1 text-xs text-white rounded-lg ${item.paused ? 'bg-green-700 hover:bg-green-600' : 'bg-yellow-700 hover:bg-yellow-600'}`}>
                             {item.paused ? <><Play size={12} /> Retomar</> : <><Pause size={12} /> Pausar</>}
                           </button>
                           <button onClick={chipCampaigns.stop}
-                            className="flex items-center gap-1.5 px-3 py-1.5 bg-red-800 hover:bg-red-700 text-xs text-white rounded-lg">
+                            className="flex items-center gap-1 px-2 py-1 bg-red-800 hover:bg-red-700 text-xs text-white rounded-lg">
                             <Square size={12} /> Parar
                           </button>
                         </>
@@ -1978,15 +1978,15 @@ export default function Dispatcher() {
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-4 sm:grid-cols-8 gap-2 mb-3">
+                  <div className="grid grid-cols-4 sm:grid-cols-8 gap-1.5 mb-2">
                     {[
                       { label: 'Total',     value: item.stats.total,   color: 'text-gray-300' },
                       { label: 'Enviados',  value: item.stats.success, color: 'text-blue-400' },
                       { label: 'Falhas',    value: item.stats.failed,  color: 'text-red-400' },
                     ].map(s => (
-                      <div key={s.label} className="bg-gray-800 rounded-lg p-2 text-center col-span-2 sm:col-span-1">
-                        <p className={`text-lg font-bold ${s.color}`}>{s.value}</p>
-                        <p className="text-[10px] text-gray-500">{s.label}</p>
+                      <div key={s.label} className="bg-gray-800 rounded-lg p-1.5 text-center col-span-2 sm:col-span-1">
+                        <p className={`text-sm font-bold ${s.color}`}>{s.value}</p>
+                        <p className="text-[9px] text-gray-500">{s.label}</p>
                       </div>
                     ))}
                   </div>
@@ -2030,8 +2030,8 @@ export default function Dispatcher() {
 
             return (
               <div key={item.id} className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-                <div className="p-5">
-                  <div className="flex items-start justify-between mb-4">
+                <div className="p-3">
+                  <div className="flex items-start justify-between mb-2.5">
                     <div>
                       <div className="flex items-center gap-2 flex-wrap">
                         <p className="font-medium text-white">{item.name}</p>
@@ -2052,18 +2052,18 @@ export default function Dispatcher() {
                         {isRunning ? 'Executando' : 'Concluído'}
                       </span>
                       <button onClick={() => setWuzapiReportItemId(item.id)}
-                        className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-xs text-gray-300 rounded-lg border border-gray-700"
+                        className="flex items-center gap-1 px-2 py-1 bg-gray-800 hover:bg-gray-700 text-xs text-gray-300 rounded-lg border border-gray-700"
                         title="Relatório detalhado">
                         <BarChart2 size={12} /> Relatório
                       </button>
                       {isRunning && (
                         <>
                           <button onClick={wuzapiCampaigns.togglePause}
-                            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs text-white rounded-lg ${item.paused ? 'bg-green-700 hover:bg-green-600' : 'bg-yellow-700 hover:bg-yellow-600'}`}>
+                            className={`flex items-center gap-1 px-2 py-1 text-xs text-white rounded-lg ${item.paused ? 'bg-green-700 hover:bg-green-600' : 'bg-yellow-700 hover:bg-yellow-600'}`}>
                             {item.paused ? <><Play size={12} /> Retomar</> : <><Pause size={12} /> Pausar</>}
                           </button>
                           <button onClick={wuzapiCampaigns.stop}
-                            className="flex items-center gap-1.5 px-3 py-1.5 bg-red-800 hover:bg-red-700 text-xs text-white rounded-lg">
+                            className="flex items-center gap-1 px-2 py-1 bg-red-800 hover:bg-red-700 text-xs text-white rounded-lg">
                             <Square size={12} /> Parar
                           </button>
                         </>
@@ -2078,15 +2078,33 @@ export default function Dispatcher() {
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-4 sm:grid-cols-8 gap-2 mb-3">
+                  {item.payload && (item.payload.text || item.payload.image) && (
+                    <div className="flex items-start gap-2 bg-gray-800/60 border border-gray-700/60 rounded-lg p-2 mb-2">
+                      {item.payload.image && (
+                        <img src={item.payload.image} alt="Imagem enviada" className="w-10 h-10 rounded object-cover shrink-0" />
+                      )}
+                      <div className="min-w-0 flex-1">
+                        {item.payload.text && (
+                          <p className="text-[11px] text-gray-300 line-clamp-2">{item.payload.text}</p>
+                        )}
+                        {item.payload.buttons?.length > 0 && (
+                          <p className="text-[10px] text-gray-500 mt-0.5 truncate">
+                            {item.payload.buttons.map(b => b.text).join('  ·  ')}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-4 sm:grid-cols-8 gap-1.5 mb-2">
                     {[
                       { label: 'Total',     value: item.stats.total,   color: 'text-gray-300' },
                       { label: 'Enviados',  value: item.stats.success, color: 'text-blue-400' },
                       { label: 'Falhas',    value: item.stats.failed,  color: 'text-red-400' },
                     ].map(s => (
-                      <div key={s.label} className="bg-gray-800 rounded-lg p-2 text-center col-span-2 sm:col-span-1">
-                        <p className={`text-lg font-bold ${s.color}`}>{s.value}</p>
-                        <p className="text-[10px] text-gray-500">{s.label}</p>
+                      <div key={s.label} className="bg-gray-800 rounded-lg p-1.5 text-center col-span-2 sm:col-span-1">
+                        <p className={`text-sm font-bold ${s.color}`}>{s.value}</p>
+                        <p className="text-[9px] text-gray-500">{s.label}</p>
                       </div>
                     ))}
                   </div>
@@ -2132,8 +2150,8 @@ export default function Dispatcher() {
 
             return (
               <div key={blast.id} className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-                <div className="p-5">
-                  <div className="flex items-start justify-between mb-4">
+                <div className="p-3">
+                  <div className="flex items-start justify-between mb-2.5">
                     <div>
                       <div className="flex items-center gap-2 flex-wrap">
                         <p className="font-medium text-white">{blast.name}</p>
@@ -2153,27 +2171,27 @@ export default function Dispatcher() {
                       </span>
                       <button
                         onClick={() => setReportBlastId(blast.id)}
-                        className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-xs text-gray-300 rounded-lg border border-gray-700"
+                        className="flex items-center gap-1 px-2 py-1 bg-gray-800 hover:bg-gray-700 text-xs text-gray-300 rounded-lg border border-gray-700"
                         title="Relatório detalhado"
                       >
                         <BarChart2 size={12} /> Relatório
                       </button>
                       {(blast.status === 'draft' || blast.status === 'scheduled') && !isRunning && (
                         <button onClick={() => runBlast(blast)}
-                          className="flex items-center gap-1.5 px-3 py-1.5 bg-green-700 hover:bg-green-600 text-xs text-white rounded-lg">
+                          className="flex items-center gap-1 px-2 py-1 bg-green-700 hover:bg-green-600 text-xs text-white rounded-lg">
                           <Play size={12} /> Enviar
                         </button>
                       )}
                       {isRunning && (
                         <button onClick={() => stopBlast(blast.id)}
-                          className="flex items-center gap-1.5 px-3 py-1.5 bg-red-800 hover:bg-red-700 text-xs text-white rounded-lg">
+                          className="flex items-center gap-1 px-2 py-1 bg-red-800 hover:bg-red-700 text-xs text-white rounded-lg">
                           <X size={12} /> Parar
                         </button>
                       )}
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-4 sm:grid-cols-8 gap-2 mb-3">
+                  <div className="grid grid-cols-4 sm:grid-cols-8 gap-1.5 mb-2">
                     {[
                       { label: 'Total',     value: blast.stats.total,          color: 'text-gray-300' },
                       { label: 'Enviados',  value: blast.stats.sent,           color: 'text-blue-400' },
@@ -2182,9 +2200,9 @@ export default function Dispatcher() {
                       { label: 'Engajados', value: blast.stats.engaged ?? 0,   color: 'text-orange-400' },
                       { label: 'Falhas',    value: blast.stats.failed,         color: 'text-red-400' },
                     ].map(s => (
-                      <div key={s.label} className="bg-gray-800 rounded-lg p-2 text-center col-span-2 sm:col-span-1">
-                        <p className={`text-lg font-bold ${s.color}`}>{s.value}</p>
-                        <p className="text-[10px] text-gray-500">{s.label}</p>
+                      <div key={s.label} className="bg-gray-800 rounded-lg p-1.5 text-center col-span-2 sm:col-span-1">
+                        <p className={`text-sm font-bold ${s.color}`}>{s.value}</p>
+                        <p className="text-[9px] text-gray-500">{s.label}</p>
                       </div>
                     ))}
                   </div>

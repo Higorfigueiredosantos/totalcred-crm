@@ -533,6 +533,7 @@ async function runCampaign(data) {
     id: startedAt.toString(),
     name: name || 'Campanha Wuzapi',
     messageType: 'buttons',
+    payload,
     startedAt,
     endedAt: Date.now(),
     total: contacts.length,

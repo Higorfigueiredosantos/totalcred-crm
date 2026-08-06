@@ -21,6 +21,7 @@ function historyToItem(rec: WuzapiCampaignHistoryRecord): WuzapiCampaignItem {
     waiting: 0,
     paused: false,
     fromHistory: true,
+    payload: rec.payload,
   }
 }
 
@@ -115,6 +116,7 @@ export function useWuzapiCampaigns() {
       waiting: 0,
       paused: false,
       fromHistory: false,
+      payload: config.payload,
     })
     return { ok: true as const }
   }

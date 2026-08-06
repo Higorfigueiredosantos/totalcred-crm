@@ -178,38 +178,38 @@ const ChipConnections = forwardRef<ChipConnectionsHandle, Props>(({ removeChipDa
           <p className="text-xs mt-1 text-gray-600">Clique em "Adicionar Chip" e escaneie o QR Code com o WhatsApp.</p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 min-[1600px]:grid-cols-2 gap-4">
+        <div className="grid grid-cols-2 min-[1600px]:grid-cols-3 gap-3">
           {chips.map(chip => (
-            <div key={chip.id} className="bg-gray-800 rounded-xl border border-gray-700 p-4 flex flex-col gap-3">
+            <div key={chip.id} className="bg-gray-800 rounded-lg border border-gray-700 p-2.5 flex flex-col gap-2">
               {/* Header */}
-              <div className="flex items-start justify-between gap-2">
-                <div className="flex flex-col gap-1 min-w-0">
-                  <p className="text-sm font-semibold text-white truncate">{chipLabels[chip.id] || chip.id}</p>
+              <div className="flex items-start justify-between gap-1.5">
+                <div className="flex flex-col gap-0.5 min-w-0">
+                  <p className="text-xs font-semibold text-white truncate">{chipLabels[chip.id] || chip.id}</p>
                   {chipLabels[chip.id] && (
-                    <p className="text-[10px] text-gray-600 truncate">{chip.id}</p>
+                    <p className="text-[9px] text-gray-600 truncate">{chip.id}</p>
                   )}
-                  <p className="text-xs text-gray-400">{chip.number ? `+${chip.number}` : 'Aguardando…'}</p>
-                  <span className={`text-[10px] font-medium ${
+                  <p className="text-[10px] text-gray-400">{chip.number ? `+${chip.number}` : 'Aguardando…'}</p>
+                  <span className={`text-[9px] font-medium ${
                     chip.temperature === 'quente' ? 'text-red-400'
                     : chip.temperature === 'morno' ? 'text-yellow-400'
                     : 'text-blue-400'
                   }`}>● {chip.temperature ?? 'frio'}</span>
                   {chip.proxy && (
-                    <p className="text-[10px] flex items-center gap-1 truncate text-indigo-400">
-                      <Globe size={9} />
+                    <p className="text-[9px] flex items-center gap-1 truncate text-indigo-400">
+                      <Globe size={8} />
                       {chip.proxy.startsWith('rotador:')
                         ? '🔄 Rotação ativa'
                         : chip.proxy.replace(/^https?:\/\//, '').replace(/:[^@]*@/, ':***@')}
                     </p>
                   )}
                 </div>
-                <div className="flex flex-col items-end gap-1.5 shrink-0">
+                <div className="flex flex-col items-end gap-1 shrink-0">
                   <button onClick={() => openChipConfig(chip)} title="Configurar chip"
                     className="p-1 text-gray-500 hover:text-white hover:bg-gray-700 rounded-md transition-colors">
-                    <Settings size={14} />
+                    <Settings size={12} />
                   </button>
-                  <span className={`text-xs flex items-center gap-1 ${statusColor(chip.status)}`}>
-                    {chip.isReady ? <Wifi size={11} /> : chip.status === 'connecting' || chip.status === 'init' ? <Loader2 size={11} className="animate-spin" /> : <WifiOff size={11} />}
+                  <span className={`text-[10px] flex items-center gap-1 ${statusColor(chip.status)}`}>
+                    {chip.isReady ? <Wifi size={10} /> : chip.status === 'connecting' || chip.status === 'init' ? <Loader2 size={10} className="animate-spin" /> : <WifiOff size={10} />}
                     {statusLabel(chip.status)}
                   </span>
                 </div>
@@ -217,24 +217,24 @@ const ChipConnections = forwardRef<ChipConnectionsHandle, Props>(({ removeChipDa
 
               {/* QR Code */}
               {chip.status === 'qr' && chip.qr && (
-                <div className="flex flex-col items-center gap-2 bg-white rounded-lg p-3">
-                  <img src={chip.qr} alt="QR Code" className="w-44 h-44 object-contain" />
-                  <p className="text-xs text-gray-600 font-medium">Escaneie com o WhatsApp</p>
+                <div className="flex flex-col items-center gap-1.5 bg-white rounded-lg p-2">
+                  <img src={chip.qr} alt="QR Code" className="w-32 h-32 object-contain" />
+                  <p className="text-[10px] text-gray-600 font-medium">Escaneie com o WhatsApp</p>
                 </div>
               )}
 
               {/* Waiting for QR */}
               {(chip.status === 'connecting' || chip.status === 'init') && !chip.qr && (
-                <div className="flex items-center gap-2 text-yellow-400 text-xs bg-yellow-400/10 rounded-lg px-3 py-2">
-                  <Loader2 size={12} className="animate-spin" />
+                <div className="flex items-center gap-2 text-yellow-400 text-[10px] bg-yellow-400/10 rounded-lg px-2 py-1.5">
+                  <Loader2 size={11} className="animate-spin" />
                   Iniciando… O QR aparecerá em breve.
                 </div>
               )}
 
               {(chip.status === 'error' || chip.status === 'auth_failure') && (
-                <div className="flex flex-col gap-1 text-red-400 text-xs bg-red-400/10 rounded-lg px-3 py-2">
+                <div className="flex flex-col gap-1 text-red-400 text-[10px] bg-red-400/10 rounded-lg px-2 py-1.5">
                   <span className="flex items-center gap-1.5 font-medium">
-                    <AlertCircle size={12} /> Erro ao iniciar
+                    <AlertCircle size={11} /> Erro ao iniciar
                   </span>
                   {chip.errorMsg && (
                     <span className="text-red-300/80 font-mono break-all leading-relaxed">{chip.errorMsg}</span>
@@ -243,14 +243,14 @@ const ChipConnections = forwardRef<ChipConnectionsHandle, Props>(({ removeChipDa
               )}
 
               {/* Actions */}
-              <div className="flex gap-2">
+              <div className="flex gap-1.5">
                 <button onClick={() => reconnect(chip.id)}
-                  className="flex-1 flex items-center justify-center gap-1.5 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-200 text-xs rounded-lg transition-colors">
-                  <RefreshCw size={11} /> Reconectar
+                  className="flex-1 flex items-center justify-center gap-1 py-1 bg-gray-700 hover:bg-gray-600 text-gray-200 text-[10px] rounded-md transition-colors">
+                  <RefreshCw size={10} /> Reconectar
                 </button>
                 <button onClick={() => disconnect(chip.id)}
-                  className="p-1.5 bg-red-900/40 hover:bg-red-800/60 text-red-400 rounded-lg transition-colors">
-                  <Trash2 size={14} />
+                  className="p-1 bg-red-900/40 hover:bg-red-800/60 text-red-400 rounded-md transition-colors">
+                  <Trash2 size={12} />
                 </button>
               </div>
             </div>
