@@ -736,12 +736,9 @@ export default function Channels() {
       {canUnofficial && (
         <div>
           <InfiniteConnections ref={infiniteConnectionsRef} />
-        </div>
-      )}
-
-      {canUnofficial && (
-        <div>
-          <WuzapiConnections ref={wuzapiConnectionsRef} />
+          <div className="mt-10 pt-8 border-t border-gray-800">
+            <WuzapiConnections ref={wuzapiConnectionsRef} />
+          </div>
         </div>
       )}
       </div>
