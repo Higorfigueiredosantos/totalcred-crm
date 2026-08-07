@@ -2,13 +2,15 @@ import { useState, useEffect, useRef } from 'react'
 import {
   Wrench, Play, Square, Download, Search, CheckCircle, XCircle,
   Users, ExternalLink, MapPin, Phone, Building, RefreshCw, Upload, X,
-  Bot, Plus, Trash2, Save, Power, Clock, MessageSquare, AlertCircle
+  Bot, Plus, Trash2, Save, Power, Clock, MessageSquare, AlertCircle,
+  Image as ImageIcon, Mic,
 } from 'lucide-react'
 import { onWSMessage } from '../api/websocket'
+import { useWuzapiInstances } from '../hooks/useWuzapiInstances'
 import type { AutobotRule, AutobotConfig } from '../types'
 import { v4 as uuid } from '../utils/uuid'
 
-type Tab = 'maturador' | 'filtro' | 'grupos' | 'gmaps' | 'autobot'
+type Tab = 'maturador' | 'maturador-wuzapi' | 'filtro' | 'grupos' | 'gmaps' | 'autobot'
 
 // ── CSV export helper ─────────────────────────────────────────────────────────
 
@@ -36,6 +38,7 @@ export default function Ferramentas() {
       <div className="flex border-b border-gray-800 shrink-0 px-6">
         {([
           { id: 'maturador', label: 'Maturador' },
+          { id: 'maturador-wuzapi', label: 'Maturador Wuzapi' },
           { id: 'filtro', label: 'Filtro de Números' },
           { id: 'grupos', label: 'Grupos' },
           { id: 'gmaps', label: 'Google Maps' },
@@ -53,6 +56,7 @@ export default function Ferramentas() {
 
       <div className="flex-1 overflow-y-auto p-6">
         {tab === 'maturador' && <MaturadorTab />}
+        {tab === 'maturador-wuzapi' && <WuzapiMaturadorTab />}
         {tab === 'filtro' && <FiltroTab />}
         {tab === 'grupos' && <GruposTab />}
         {tab === 'gmaps' && <GMapsTab />}
@@ -73,7 +77,11 @@ type LogEntry = {
   from?: string
   to?: string
   msgText?: string
+  msgType?: 'text' | 'image' | 'audio'
+  fileName?: string
 }
+
+type MaturadorMediaFile = { name: string; type: 'image' | 'audio'; url: string }
 
 type DayStat = { sent: number; received: number }
 
@@ -88,6 +96,126 @@ type WarmingEntry = {
 function localDateKey(): string {
   const d = new Date()
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+// Biblioteca de fotos/áudios compartilhada pelos dois maturadores (Chips e
+// Wuzapi) — mesmo storage no backend, uma única lista pra gerenciar.
+function MaturadorMediaLibrary() {
+  const [mediaLibrary, setMediaLibrary] = useState<{ images: MaturadorMediaFile[]; audios: MaturadorMediaFile[] }>({ images: [], audios: [] })
+  const [uploadingImage, setUploadingImage] = useState(false)
+  const [uploadingAudio, setUploadingAudio] = useState(false)
+  const imageInputRef = useRef<HTMLInputElement>(null)
+  const audioInputRef = useRef<HTMLInputElement>(null)
+
+  function refreshMediaLibrary() {
+    fetch('/api/maturador/media').then(r => r.json()).then((d: any) => {
+      setMediaLibrary({ images: d.images || [], audios: d.audios || [] })
+    }).catch(() => {})
+  }
+
+  useEffect(() => { refreshMediaLibrary() }, [])
+
+  async function uploadMedia(files: FileList | null, type: 'image' | 'audio') {
+    if (!files || !files.length) return
+    const setUploading = type === 'image' ? setUploadingImage : setUploadingAudio
+    setUploading(true)
+    try {
+      for (const file of Array.from(files)) {
+        const fd = new FormData()
+        fd.append('file', file)
+        fd.append('type', type)
+        const r = await fetch('/api/maturador/media', { method: 'POST', body: fd })
+        if (!r.ok) {
+          const d = await r.json().catch(() => ({}))
+          alert(d.error || 'Falha ao enviar arquivo')
+        }
+      }
+      refreshMediaLibrary()
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  async function deleteMedia(file: MaturadorMediaFile) {
+    setMediaLibrary(prev => ({
+      images: prev.images.filter(f => f.name !== file.name || file.type !== 'image'),
+      audios: prev.audios.filter(f => f.name !== file.name || file.type !== 'audio'),
+    }))
+    await fetch(`/api/maturador/media/${file.type}/${encodeURIComponent(file.name)}`, { method: 'DELETE' }).catch(() => {})
+  }
+
+  return (
+    <div className="bg-gray-800 rounded-xl border border-gray-700 p-5 space-y-4">
+      <div>
+        <h2 className="text-sm font-semibold text-white mb-1">Biblioteca de mídia</h2>
+        <p className="text-xs text-gray-400">
+          Fotos e áudios que os maturadores sorteiam para enviar (além das mensagens de texto) — compartilhada entre Chips e Wuzapi.
+          Áudios são convertidos automaticamente para nota de voz.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        {/* Imagens */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <label className="flex items-center gap-1.5 text-xs font-medium text-gray-400">
+              <ImageIcon size={13} /> Imagens ({mediaLibrary.images.length})
+            </label>
+            <button type="button" onClick={() => imageInputRef.current?.click()} disabled={uploadingImage}
+              className="flex items-center gap-1 text-xs text-green-400 hover:text-green-300 disabled:opacity-50">
+              <Upload size={12} /> {uploadingImage ? 'Enviando...' : 'Adicionar'}
+            </button>
+            <input ref={imageInputRef} type="file" accept="image/*" multiple hidden
+              onChange={e => { uploadMedia(e.target.files, 'image'); e.target.value = '' }} />
+          </div>
+          {mediaLibrary.images.length === 0 ? (
+            <p className="text-xs text-gray-600 bg-gray-900 border border-gray-700 rounded-lg px-3 py-4 text-center">Nenhuma imagem ainda</p>
+          ) : (
+            <div className="grid grid-cols-4 gap-2">
+              {mediaLibrary.images.map(f => (
+                <div key={f.name} className="relative group aspect-square rounded-lg overflow-hidden border border-gray-700 bg-gray-900">
+                  <img src={f.url} alt="" className="w-full h-full object-cover" />
+                  <button type="button" onClick={() => deleteMedia(f)}
+                    className="absolute inset-0 flex items-center justify-center bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <Trash2 size={14} className="text-red-400" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Áudios */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <label className="flex items-center gap-1.5 text-xs font-medium text-gray-400">
+              <Mic size={13} /> Áudios ({mediaLibrary.audios.length})
+            </label>
+            <button type="button" onClick={() => audioInputRef.current?.click()} disabled={uploadingAudio}
+              className="flex items-center gap-1 text-xs text-green-400 hover:text-green-300 disabled:opacity-50">
+              <Upload size={12} /> {uploadingAudio ? 'Enviando...' : 'Adicionar'}
+            </button>
+            <input ref={audioInputRef} type="file" accept="audio/*" multiple hidden
+              onChange={e => { uploadMedia(e.target.files, 'audio'); e.target.value = '' }} />
+          </div>
+          {mediaLibrary.audios.length === 0 ? (
+            <p className="text-xs text-gray-600 bg-gray-900 border border-gray-700 rounded-lg px-3 py-4 text-center">Nenhum áudio ainda</p>
+          ) : (
+            <div className="space-y-1.5">
+              {mediaLibrary.audios.map(f => (
+                <div key={f.name} className="flex items-center gap-2 bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5">
+                  <audio src={f.url} controls className="h-8 flex-1 min-w-0" />
+                  <button type="button" onClick={() => deleteMedia(f)} className="text-gray-500 hover:text-red-400 shrink-0">
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function MaturadorTab() {
@@ -105,6 +233,9 @@ function MaturadorTab() {
   const [availableChips, setAvailableChips] = useState<{ id: string; isReady: boolean; number?: string }[]>([])
   const [selectedChips, setSelectedChips] = useState<string[]>([])
   const [expandedChip, setExpandedChip] = useState<string | null>(null)
+
+  // Envio de fotos/áudios da biblioteca compartilhada (ver MaturadorMediaLibrary)
+  const [mediaEnabled, setMediaEnabled] = useState(true)
 
   // Esteira: dias ATIVOS por chip com estatísticas diárias
   const [warmingDates, setWarmingDates] = useState<Record<string, WarmingEntry>>(() => {
@@ -137,6 +268,7 @@ function MaturadorTab() {
 
     // Reintegrar estado do backend
     fetch('/api/maturador/status').then(r => r.json()).then((d: any) => {
+      if (typeof d.mediaEnabled === 'boolean') setMediaEnabled(d.mediaEnabled)
       if (d.running) {
         setStatus('running')
         if (d.minDelay) setMinDelay(d.minDelay)
@@ -182,7 +314,7 @@ function MaturadorTab() {
           try { localStorage.setItem('warming_dates', JSON.stringify(updated)) } catch {}
           return updated
         })
-        addLog({ ts, text: '', kind: 'msg', from: payload.from, to: payload.to, msgText: payload.message })
+        addLog({ ts, text: '', kind: 'msg', from: payload.from, to: payload.to, msgText: payload.message, msgType: payload.msgType || 'text', fileName: payload.fileName })
       }
       if (payload.type === 'error') {
         addLog({ ts, text: `[${payload.chipId}] ${payload.error}`, kind: 'error' })
@@ -263,7 +395,7 @@ function MaturadorTab() {
     if (selectedChips.length < 2) return alert('Selecione pelo menos 2 chips para iniciar o maturador.')
     const r = await fetch('/api/maturador/start', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ minDelay, maxDelay, chipIds: selectedChips })
+      body: JSON.stringify({ minDelay, maxDelay, chipIds: selectedChips, mediaEnabled })
     })
     const d = await r.json()
     if (!r.ok) { alert(d.error); return }
@@ -281,7 +413,7 @@ function MaturadorTab() {
   async function resume() {
     const r = await fetch('/api/maturador/start', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ minDelay, maxDelay, chipIds: selectedChips })
+      body: JSON.stringify({ minDelay, maxDelay, chipIds: selectedChips, mediaEnabled })
     })
     if (!r.ok) { const d = await r.json(); alert(d.error); return }
     setStatus('running')
@@ -374,6 +506,14 @@ function MaturadorTab() {
           )}
         </div>
 
+        {/* Envio de mídia */}
+        <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer w-fit">
+          <input type="checkbox" checked={mediaEnabled} disabled={running}
+            onChange={e => setMediaEnabled(e.target.checked)}
+            className="accent-green-500 disabled:opacity-50" />
+          Também enviar fotos e áudios da biblioteca (não só texto)
+        </label>
+
         {/* Status bar */}
         {status !== 'idle' && (
           <div className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs ${
@@ -422,6 +562,8 @@ function MaturadorTab() {
         </div>
       </div>
 
+      <MaturadorMediaLibrary />
+
       {/* Atividade */}
       <div>
         <div className="flex items-center justify-between mb-2">
@@ -449,7 +591,17 @@ function MaturadorTab() {
                       <span className="text-gray-600">→</span>
                       <span className="font-mono text-blue-400">{l.to}</span>
                     </div>
-                    {l.msgText && (
+                    {l.msgType === 'image' && (
+                      <p className="text-[11px] text-purple-300 mt-0.5 flex items-center gap-1">
+                        <ImageIcon size={11} /> Imagem enviada{l.msgText ? ` — "${l.msgText}"` : ''}
+                      </p>
+                    )}
+                    {l.msgType === 'audio' && (
+                      <p className="text-[11px] text-orange-300 mt-0.5 flex items-center gap-1">
+                        <Mic size={11} /> Áudio (nota de voz) enviado
+                      </p>
+                    )}
+                    {(!l.msgType || l.msgType === 'text') && l.msgText && (
                       <p className="text-[11px] text-gray-300 mt-0.5 truncate">{l.msgText}</p>
                     )}
                   </div>
@@ -606,6 +758,335 @@ function MaturadorTab() {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ── WUZAPI MATURADOR TAB ────────────────────────────────────────────────────────
+// Mesma lógica do maturador dos Chips, mas as instâncias e o envio passam
+// pela API do Wuzapi (BETA). Sem a "Esteira de Aquecimento" (histórico por
+// dia) por enquanto — só o ciclo de envio, pausa/retomada e log de atividade.
+
+function WuzapiMaturadorTab() {
+  const { instances } = useWuzapiInstances()
+  const [status, setStatus] = useState<MaturadorStatus>('idle')
+  const [minDelay, setMinDelay] = useState(60)
+  const [maxDelay, setMaxDelay] = useState(300)
+  const [mediaEnabled, setMediaEnabled] = useState(true)
+  const [log, setLog] = useState<LogEntry[]>(() => {
+    try { return JSON.parse(localStorage.getItem('wuzapi_maturador_log') || '[]') } catch { return [] }
+  })
+  const [nextIn, setNextIn] = useState(0)
+  const logRef = useRef<HTMLDivElement>(null)
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [selectedInstances, setSelectedInstances] = useState<string[]>([])
+
+  const running = status === 'running'
+  const connectedInstances = instances.filter(i => i.status === 'connected')
+
+  useEffect(() => {
+    // Seleciona as instâncias conectadas por padrão (uma vez, ao montar) —
+    // depois disso a escolha fica a cargo do usuário.
+    fetch('/api/wuzapi/instances').then(r => r.json()).then((list: any[]) => {
+      const ready = (list || []).filter(i => i.status === 'connected').map(i => i.name)
+      setSelectedInstances(prev => prev.length ? prev : ready)
+    }).catch(() => {})
+
+    fetch('/api/wuzapi-maturador/status').then(r => r.json()).then((d: any) => {
+      if (typeof d.mediaEnabled === 'boolean') setMediaEnabled(d.mediaEnabled)
+      if (d.running) {
+        setStatus('running')
+        if (d.minDelay) setMinDelay(d.minDelay)
+        if (d.maxDelay) setMaxDelay(d.maxDelay)
+        if (d.instanceNames?.length) setSelectedInstances(d.instanceNames)
+        addLog({
+          ts: new Date().toLocaleTimeString('pt-BR'),
+          text: 'Maturador já estava em execução — retomando monitoramento.',
+          kind: 'system',
+        })
+      }
+    }).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    const off = onWSMessage('wuzapi_maturador', (payload: any) => {
+      const ts = new Date().toLocaleTimeString('pt-BR')
+      if (payload.type === 'started') {
+        setStatus('running')
+        addLog({ ts, text: 'Maturador iniciado!', kind: 'system' })
+      }
+      if (payload.type === 'stopped') {
+        setStatus(prev => prev === 'paused' ? 'paused' : 'idle')
+        setNextIn(0)
+        if (countdownRef.current) clearInterval(countdownRef.current)
+        addLog({ ts, text: 'Maturador parado.', kind: 'system' })
+      }
+      if (payload.type === 'log') {
+        addLog({ ts, text: '', kind: 'msg', from: payload.from, to: payload.to, msgText: payload.message, msgType: payload.msgType || 'text', fileName: payload.fileName })
+      }
+      if (payload.type === 'error') {
+        addLog({ ts, text: `[${payload.instanceName}] ${payload.error}`, kind: 'error' })
+      }
+      if (payload.type === 'waiting') {
+        addLog({ ts, text: payload.message, kind: 'warn' })
+      }
+      if (payload.type === 'delay') {
+        addLog({ ts, text: `Próximo envio em ${payload.seconds}s`, kind: 'delay' })
+        startCountdown(payload.seconds)
+      }
+    })
+    return () => { off(); if (countdownRef.current) clearInterval(countdownRef.current) }
+  }, [])
+
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
+  }, [log])
+
+  useEffect(() => {
+    try { localStorage.setItem('wuzapi_maturador_log', JSON.stringify(log.slice(-200))) } catch {}
+  }, [log])
+
+  function addLog(entry: LogEntry) {
+    setLog(prev => [...prev.slice(-499), entry])
+  }
+
+  function startCountdown(seconds: number) {
+    if (countdownRef.current) clearInterval(countdownRef.current)
+    setNextIn(seconds)
+    const t = setInterval(() => setNextIn(prev => {
+      if (prev <= 1) { clearInterval(t); return 0 }
+      return prev - 1
+    }), 1000)
+    countdownRef.current = t
+  }
+
+  async function start() {
+    if (selectedInstances.length < 2) return alert('Selecione pelo menos 2 instâncias para iniciar o maturador.')
+    const r = await fetch('/api/wuzapi-maturador/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ minDelay, maxDelay, instanceNames: selectedInstances, mediaEnabled })
+    })
+    const d = await r.json()
+    if (!r.ok) { alert(d.error); return }
+  }
+
+  async function pause() {
+    await fetch('/api/wuzapi-maturador/stop', { method: 'POST' })
+    setStatus('paused')
+    setNextIn(0)
+    if (countdownRef.current) clearInterval(countdownRef.current)
+    addLog({ ts: new Date().toLocaleTimeString('pt-BR'), text: 'Maturador pausado — clique em Retomar para continuar.', kind: 'warn' })
+  }
+
+  async function resume() {
+    const r = await fetch('/api/wuzapi-maturador/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ minDelay, maxDelay, instanceNames: selectedInstances, mediaEnabled })
+    })
+    if (!r.ok) { const d = await r.json(); alert(d.error); return }
+    setStatus('running')
+    addLog({ ts: new Date().toLocaleTimeString('pt-BR'), text: 'Maturador retomado.', kind: 'system' })
+  }
+
+  async function cancel() {
+    await fetch('/api/wuzapi-maturador/stop', { method: 'POST' })
+    setStatus('idle')
+    setNextIn(0)
+    if (countdownRef.current) clearInterval(countdownRef.current)
+    addLog({ ts: new Date().toLocaleTimeString('pt-BR'), text: 'Maturador cancelado.', kind: 'error' })
+    try { localStorage.removeItem('wuzapi_maturador_log') } catch {}
+  }
+
+  function getInstanceLabel(name: string) {
+    return instances.find(i => i.name === name)?.label || name
+  }
+
+  const msgCount = log.filter(l => l.kind === 'msg').length
+
+  return (
+    <div className="space-y-5 max-w-2xl">
+      <div className="bg-gray-800 rounded-xl border border-gray-700 p-5 space-y-4">
+        <div>
+          <h2 className="text-sm font-semibold text-white mb-1">Maturador de Instâncias (Wuzapi)</h2>
+          <p className="text-xs text-gray-400">As instâncias Wuzapi se enviam mensagens entre si automaticamente para aquecimento. Necessário no mínimo 2 instâncias conectadas.</p>
+        </div>
+
+        {/* Instance selector */}
+        <div>
+          <label className="block text-xs font-medium text-gray-400 mb-2">
+            Instâncias para o maturador <span className="text-gray-600">({connectedInstances.length} conectada(s))</span>
+          </label>
+          {instances.length === 0 ? (
+            <div className="flex items-center gap-2 text-xs text-yellow-400 bg-yellow-900/20 border border-yellow-900/40 rounded-lg px-3 py-2">
+              ⚠️ Nenhuma instância Wuzapi cadastrada. Acesse Canais → Wuzapi e conecte pelo menos 2.
+            </div>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {instances.map(inst => {
+                const sel = selectedInstances.includes(inst.name)
+                const label = inst.label || inst.name
+                return (
+                  <button key={inst.name} type="button" disabled={running || inst.status !== 'connected'}
+                    onClick={() => setSelectedInstances(prev =>
+                      sel ? prev.filter(id => id !== inst.name) : [...prev, inst.name]
+                    )}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border disabled:opacity-40 disabled:cursor-not-allowed ${
+                      sel
+                        ? 'bg-green-900/40 border-green-600 text-green-300'
+                        : inst.status === 'connected'
+                        ? 'bg-gray-700 border-gray-600 text-gray-400 hover:border-gray-500 hover:text-gray-200'
+                        : 'bg-gray-900 border-gray-800 text-gray-600'
+                    }`}>
+                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${inst.status === 'connected' ? 'bg-green-400' : 'bg-gray-600'}`} />
+                    {label}
+                    {sel && <span className="text-green-400 ml-0.5">✓</span>}
+                  </button>
+                )
+              })}
+            </div>
+          )}
+          {connectedInstances.length > 0 && selectedInstances.length < 2 && (
+            <p className="text-xs text-yellow-400/80 mt-1.5">⚠️ Selecione pelo menos 2 instâncias para iniciar</p>
+          )}
+        </div>
+
+        <div className="flex items-center gap-4">
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">Delay mínimo</label>
+            <div className="flex items-center gap-1">
+              <input type="number" min={10} value={minDelay} onChange={e => setMinDelay(+e.target.value)}
+                disabled={running}
+                className="w-20 bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm text-white text-center focus:outline-none focus:border-green-500 disabled:opacity-50" />
+              <span className="text-xs text-gray-400">s</span>
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">Delay máximo</label>
+            <div className="flex items-center gap-1">
+              <input type="number" min={10} value={maxDelay} onChange={e => setMaxDelay(+e.target.value)}
+                disabled={running}
+                className="w-20 bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm text-white text-center focus:outline-none focus:border-green-500 disabled:opacity-50" />
+              <span className="text-xs text-gray-400">s</span>
+            </div>
+          </div>
+          {running && nextIn > 0 && (
+            <div className="ml-auto text-center">
+              <p className="text-xs text-gray-500">Próximo em</p>
+              <p className="text-2xl font-mono font-bold text-green-400">{nextIn}s</p>
+            </div>
+          )}
+        </div>
+
+        <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer w-fit">
+          <input type="checkbox" checked={mediaEnabled} disabled={running}
+            onChange={e => setMediaEnabled(e.target.checked)}
+            className="accent-green-500 disabled:opacity-50" />
+          Também enviar fotos e áudios da biblioteca (não só texto)
+        </label>
+
+        {status !== 'idle' && (
+          <div className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs ${
+            status === 'running' ? 'bg-green-900/20 border border-green-800/50 text-green-400'
+            : 'bg-yellow-900/20 border border-yellow-800/50 text-yellow-400'
+          }`}>
+            <span className={`w-2 h-2 rounded-full shrink-0 ${status === 'running' ? 'bg-green-400 animate-pulse' : 'bg-yellow-400'}`} />
+            {status === 'running'
+              ? `Maturando... ${msgCount} mensagens enviadas nesta sessão`
+              : 'Pausado — clique em Retomar para continuar'}
+          </div>
+        )}
+
+        <div className="flex gap-2">
+          {status === 'idle' && (
+            <button onClick={start} disabled={selectedInstances.length < 2}
+              className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm rounded-lg">
+              <Play size={14} /> Iniciar Maturador
+            </button>
+          )}
+          {status === 'running' && (
+            <>
+              <button onClick={pause}
+                className="flex items-center gap-2 px-4 py-2 bg-yellow-600 hover:bg-yellow-500 text-white text-sm rounded-lg">
+                ⏸ Pausar
+              </button>
+              <button onClick={cancel}
+                className="flex items-center gap-2 px-4 py-2 bg-red-800 hover:bg-red-700 text-white text-sm rounded-lg">
+                <Square size={14} /> Cancelar
+              </button>
+            </>
+          )}
+          {status === 'paused' && (
+            <>
+              <button onClick={resume}
+                className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-500 text-white text-sm rounded-lg">
+                <Play size={14} /> Retomar
+              </button>
+              <button onClick={cancel}
+                className="flex items-center gap-2 px-4 py-2 bg-red-800 hover:bg-red-700 text-white text-sm rounded-lg">
+                <Square size={14} /> Cancelar
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
+      <MaturadorMediaLibrary />
+
+      {/* Atividade */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-2">
+            <p className="text-xs font-medium text-gray-400">Atividade</p>
+            {msgCount > 0 && (
+              <span className="text-[10px] bg-green-900/30 text-green-400 px-1.5 py-0.5 rounded-full">
+                {msgCount} enviadas
+              </span>
+            )}
+          </div>
+          <button onClick={() => setLog([])} className="text-xs text-gray-600 hover:text-gray-400">Limpar</button>
+        </div>
+        <div ref={logRef} className="h-72 bg-gray-900 rounded-xl border border-gray-700 p-3 overflow-y-auto space-y-1">
+          {log.length === 0 ? (
+            <p className="text-xs text-gray-600 font-mono">Atividade aparecerá aqui quando o maturador iniciar...</p>
+          ) : log.map((l, i) => {
+            if (l.kind === 'msg') {
+              return (
+                <div key={i} className="flex gap-2 py-1 border-b border-gray-800/60">
+                  <span className="text-[10px] text-gray-600 font-mono shrink-0 mt-0.5 w-16">{l.ts}</span>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1 text-xs flex-wrap">
+                      <span className="font-mono text-green-400 font-semibold">{getInstanceLabel(l.from || '')}</span>
+                      <span className="text-gray-600">→</span>
+                      <span className="font-mono text-blue-400">{getInstanceLabel(l.to || '')}</span>
+                    </div>
+                    {l.msgType === 'image' && (
+                      <p className="text-[11px] text-purple-300 mt-0.5 flex items-center gap-1">
+                        <ImageIcon size={11} /> Imagem enviada{l.msgText ? ` — "${l.msgText}"` : ''}
+                      </p>
+                    )}
+                    {l.msgType === 'audio' && (
+                      <p className="text-[11px] text-orange-300 mt-0.5 flex items-center gap-1">
+                        <Mic size={11} /> Áudio (nota de voz) enviado
+                      </p>
+                    )}
+                    {(!l.msgType || l.msgType === 'text') && l.msgText && (
+                      <p className="text-[11px] text-gray-300 mt-0.5 truncate">{l.msgText}</p>
+                    )}
+                  </div>
+                </div>
+              )
+            }
+            return (
+              <p key={i} className={`text-xs font-mono flex gap-2 ${
+                l.kind === 'error' ? 'text-red-400' : l.kind === 'warn' ? 'text-yellow-400' : l.kind === 'delay' ? 'text-gray-500' : 'text-gray-400'
+              }`}>
+                <span className="text-gray-600 shrink-0 w-16">{l.ts}</span>
+                <span>{l.kind === 'error' ? '❌' : l.kind === 'warn' ? '⚠️' : l.kind === 'delay' ? '⏱️' : '🟢'} {l.text}</span>
+              </p>
+            )
+          })}
+        </div>
+      </div>
     </div>
   )
 }

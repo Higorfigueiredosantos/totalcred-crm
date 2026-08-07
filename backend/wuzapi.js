@@ -20,6 +20,12 @@ const DATA_DIR = path.join(__dirname, 'data')
 const INSTANCES_FILE = path.join(DATA_DIR, 'wuzapi_instances.json')
 const HISTORY_FILE = path.join(DATA_DIR, 'wuzapi_campaigns_history.json')
 
+// Mesma biblioteca de fotos/áudios usada pelo maturador dos chips (whatsapp-web.js)
+// — um único lugar pra gerenciar mídia, reaproveitado pelos dois maturadores.
+const MATURADOR_MEDIA_DIR = path.join(DATA_DIR, 'maturador_media')
+const MATURADOR_IMAGES_DIR = path.join(MATURADOR_MEDIA_DIR, 'images')
+const MATURADOR_AUDIOS_DIR = path.join(MATURADOR_MEDIA_DIR, 'audios')
+
 let _broadcast = () => {}
 let _getConvId = (channel, contact) => `${channel}:${contact}`
 
@@ -251,6 +257,37 @@ async function sendButtons(instanceName, to, payload = {}) {
     Footer: payload.footer || undefined,
     Image: payload.image || undefined,
     Buttons: buttons,
+  })
+  if (!data) throw new Error('Falha ao enviar')
+  return { ok: true, messageId: data?.Id || data?.data?.Id || null }
+}
+
+// Imagem/áudio avulsos — usados pelo maturador. O wuzapi aceita o mesmo
+// formato de data URI base64 já usado no campo "Image" de /chat/send/buttons.
+async function sendImage(instanceName, to, imageDataUri, caption) {
+  const entry = loadRegistry()[instanceName]
+  if (!entry) throw new Error('Instância não encontrada')
+  const phone = cleanPhone(to)
+  if (phone.length < 10) throw new Error('Número inválido')
+
+  const { data } = await userClient(entry.token).post('/chat/send/image', {
+    Phone: phone,
+    Image: imageDataUri,
+    Caption: caption || undefined,
+  })
+  if (!data) throw new Error('Falha ao enviar')
+  return { ok: true, messageId: data?.Id || data?.data?.Id || null }
+}
+
+async function sendAudio(instanceName, to, audioDataUri) {
+  const entry = loadRegistry()[instanceName]
+  if (!entry) throw new Error('Instância não encontrada')
+  const phone = cleanPhone(to)
+  if (phone.length < 10) throw new Error('Número inválido')
+
+  const { data } = await userClient(entry.token).post('/chat/send/audio', {
+    Phone: phone,
+    Audio: audioDataUri,
   })
   if (!data) throw new Error('Falha ao enviar')
   return { ok: true, messageId: data?.Id || data?.data?.Id || null }
@@ -547,6 +584,135 @@ async function runCampaign(data) {
   campaignState.current = null
 }
 
+// ── Maturador (BETA) ──────────────────────────────────────────────────────────
+// Mesma lógica do maturador dos chips (whatsapp-web.js): duas ou mais
+// instâncias trocam mensagens (texto/foto/áudio) entre si em intervalos
+// aleatórios pra simular uso humano e "aquecer" o número. Aqui o "número do
+// destinatário" não é algo que a gente já tenha salvo localmente — vem do JID
+// que o próprio wuzapi devolve em /admin/users, então cada ciclo resolve as
+// instâncias prontas na hora (listInstances já cobre isso).
+
+const maturadorPhrases = [
+  'Oi! 👋', 'Tudo bem?', 'Boa tarde!', 'Oi tudo bem?', 'Olá! 😊', 'E aí!',
+  'Boa noite!', 'Como vai?', 'Tudo certo?', 'Oi!', 'Olá!', 'E aí, tudo na paz?'
+]
+
+const MATURADOR_AUDIO_CHANCE = 0.15
+const MATURADOR_IMAGE_CHANCE = 0.20
+
+const MIME_BY_EXT = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif' }
+
+function safeReadDir(dir) {
+  try { return fs.readdirSync(dir).filter(f => !f.startsWith('.')) } catch { return [] }
+}
+
+function fileToDataUri(filePath, mimetype) {
+  const buffer = fs.readFileSync(filePath)
+  return `data:${mimetype};base64,${buffer.toString('base64')}`
+}
+
+// JID pode vir como "5511999999999@s.whatsapp.net" ou com device id
+// ("5511999999999:12@s.whatsapp.net") — só interessa o número.
+function phoneFromJid(jid) {
+  if (!jid) return null
+  return String(jid).split('@')[0].split(':')[0] || null
+}
+
+const maturadorState = { running: false, timer: null, instanceNames: [], minDelay: 60, maxDelay: 300, mediaEnabled: true }
+
+async function getReadyMaturadorInstances(names) {
+  let all
+  try { all = await listInstances() } catch (e) { return [] }
+  const filtered = names && names.length ? all.filter(i => names.includes(i.name)) : all
+  return filtered
+    .filter(i => i.status === 'connected' && i.jid)
+    .map(i => ({ name: i.name, phone: phoneFromJid(i.jid) }))
+    .filter(i => i.phone)
+}
+
+async function runMaturadorLoop(minDelay, maxDelay) {
+  if (!maturadorState.running) return
+  const ready = await getReadyMaturadorInstances(maturadorState.instanceNames)
+
+  if (ready.length >= 2) {
+    const senderIdx = Math.floor(Math.random() * ready.length)
+    let receiverIdx
+    do { receiverIdx = Math.floor(Math.random() * ready.length) } while (receiverIdx === senderIdx)
+    const sender = ready[senderIdx]
+    const receiver = ready[receiverIdx]
+
+    try {
+      const images = maturadorState.mediaEnabled ? safeReadDir(MATURADOR_IMAGES_DIR) : []
+      const audios = maturadorState.mediaEnabled ? safeReadDir(MATURADOR_AUDIOS_DIR) : []
+      const roll = Math.random()
+
+      let msgType = 'text'
+      let message
+      let fileName
+
+      if (roll < MATURADOR_AUDIO_CHANCE && audios.length) {
+        fileName = audios[Math.floor(Math.random() * audios.length)]
+        const dataUri = fileToDataUri(path.join(MATURADOR_AUDIOS_DIR, fileName), 'audio/ogg; codecs=opus')
+        await sendAudio(sender.name, receiver.phone, dataUri)
+        msgType = 'audio'
+      } else if (roll < MATURADOR_AUDIO_CHANCE + MATURADOR_IMAGE_CHANCE && images.length) {
+        fileName = images[Math.floor(Math.random() * images.length)]
+        const ext = path.extname(fileName).toLowerCase()
+        const dataUri = fileToDataUri(path.join(MATURADOR_IMAGES_DIR, fileName), MIME_BY_EXT[ext] || 'image/jpeg')
+        message = Math.random() < 0.5 ? maturadorPhrases[Math.floor(Math.random() * maturadorPhrases.length)] : undefined
+        await sendImage(sender.name, receiver.phone, dataUri, message)
+        msgType = 'image'
+      } else {
+        message = maturadorPhrases[Math.floor(Math.random() * maturadorPhrases.length)]
+        await sendText(sender.name, receiver.phone, message)
+      }
+
+      _broadcast('wuzapi_maturador', { type: 'log', from: sender.name, to: receiver.name, toNumber: receiver.phone, msgType, message, fileName, ts: Date.now() })
+    } catch (e) {
+      _broadcast('wuzapi_maturador', { type: 'error', instanceName: sender.name, error: e?.response?.data?.error || e.message })
+    }
+  } else {
+    _broadcast('wuzapi_maturador', { type: 'waiting', message: '⚠️ Aguardando pelo menos 2 instâncias Wuzapi conectadas...' })
+  }
+
+  if (!maturadorState.running) return
+  const delay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay
+  _broadcast('wuzapi_maturador', { type: 'delay', seconds: delay })
+  maturadorState.timer = setTimeout(() => runMaturadorLoop(minDelay, maxDelay), delay * 1000)
+}
+
+async function startMaturador({ instanceNames, minDelay, maxDelay, mediaEnabled } = {}) {
+  const ready = await getReadyMaturadorInstances(instanceNames)
+  if (ready.length < 2) throw new Error('Você precisa de pelo menos 2 instâncias Wuzapi conectadas para o maturador.')
+
+  const min = Number(minDelay) || 60
+  const max = Number(maxDelay) || 300
+  maturadorState.running = true
+  maturadorState.instanceNames = instanceNames && instanceNames.length ? instanceNames : ready.map(r => r.name)
+  maturadorState.minDelay = min
+  maturadorState.maxDelay = max
+  maturadorState.mediaEnabled = mediaEnabled !== false
+
+  _broadcast('wuzapi_maturador', { type: 'started' })
+  runMaturadorLoop(min, max)
+}
+
+function stopMaturador() {
+  maturadorState.running = false
+  if (maturadorState.timer) clearTimeout(maturadorState.timer)
+  _broadcast('wuzapi_maturador', { type: 'stopped' })
+}
+
+function getMaturadorStatus() {
+  return {
+    running: maturadorState.running,
+    instanceNames: maturadorState.instanceNames,
+    minDelay: maturadorState.minDelay,
+    maxDelay: maturadorState.maxDelay,
+    mediaEnabled: maturadorState.mediaEnabled,
+  }
+}
+
 module.exports = {
   init,
   listInstances,
@@ -560,9 +726,14 @@ module.exports = {
   setProxy,
   sendText,
   sendButtons,
+  sendImage,
+  sendAudio,
   handleWebhook,
   runCampaign,
   campaignState,
   loadHistory,
   deleteHistoryRecord,
+  startMaturador,
+  stopMaturador,
+  getMaturadorStatus,
 }

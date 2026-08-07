@@ -123,6 +123,78 @@ const MEDIA_DIR = path.join(__dirname, 'data', 'media')
 try { if (!fs.existsSync(MEDIA_DIR)) fs.mkdirSync(MEDIA_DIR, { recursive: true }) } catch {}
 app.use('/api/media/files', express.static(MEDIA_DIR, { maxAge: '1d' }))
 
+// ── Maturador — biblioteca de mídia (fotos/áudios enviados entre os chips) ────
+const MATURADOR_MEDIA_DIR = path.join(__dirname, 'data', 'maturador_media')
+const MATURADOR_IMAGES_DIR = path.join(MATURADOR_MEDIA_DIR, 'images')
+const MATURADOR_AUDIOS_DIR = path.join(MATURADOR_MEDIA_DIR, 'audios')
+for (const d of [MATURADOR_IMAGES_DIR, MATURADOR_AUDIOS_DIR]) {
+  try { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }) } catch {}
+}
+app.use('/api/maturador/media/files', express.static(MATURADOR_MEDIA_DIR, { maxAge: '1d' }))
+
+function safeReadDir(dir) {
+  try { return fs.readdirSync(dir).filter(f => !f.startsWith('.')) } catch { return [] }
+}
+
+function maturadorMediaUrl(type, name) {
+  return `/api/maturador/media/files/${type === 'image' ? 'images' : 'audios'}/${encodeURIComponent(name)}`
+}
+
+app.get('/api/maturador/media', (_req, res) => {
+  res.json({
+    images: safeReadDir(MATURADOR_IMAGES_DIR).map(name => ({ name, type: 'image', url: maturadorMediaUrl('image', name) })),
+    audios: safeReadDir(MATURADOR_AUDIOS_DIR).map(name => ({ name, type: 'audio', url: maturadorMediaUrl('audio', name) })),
+  })
+})
+
+app.post('/api/maturador/media', upload.single('file'), async (req, res) => {
+  const type = req.body.type
+  if (!req.file || !['image', 'audio'].includes(type)) {
+    return res.status(400).json({ error: 'file e type (image|audio) são obrigatórios' })
+  }
+  try {
+    if (type === 'audio') {
+      // Converte para OGG Opus (formato de nota de voz nativo do WhatsApp), mesma
+      // abordagem usada em /api/chips/send-media.
+      const { execFileSync } = require('child_process')
+      const os = require('os')
+      const tmpIn = path.join(os.tmpdir(), `matup_in_${Date.now()}.tmp`)
+      const outName = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}.ogg`
+      const outPath = path.join(MATURADOR_AUDIOS_DIR, outName)
+      try {
+        fs.writeFileSync(tmpIn, req.file.buffer)
+        execFileSync('ffmpeg', ['-y', '-i', tmpIn, '-c:a', 'libopus', '-b:a', '64k', '-f', 'ogg', outPath], { timeout: 15000 })
+        return res.json({ ok: true, file: { name: outName, type: 'audio', url: maturadorMediaUrl('audio', outName) } })
+      } catch (convErr) {
+        console.warn('[Maturador] Conversão de áudio falhou, salvando original:', convErr.message)
+      } finally {
+        try { fs.unlinkSync(tmpIn) } catch {}
+      }
+    }
+
+    const dir = type === 'image' ? MATURADOR_IMAGES_DIR : MATURADOR_AUDIOS_DIR
+    const ext = path.extname(req.file.originalname || '') || (type === 'image' ? '.jpg' : '.ogg')
+    const name = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`
+    fs.writeFileSync(path.join(dir, name), req.file.buffer)
+    res.json({ ok: true, file: { name, type, url: maturadorMediaUrl(type, name) } })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.delete('/api/maturador/media/:type/:name', (req, res) => {
+  const { type, name } = req.params
+  if (!['image', 'audio'].includes(type)) return res.status(400).json({ error: 'type inválido' })
+  if (name.includes('..') || name.includes('/') || name.includes('\\')) return res.status(400).json({ error: 'nome inválido' })
+  const dir = type === 'image' ? MATURADOR_IMAGES_DIR : MATURADOR_AUDIOS_DIR
+  try {
+    fs.unlinkSync(path.join(dir, name))
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 // Converte audio/webm → audio/ogg (Opus) para compatibilidade com Meta API
 app.post('/api/media/convert-audio', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Arquivo ausente' })
@@ -602,7 +674,7 @@ const chipCampaignState = {
   rrIndex: 0,
 }
 
-const maturadorState = { running: false, timer: null, chipIds: [], minDelay: 60, maxDelay: 300 }
+const maturadorState = { running: false, timer: null, chipIds: [], minDelay: 60, maxDelay: 300, mediaEnabled: true }
 
 // ── Chip registry (persist chip IDs across restarts) ──────────────────────────
 
@@ -1376,6 +1448,11 @@ const maturadorPhrases = [
   'Boa noite!', 'Como vai?', 'Tudo certo?', 'Oi!', 'Olá!', 'E aí, tudo na paz?'
 ]
 
+// Probabilidades de cada tipo de envio quando a biblioteca de mídia tem arquivos
+// disponíveis (a soma não precisa ser 1 — o que sobra vira texto).
+const MATURADOR_AUDIO_CHANCE = 0.15
+const MATURADOR_IMAGE_CHANCE = 0.20
+
 async function runMaturadorLoop(minDelay, maxDelay) {
   if (!maturadorState.running) return
   const readyIds = Object.keys(chipSessions).filter(id => chipSessions[id].isReady && chipSessions[id].client)
@@ -1388,9 +1465,36 @@ async function runMaturadorLoop(minDelay, maxDelay) {
     const receiverNumber = chipSessions[receiverId].number
     try {
       if (!receiverNumber) throw new Error(`Chip ${receiverId} sem número registrado`)
-      const msg = maturadorPhrases[Math.floor(Math.random() * maturadorPhrases.length)]
-      await sendChipText(chipSessions[senderId].client, formatNumber(receiverNumber), msg)
-      broadcast('maturador', { type: 'log', from: senderId, to: receiverId, toNumber: receiverNumber, message: msg, ts: Date.now() })
+      const client = chipSessions[senderId].client
+      const chatId = formatNumber(receiverNumber)
+
+      const images = maturadorState.mediaEnabled ? safeReadDir(MATURADOR_IMAGES_DIR) : []
+      const audios = maturadorState.mediaEnabled ? safeReadDir(MATURADOR_AUDIOS_DIR) : []
+      const roll = Math.random()
+
+      let msgType = 'text'
+      let message
+      let fileName
+
+      if (roll < MATURADOR_AUDIO_CHANCE && audios.length) {
+        const { MessageMedia } = require('whatsapp-web.js')
+        fileName = audios[Math.floor(Math.random() * audios.length)]
+        const media = MessageMedia.fromFilePath(path.join(MATURADOR_AUDIOS_DIR, fileName))
+        await client.sendMessage(chatId, media, { sendAudioAsVoice: true })
+        msgType = 'audio'
+      } else if (roll < MATURADOR_AUDIO_CHANCE + MATURADOR_IMAGE_CHANCE && images.length) {
+        const { MessageMedia } = require('whatsapp-web.js')
+        fileName = images[Math.floor(Math.random() * images.length)]
+        const media = MessageMedia.fromFilePath(path.join(MATURADOR_IMAGES_DIR, fileName))
+        message = Math.random() < 0.5 ? maturadorPhrases[Math.floor(Math.random() * maturadorPhrases.length)] : undefined
+        await client.sendMessage(chatId, media, message ? { caption: message } : {})
+        msgType = 'image'
+      } else {
+        message = maturadorPhrases[Math.floor(Math.random() * maturadorPhrases.length)]
+        await sendChipText(client, chatId, message)
+      }
+
+      broadcast('maturador', { type: 'log', from: senderId, to: receiverId, toNumber: receiverNumber, msgType, message, fileName, ts: Date.now() })
     } catch (e) {
       broadcast('maturador', { type: 'error', chipId: senderId, error: e.message })
     }
@@ -1997,6 +2101,26 @@ app.delete('/api/wuzapi-campaign/history/:id', (req, res) => {
   }
 })
 
+// ── Wuzapi Maturador Routes ─────────────────────────────────────────────────────
+
+app.get('/api/wuzapi-maturador/status', (_req, res) => {
+  res.json(wuzapi.getMaturadorStatus())
+})
+
+app.post('/api/wuzapi-maturador/start', async (req, res) => {
+  try {
+    await wuzapi.startMaturador(req.body || {})
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(400).json({ error: e.message })
+  }
+})
+
+app.post('/api/wuzapi-maturador/stop', (_req, res) => {
+  wuzapi.stopMaturador()
+  res.json({ ok: true })
+})
+
 // ── Maturador Routes ──────────────────────────────────────────────────────────
 
 app.get('/api/maturador/status', (_req, res) => {
@@ -2005,6 +2129,7 @@ app.get('/api/maturador/status', (_req, res) => {
     chipIds: maturadorState.chipIds,
     minDelay: maturadorState.minDelay,
     maxDelay: maturadorState.maxDelay,
+    mediaEnabled: maturadorState.mediaEnabled,
   })
 })
 
@@ -2017,6 +2142,7 @@ app.post('/api/maturador/start', (req, res) => {
   maturadorState.chipIds = req.body.chipIds || readyIds
   maturadorState.minDelay = min
   maturadorState.maxDelay = max
+  maturadorState.mediaEnabled = req.body.mediaEnabled !== false
   res.json({ ok: true })
   broadcast('maturador', { type: 'started' })
   runMaturadorLoop(min, max)
