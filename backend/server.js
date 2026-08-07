@@ -674,7 +674,7 @@ const chipCampaignState = {
   rrIndex: 0,
 }
 
-const maturadorState = { running: false, timer: null, chipIds: [], minDelay: 60, maxDelay: 300, mediaEnabled: true }
+const maturadorState = { running: false, timer: null, chipIds: [], minDelay: 60, maxDelay: 300, mediaEnabled: true, msgCount: 0 }
 
 // ── Chip registry (persist chip IDs across restarts) ──────────────────────────
 
@@ -1443,10 +1443,7 @@ async function runChipCampaign(data) {
 
 // ── Maturador ─────────────────────────────────────────────────────────────────
 
-const maturadorPhrases = [
-  'Oi! 👋', 'Tudo bem?', 'Boa tarde!', 'Oi tudo bem?', 'Olá! 😊', 'E aí!',
-  'Boa noite!', 'Como vai?', 'Tudo certo?', 'Oi!', 'Olá!', 'E aí, tudo na paz?'
-]
+const maturadorPhrases = require('./maturadorPhrases')
 
 // Probabilidades de cada tipo de envio quando a biblioteca de mídia tem arquivos
 // disponíveis (a soma não precisa ser 1 — o que sobra vira texto).
@@ -1486,14 +1483,15 @@ async function runMaturadorLoop(minDelay, maxDelay) {
         const { MessageMedia } = require('whatsapp-web.js')
         fileName = images[Math.floor(Math.random() * images.length)]
         const media = MessageMedia.fromFilePath(path.join(MATURADOR_IMAGES_DIR, fileName))
-        message = Math.random() < 0.5 ? maturadorPhrases[Math.floor(Math.random() * maturadorPhrases.length)] : undefined
+        message = Math.random() < 0.5 ? maturadorPhrases.pickShort() : undefined
         await client.sendMessage(chatId, media, message ? { caption: message } : {})
         msgType = 'image'
       } else {
-        message = maturadorPhrases[Math.floor(Math.random() * maturadorPhrases.length)]
+        message = maturadorPhrases.pick(maturadorState.msgCount)
         await sendChipText(client, chatId, message)
       }
 
+      maturadorState.msgCount++
       broadcast('maturador', { type: 'log', from: senderId, to: receiverId, toNumber: receiverNumber, msgType, message, fileName, ts: Date.now() })
     } catch (e) {
       broadcast('maturador', { type: 'error', chipId: senderId, error: e.message })
@@ -2143,6 +2141,7 @@ app.post('/api/maturador/start', (req, res) => {
   maturadorState.minDelay = min
   maturadorState.maxDelay = max
   maturadorState.mediaEnabled = req.body.mediaEnabled !== false
+  maturadorState.msgCount = 0
   res.json({ ok: true })
   broadcast('maturador', { type: 'started' })
   runMaturadorLoop(min, max)

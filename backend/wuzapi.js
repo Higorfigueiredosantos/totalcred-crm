@@ -592,10 +592,7 @@ async function runCampaign(data) {
 // que o próprio wuzapi devolve em /admin/users, então cada ciclo resolve as
 // instâncias prontas na hora (listInstances já cobre isso).
 
-const maturadorPhrases = [
-  'Oi! 👋', 'Tudo bem?', 'Boa tarde!', 'Oi tudo bem?', 'Olá! 😊', 'E aí!',
-  'Boa noite!', 'Como vai?', 'Tudo certo?', 'Oi!', 'Olá!', 'E aí, tudo na paz?'
-]
+const maturadorPhrases = require('./maturadorPhrases')
 
 const MATURADOR_AUDIO_CHANCE = 0.15
 const MATURADOR_IMAGE_CHANCE = 0.20
@@ -618,7 +615,7 @@ function phoneFromJid(jid) {
   return String(jid).split('@')[0].split(':')[0] || null
 }
 
-const maturadorState = { running: false, timer: null, instanceNames: [], minDelay: 60, maxDelay: 300, mediaEnabled: true }
+const maturadorState = { running: false, timer: null, instanceNames: [], minDelay: 60, maxDelay: 300, mediaEnabled: true, msgCount: 0 }
 
 async function getReadyMaturadorInstances(names) {
   let all
@@ -659,14 +656,15 @@ async function runMaturadorLoop(minDelay, maxDelay) {
         fileName = images[Math.floor(Math.random() * images.length)]
         const ext = path.extname(fileName).toLowerCase()
         const dataUri = fileToDataUri(path.join(MATURADOR_IMAGES_DIR, fileName), MIME_BY_EXT[ext] || 'image/jpeg')
-        message = Math.random() < 0.5 ? maturadorPhrases[Math.floor(Math.random() * maturadorPhrases.length)] : undefined
+        message = Math.random() < 0.5 ? maturadorPhrases.pickShort() : undefined
         await sendImage(sender.name, receiver.phone, dataUri, message)
         msgType = 'image'
       } else {
-        message = maturadorPhrases[Math.floor(Math.random() * maturadorPhrases.length)]
+        message = maturadorPhrases.pick(maturadorState.msgCount)
         await sendText(sender.name, receiver.phone, message)
       }
 
+      maturadorState.msgCount++
       _broadcast('wuzapi_maturador', { type: 'log', from: sender.name, to: receiver.name, toNumber: receiver.phone, msgType, message, fileName, ts: Date.now() })
     } catch (e) {
       _broadcast('wuzapi_maturador', { type: 'error', instanceName: sender.name, error: e?.response?.data?.error || e.message })
@@ -692,6 +690,7 @@ async function startMaturador({ instanceNames, minDelay, maxDelay, mediaEnabled 
   maturadorState.minDelay = min
   maturadorState.maxDelay = max
   maturadorState.mediaEnabled = mediaEnabled !== false
+  maturadorState.msgCount = 0
 
   _broadcast('wuzapi_maturador', { type: 'started' })
   runMaturadorLoop(min, max)
