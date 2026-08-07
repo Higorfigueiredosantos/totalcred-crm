@@ -108,18 +108,25 @@ const WuzapiConnections = forwardRef<WuzapiConnectionsHandle, {}>((_props, ref) 
 
     setSavingProxy(true)
     try {
+      // O wuzapi recusa mudar o proxy com a sessão conectada ("cannot set
+      // proxy while connected") — em vez de obrigar o usuário a desconectar
+      // manualmente antes de Salvar, faz esse passo aqui: desconecta,
+      // espera o wuzapi processar, aplica o proxy e reconecta sozinho.
+      if (configStatus !== 'disconnected') {
+        await apiFetch(`/api/wuzapi/instances/${encodeURIComponent(configName)}/disconnect`, { method: 'POST' })
+        await new Promise(r => setTimeout(r, 1000))
+      }
+
       const r = await apiFetch(`/api/wuzapi/instances/${encodeURIComponent(configName)}/proxy`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ proxyUrl: configProxyUrl.trim(), enabled: configProxyEnabled })
       })
       if (r?.error) throw new Error(r.error)
+
+      await reconnect(configName)
       setConfigName(null)
     } catch (e: any) {
-      alert(
-        /connected|conectad/i.test(e.message || '')
-          ? 'Não é possível trocar o proxy com a instância conectada. Desconecte primeiro (botão abaixo) e tente de novo.'
-          : `Erro ao salvar proxy: ${e.message}`
-      )
+      alert(`Erro ao salvar proxy: ${e.message}`)
     } finally {
       setSavingProxy(false)
       loadInstances()
@@ -271,20 +278,25 @@ const WuzapiConnections = forwardRef<WuzapiConnectionsHandle, {}>((_props, ref) 
                 </label>
               </div>
               {configProxyEnabled && (
-                <input
-                  value={configProxyUrl}
-                  onChange={e => setConfigProxyUrl(e.target.value)}
-                  placeholder="socks5://usuario:senha@host:porta"
-                  className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-orange-500 font-mono"
-                />
+                <>
+                  <input
+                    value={configProxyUrl}
+                    onChange={e => setConfigProxyUrl(e.target.value)}
+                    placeholder="http://usuario:senha@host:porta"
+                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-orange-500 font-mono"
+                  />
+                  <p className="text-[11px] text-gray-500">
+                    Aceita <code className="bg-gray-900 px-1 rounded">http://</code>, <code className="bg-gray-900 px-1 rounded">https://</code> ou <code className="bg-gray-900 px-1 rounded">socks5://</code> — inclua usuário:senha na URL se o proxy exigir autenticação.
+                  </p>
+                </>
               )}
               <p className="text-[11px] text-gray-500">O proxy passa a ser responsável por todas as ações desse canal (envio, recebimento, QR).</p>
               {configStatus !== 'disconnected' && (
                 <div className="flex items-center justify-between bg-yellow-900/20 border border-yellow-800/40 rounded-lg px-3 py-2">
-                  <span className="text-[11px] text-yellow-300">Desconecte antes de trocar o proxy</span>
+                  <span className="text-[11px] text-yellow-300">Ao salvar, a instância será desconectada e reconectada automaticamente com o novo proxy</span>
                   <button onClick={disconnectFromConfig}
-                    className="flex items-center gap-1 text-[11px] text-yellow-400 hover:text-yellow-200 underline">
-                    <PowerOff size={11} /> Desconectar
+                    className="flex items-center gap-1 text-[11px] text-yellow-400 hover:text-yellow-200 underline shrink-0 ml-2">
+                    <PowerOff size={11} /> Desconectar agora
                   </button>
                 </div>
               )}
