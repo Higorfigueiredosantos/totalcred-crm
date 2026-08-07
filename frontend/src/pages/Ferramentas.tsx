@@ -92,6 +92,16 @@ type WarmingEntry = {
   dailyStats: Record<string, DayStat>  // chave YYYY-MM-DD local
 }
 
+// Jornada de aquecimento do maturador Wuzapi (meta diária de mensagens,
+// controlada pelo backend — sobrevive a reload/reconexão do navegador).
+type MaturadorJourney = {
+  dayIndex: number
+  dailyTarget: number
+  dailySent: number
+  startDate: string | null
+  history: Record<string, { day: number; target: number; sent: number }>
+}
+
 // Retorna data local no formato YYYY-MM-DD (não UTC)
 function localDateKey(): string {
   const d = new Date()
@@ -764,8 +774,10 @@ function MaturadorTab() {
 
 // ── WUZAPI MATURADOR TAB ────────────────────────────────────────────────────────
 // Mesma lógica do maturador dos Chips, mas as instâncias e o envio passam
-// pela API do Wuzapi (BETA). Sem a "Esteira de Aquecimento" (histórico por
-// dia) por enquanto — só o ciclo de envio, pausa/retomada e log de atividade.
+// pela API do Wuzapi (BETA). Além disso tem uma "Jornada de Aquecimento" com
+// meta diária de mensagens controlada pelo backend (dia 1: 5–10 msgs, dia 2:
+// 7–13, dia 3: 12–16, dia 4: 14–17, dia 5: 15–23, dia 6+: 25–35) — assim que
+// a meta do dia é batida o maturador para sozinho até o dia seguinte.
 
 function WuzapiMaturadorTab() {
   const { instances } = useWuzapiInstances()
@@ -781,6 +793,24 @@ function WuzapiMaturadorTab() {
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [selectedInstances, setSelectedInstances] = useState<string[]>([])
 
+  // Jornada de aquecimento (meta diária de mensagens — vem do backend)
+  const [journey, setJourney] = useState<MaturadorJourney>({ dayIndex: 0, dailyTarget: 0, dailySent: 0, startDate: null, history: {} })
+  const [dayQuotaReached, setDayQuotaReached] = useState(false)
+
+  // Canais no maturador: histórico de mensagens enviadas/recebidas por instância
+  const [warmingDates, setWarmingDates] = useState<Record<string, WarmingEntry>>(() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem('wuzapi_warming_dates') || '{}')
+      const result: Record<string, WarmingEntry> = {}
+      for (const [id, val] of Object.entries(raw)) {
+        const entry = val as any
+        result[id] = { ...entry, dailyStats: entry.dailyStats ?? {} }
+      }
+      return result
+    } catch { return {} }
+  })
+  const [expandedInstance, setExpandedInstance] = useState<string | null>(null)
+
   const running = status === 'running'
   const connectedInstances = instances.filter(i => i.status === 'connected')
 
@@ -794,6 +824,8 @@ function WuzapiMaturadorTab() {
 
     fetch('/api/wuzapi-maturador/status').then(r => r.json()).then((d: any) => {
       if (typeof d.mediaEnabled === 'boolean') setMediaEnabled(d.mediaEnabled)
+      if (d.journey) setJourney(d.journey)
+      if (typeof d.dayQuotaReached === 'boolean') setDayQuotaReached(d.dayQuotaReached)
       if (d.running) {
         setStatus('running')
         if (d.minDelay) setMinDelay(d.minDelay)
@@ -821,7 +853,35 @@ function WuzapiMaturadorTab() {
         if (countdownRef.current) clearInterval(countdownRef.current)
         addLog({ ts, text: 'Maturador parado.', kind: 'system' })
       }
+      if (payload.type === 'day_started') {
+        setJourney(prev => ({ ...prev, dayIndex: payload.day, dailyTarget: payload.target, dailySent: 0 }))
+        setDayQuotaReached(false)
+        addLog({ ts, text: `Dia ${payload.day} da jornada iniciado — meta de ${payload.target} mensagens hoje.`, kind: 'system' })
+      }
+      if (payload.type === 'day_complete') {
+        setDayQuotaReached(true)
+        addLog({ ts, text: `Meta do dia ${payload.day} atingida (${payload.sent}/${payload.target}) — aguardando o próximo dia.`, kind: 'system' })
+      }
       if (payload.type === 'log') {
+        if (payload.day) {
+          setJourney(prev => ({ ...prev, dayIndex: payload.day, dailyTarget: payload.dailyTarget ?? prev.dailyTarget, dailySent: payload.dailySent ?? prev.dailySent }))
+        }
+        // Registrar estatística diária para sender e receiver (canal conectado)
+        const day = localDateKey()
+        setWarmingDates(prev => {
+          const updated = { ...prev }
+          const addStat = (name: string, field: 'sent' | 'received') => {
+            if (!updated[name]) return
+            const stats = { ...updated[name].dailyStats }
+            const cur = stats[day] ?? { sent: 0, received: 0 }
+            stats[day] = { ...cur, [field]: cur[field] + 1 }
+            updated[name] = { ...updated[name], dailyStats: stats }
+          }
+          addStat(payload.from, 'sent')
+          addStat(payload.to, 'received')
+          try { localStorage.setItem('wuzapi_warming_dates', JSON.stringify(updated)) } catch {}
+          return updated
+        })
         addLog({ ts, text: '', kind: 'msg', from: payload.from, to: payload.to, msgText: payload.message, msgType: payload.msgType || 'text', fileName: payload.fileName })
       }
       if (payload.type === 'error') {
@@ -860,6 +920,37 @@ function WuzapiMaturadorTab() {
     countdownRef.current = t
   }
 
+  // Registra ativação — incrementa apenas se hoje (hora local) ainda não foi contado
+  function recordWarmingStart(names: string[]) {
+    const today = localDateKey()
+    setWarmingDates(prev => {
+      const updated = { ...prev }
+      for (const id of names) {
+        if (!updated[id]) {
+          updated[id] = { startDate: new Date().toISOString(), activeDays: 1, lastActiveDate: today, dailyStats: {} }
+        } else if (updated[id].lastActiveDate !== today) {
+          updated[id] = { ...updated[id], activeDays: updated[id].activeDays + 1, lastActiveDate: today }
+        }
+      }
+      try { localStorage.setItem('wuzapi_warming_dates', JSON.stringify(updated)) } catch {}
+      return updated
+    })
+  }
+
+  function removeFromEsteira(name: string) {
+    const updated = { ...warmingDates }
+    delete updated[name]
+    setWarmingDates(updated)
+    localStorage.setItem('wuzapi_warming_dates', JSON.stringify(updated))
+  }
+
+  function getWarmingStatus(entry: WarmingEntry) {
+    const days = entry.activeDays
+    if (days >= 15) return { days, status: 'Quente', badgeCls: 'bg-red-900/40 text-red-400',    barColor: 'bg-red-500',    progress: 100 }
+    if (days >= 7)  return { days, status: 'Morno',  badgeCls: 'bg-yellow-900/40 text-yellow-400', barColor: 'bg-yellow-500', progress: (days / 15) * 100 }
+    return              { days, status: 'Frio',   badgeCls: 'bg-blue-900/40 text-blue-400',    barColor: 'bg-blue-500',   progress: (days / 15) * 100 }
+  }
+
   async function start() {
     if (selectedInstances.length < 2) return alert('Selecione pelo menos 2 instâncias para iniciar o maturador.')
     const r = await fetch('/api/wuzapi-maturador/start', {
@@ -868,6 +959,7 @@ function WuzapiMaturadorTab() {
     })
     const d = await r.json()
     if (!r.ok) { alert(d.error); return }
+    recordWarmingStart(selectedInstances)
   }
 
   async function pause() {
@@ -901,7 +993,14 @@ function WuzapiMaturadorTab() {
     return instances.find(i => i.name === name)?.label || name
   }
 
+  function fmtDay(key: string) {
+    const [y, m, d] = key.split('-')
+    return `${d}/${m}/${y}`
+  }
+
   const msgCount = log.filter(l => l.kind === 'msg').length
+  const dayProgressPct = journey.dailyTarget ? Math.min((journey.dailySent / journey.dailyTarget) * 100, 100) : 0
+  const journeyHistoryDays = Object.entries(journey.history).sort(([a], [b]) => b.localeCompare(a))
 
   return (
     <div className="space-y-5 max-w-2xl">
@@ -986,11 +1085,16 @@ function WuzapiMaturadorTab() {
 
         {status !== 'idle' && (
           <div className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs ${
-            status === 'running' ? 'bg-green-900/20 border border-green-800/50 text-green-400'
+            running && dayQuotaReached ? 'bg-indigo-900/20 border border-indigo-800/50 text-indigo-300'
+            : status === 'running' ? 'bg-green-900/20 border border-green-800/50 text-green-400'
             : 'bg-yellow-900/20 border border-yellow-800/50 text-yellow-400'
           }`}>
-            <span className={`w-2 h-2 rounded-full shrink-0 ${status === 'running' ? 'bg-green-400 animate-pulse' : 'bg-yellow-400'}`} />
-            {status === 'running'
+            <span className={`w-2 h-2 rounded-full shrink-0 ${
+              running && dayQuotaReached ? 'bg-indigo-400' : status === 'running' ? 'bg-green-400 animate-pulse' : 'bg-yellow-400'
+            }`} />
+            {running && dayQuotaReached
+              ? `Meta do dia ${journey.dayIndex} atingida (${journey.dailySent}/${journey.dailyTarget}) — aguardando o próximo dia`
+              : status === 'running'
               ? `Maturando... ${msgCount} mensagens enviadas nesta sessão`
               : 'Pausado — clique em Retomar para continuar'}
           </div>
@@ -1029,6 +1133,49 @@ function WuzapiMaturadorTab() {
           )}
         </div>
       </div>
+
+      {/* Jornada de Aquecimento — meta diária de mensagens */}
+      {journey.dayIndex > 0 && (
+        <div className="bg-gray-800 rounded-xl border border-gray-700 p-5 space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-white mb-1">Jornada de Aquecimento</h2>
+              <p className="text-xs text-gray-400">Meta diária de mensagens trocadas entre os canais — aumenta a cada dia.</p>
+            </div>
+            <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-indigo-900/40 text-indigo-300 shrink-0">Dia {journey.dayIndex}</span>
+          </div>
+
+          <div>
+            <div className="flex justify-between text-[11px] text-gray-500 mb-1.5">
+              <span>{dayQuotaReached ? 'Meta de hoje atingida 🎉' : 'Enviando hoje...'}</span>
+              <span>{journey.dailySent}/{journey.dailyTarget || '—'} mensagens</span>
+            </div>
+            <div className="w-full bg-gray-700 rounded-full h-2">
+              <div className={`h-2 rounded-full transition-all ${dayQuotaReached ? 'bg-green-500' : 'bg-indigo-500'}`}
+                style={{ width: `${dayProgressPct}%` }} />
+            </div>
+            {dayQuotaReached && (
+              <p className="text-[11px] text-green-400/80 mt-1.5">A jornada continua sozinha — aguardando o próximo dia para retomar os envios.</p>
+            )}
+          </div>
+
+          {journeyHistoryDays.length > 0 && (
+            <div>
+              <p className="text-[10px] text-gray-500 uppercase tracking-wider font-semibold mb-2">Histórico da jornada</p>
+              <div className="space-y-1.5">
+                {journeyHistoryDays.map(([date, h]) => (
+                  <div key={date} className="flex items-center justify-between text-xs bg-gray-900 border border-gray-700 rounded-lg px-3 py-2">
+                    <span className="text-gray-400">Dia {h.day} <span className="text-gray-600">— {fmtDay(date)}</span></span>
+                    <span className={h.sent >= h.target ? 'text-green-400' : 'text-gray-300'}>
+                      {h.sent}/{h.target} {h.sent >= h.target ? '✓' : ''}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       <MaturadorMediaLibrary />
 
@@ -1087,6 +1234,137 @@ function WuzapiMaturadorTab() {
           })}
         </div>
       </div>
+
+      {/* Canais no Maturador */}
+      {Object.keys(warmingDates).length > 0 && (
+        <div>
+          <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Canais no Maturador</p>
+          <div className="space-y-3">
+            {Object.entries(warmingDates).map(([name, entry]) => {
+              const { days, status: tempStatus, badgeCls, barColor, progress } = getWarmingStatus(entry)
+              const label = getInstanceLabel(name)
+              const isConnected = instances.find(i => i.name === name)?.status === 'connected'
+              const startFmt = new Date(entry.startDate).toLocaleDateString('pt-BR')
+              const isActiveToday = entry.lastActiveDate === localDateKey()
+              const isExpanded = expandedInstance === name
+
+              const today = localDateKey()
+              const channelDays = Object.entries(entry.dailyStats ?? {})
+                .sort(([a], [b]) => b.localeCompare(a))
+
+              const totalSent = channelDays.reduce((s, [, v]) => s + v.sent, 0)
+              const totalReceived = channelDays.reduce((s, [, v]) => s + v.received, 0)
+
+              return (
+                <div key={name} className="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
+                  {/* Header */}
+                  <div className="p-4">
+                    <div className="flex items-center justify-between mb-3">
+                      <div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${isConnected ? 'bg-green-400' : 'bg-gray-600'}`} />
+                          <p className="text-sm font-semibold text-white">{label}</p>
+                          {isActiveToday && (
+                            <span className="text-[10px] px-1.5 py-0.5 bg-green-900/40 text-green-400 rounded-full border border-green-800/50">
+                              ativo hoje
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-xs text-gray-500 mt-0.5">Conectado ao maturador desde {startFmt}</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${badgeCls}`}>{tempStatus}</span>
+                        <button
+                          onClick={() => setExpandedInstance(isExpanded ? null : name)}
+                          className="text-xs text-indigo-400 hover:text-indigo-300 px-2 py-1 bg-indigo-900/20 rounded-lg border border-indigo-800/40"
+                        >
+                          {isExpanded ? 'Fechar' : 'Detalhes'}
+                        </button>
+                        <button onClick={() => removeFromEsteira(name)} title="Remover do histórico"
+                          className="text-gray-600 hover:text-red-400 transition-colors p-1">
+                          <X size={13} />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Barra de progresso */}
+                    <div className="flex justify-between text-[11px] text-gray-500 mb-1.5">
+                      <span>{days} dia(s) de aquecimento ativo</span>
+                      <span>{Math.round(progress)}% (meta: 15 dias)</span>
+                    </div>
+                    <div className="relative w-full bg-gray-700 rounded-full h-2">
+                      <div className={`${barColor} h-2 rounded-full transition-all`} style={{ width: `${Math.min(progress, 100)}%` }} />
+                      <div className="absolute top-1/2 -translate-y-1/2 w-px h-3.5 bg-yellow-500/60"
+                        style={{ left: `${(7 / 15) * 100}%` }} />
+                    </div>
+                    <div className="flex justify-between text-[10px] mt-1.5">
+                      <span className="text-blue-400/70">Frio (0–6d)</span>
+                      <span className="text-yellow-400/70">Morno (7–14d)</span>
+                      <span className="text-red-400/70">Quente (15d+)</span>
+                    </div>
+                  </div>
+
+                  {/* Detalhes / histórico */}
+                  {isExpanded && (
+                    <div className="border-t border-gray-700 bg-gray-900/50">
+                      <div className="grid grid-cols-3 divide-x divide-gray-700 border-b border-gray-700">
+                        <div className="px-4 py-3 text-center">
+                          <p className="text-lg font-bold text-white">{days}</p>
+                          <p className="text-[10px] text-gray-500 mt-0.5">Dias ativos</p>
+                        </div>
+                        <div className="px-4 py-3 text-center">
+                          <p className="text-lg font-bold text-green-400">{totalSent}</p>
+                          <p className="text-[10px] text-gray-500 mt-0.5">Msgs enviadas</p>
+                        </div>
+                        <div className="px-4 py-3 text-center">
+                          <p className="text-lg font-bold text-blue-400">{totalReceived}</p>
+                          <p className="text-[10px] text-gray-500 mt-0.5">Msgs recebidas</p>
+                        </div>
+                      </div>
+
+                      <div className="p-4">
+                        <p className="text-[10px] text-gray-500 uppercase tracking-wider font-semibold mb-3">Histórico</p>
+                        {channelDays.length === 0 ? (
+                          <p className="text-xs text-gray-600 text-center py-3">Nenhuma atividade registrada ainda.</p>
+                        ) : (
+                          <div className="space-y-2">
+                            {channelDays.map(([dateKey, stat]) => {
+                              const isToday = dateKey === today
+                              const total = stat.sent + stat.received
+                              const sentPct = total > 0 ? (stat.sent / total) * 100 : 0
+                              return (
+                                <div key={dateKey} className={`rounded-lg p-3 ${isToday ? 'bg-green-900/20 border border-green-800/40' : 'bg-gray-800'}`}>
+                                  <div className="flex items-center justify-between mb-2">
+                                    <div className="flex items-center gap-2">
+                                      <span className={`text-xs font-semibold ${isToday ? 'text-green-400' : 'text-gray-300'}`}>
+                                        {isToday ? 'Hoje' : fmtDay(dateKey)}
+                                      </span>
+                                      {isToday && <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />}
+                                    </div>
+                                    <span className="text-[10px] text-gray-500">{total} mensagens</span>
+                                  </div>
+                                  <div className="flex h-1.5 rounded-full overflow-hidden bg-gray-700 mb-2">
+                                    <div className="bg-green-500 transition-all" style={{ width: `${sentPct}%` }} />
+                                    <div className="bg-blue-500 transition-all" style={{ width: `${100 - sentPct}%` }} />
+                                  </div>
+                                  <div className="flex gap-4 text-[10px]">
+                                    <span className="text-green-400">↑ {stat.sent} enviadas</span>
+                                    <span className="text-blue-400">↓ {stat.received} recebidas</span>
+                                  </div>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

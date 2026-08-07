@@ -19,6 +19,7 @@ const WUZAPI_WEBHOOK_URL = process.env.WUZAPI_WEBHOOK_URL || 'http://backend:300
 const DATA_DIR = path.join(__dirname, 'data')
 const INSTANCES_FILE = path.join(DATA_DIR, 'wuzapi_instances.json')
 const HISTORY_FILE = path.join(DATA_DIR, 'wuzapi_campaigns_history.json')
+const MATURADOR_JOURNEY_FILE = path.join(DATA_DIR, 'wuzapi_maturador_journey.json')
 
 // Mesma biblioteca de fotos/áudios usada pelo maturador dos chips (whatsapp-web.js)
 // — um único lugar pra gerenciar mídia, reaproveitado pelos dois maturadores.
@@ -597,6 +598,67 @@ const maturadorPhrases = require('./maturadorPhrases')
 const MATURADOR_AUDIO_CHANCE = 0.15
 const MATURADOR_IMAGE_CHANCE = 0.20
 
+// ── Jornada de aquecimento (metas diárias de mensagens) ────────────────────
+// Dia 1: 5–10 msgs, dia 2: 7–13, dia 3: 12–16, dia 4: 14–17, dia 5: 15–23,
+// dia 6 em diante: 25–35. "Dia" aqui é dia ATIVO (em que o maturador de fato
+// rodou), não dia de calendário corrido — se ficar uma semana sem rodar, o
+// próximo dia ativo continua de onde parou, não pula dias.
+function maturadorDailyRange(day) {
+  if (day <= 1) return [5, 10]
+  if (day === 2) return [7, 13]
+  if (day === 3) return [12, 16]
+  if (day === 4) return [14, 17]
+  if (day === 5) return [15, 23]
+  return [25, 35]
+}
+
+function randomInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min
+}
+
+function todayKey() {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+function loadMaturadorJourney() {
+  try {
+    if (fs.existsSync(MATURADOR_JOURNEY_FILE)) return JSON.parse(fs.readFileSync(MATURADOR_JOURNEY_FILE, 'utf8'))
+  } catch (e) {}
+  return { dayIndex: 0, dailyTarget: 0, dailySent: 0, lastActiveDate: null, startDate: null, history: {} }
+}
+
+function saveMaturadorJourney() {
+  try {
+    ensureDataDir()
+    fs.writeFileSync(MATURADOR_JOURNEY_FILE, JSON.stringify(maturadorJourney, null, 2))
+  } catch (e) { console.error('[Wuzapi] Erro ao salvar jornada do maturador:', e.message) }
+}
+
+let maturadorJourney = loadMaturadorJourney()
+
+// Roda um dia novo na jornada se o dia ativo anterior já foi encerrado (ou é
+// a primeira vez). Retorna true se um dia novo começou agora.
+function ensureMaturadorJourneyDay() {
+  const today = todayKey()
+  if (maturadorJourney.lastActiveDate === today) return false
+
+  maturadorJourney.dayIndex = maturadorJourney.lastActiveDate ? maturadorJourney.dayIndex + 1 : 1
+  const [min, max] = maturadorDailyRange(maturadorJourney.dayIndex)
+  maturadorJourney.dailyTarget = randomInt(min, max)
+  maturadorJourney.dailySent = 0
+  maturadorJourney.lastActiveDate = today
+  if (!maturadorJourney.startDate) maturadorJourney.startDate = today
+  maturadorJourney.history[today] = { day: maturadorJourney.dayIndex, target: maturadorJourney.dailyTarget, sent: 0 }
+  saveMaturadorJourney()
+  _broadcast('wuzapi_maturador', { type: 'day_started', day: maturadorJourney.dayIndex, target: maturadorJourney.dailyTarget, date: today })
+  return true
+}
+
+// Enquanto a meta do dia já foi batida, só verifica de tempos em tempos se
+// virou o dia — sem chamar a API do wuzapi à toa nesse meio tempo.
+const MATURADOR_DAY_CHECK_MS = 20 * 60 * 1000
+
 const MIME_BY_EXT = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif' }
 
 function safeReadDir(dir) {
@@ -615,7 +677,7 @@ function phoneFromJid(jid) {
   return String(jid).split('@')[0].split(':')[0] || null
 }
 
-const maturadorState = { running: false, timer: null, instanceNames: [], minDelay: 60, maxDelay: 300, mediaEnabled: true, msgCount: 0 }
+const maturadorState = { running: false, timer: null, instanceNames: [], minDelay: 60, maxDelay: 300, mediaEnabled: true, msgCount: 0, dayQuotaReached: false }
 
 async function getReadyMaturadorInstances(names) {
   let all
@@ -629,6 +691,24 @@ async function getReadyMaturadorInstances(names) {
 
 async function runMaturadorLoop(minDelay, maxDelay) {
   if (!maturadorState.running) return
+
+  ensureMaturadorJourneyDay()
+
+  // Meta do dia já batida — não manda mais nada, só espera virar o dia
+  // (checando de tempos em tempos, sem bater na API do wuzapi à toa).
+  if (maturadorJourney.dailySent >= maturadorJourney.dailyTarget) {
+    if (!maturadorState.dayQuotaReached) {
+      maturadorState.dayQuotaReached = true
+      _broadcast('wuzapi_maturador', {
+        type: 'day_complete', day: maturadorJourney.dayIndex,
+        target: maturadorJourney.dailyTarget, sent: maturadorJourney.dailySent,
+      })
+    }
+    maturadorState.timer = setTimeout(() => runMaturadorLoop(minDelay, maxDelay), MATURADOR_DAY_CHECK_MS)
+    return
+  }
+  maturadorState.dayQuotaReached = false
+
   const ready = await getReadyMaturadorInstances(maturadorState.instanceNames)
 
   if (ready.length >= 2) {
@@ -665,7 +745,13 @@ async function runMaturadorLoop(minDelay, maxDelay) {
       }
 
       maturadorState.msgCount++
-      _broadcast('wuzapi_maturador', { type: 'log', from: sender.name, to: receiver.name, toNumber: receiver.phone, msgType, message, fileName, ts: Date.now() })
+      maturadorJourney.dailySent++
+      maturadorJourney.history[maturadorJourney.lastActiveDate].sent = maturadorJourney.dailySent
+      saveMaturadorJourney()
+      _broadcast('wuzapi_maturador', {
+        type: 'log', from: sender.name, to: receiver.name, toNumber: receiver.phone, msgType, message, fileName, ts: Date.now(),
+        day: maturadorJourney.dayIndex, dailyTarget: maturadorJourney.dailyTarget, dailySent: maturadorJourney.dailySent,
+      })
     } catch (e) {
       _broadcast('wuzapi_maturador', { type: 'error', instanceName: sender.name, error: e?.response?.data?.error || e.message })
     }
@@ -709,6 +795,14 @@ function getMaturadorStatus() {
     minDelay: maturadorState.minDelay,
     maxDelay: maturadorState.maxDelay,
     mediaEnabled: maturadorState.mediaEnabled,
+    dayQuotaReached: maturadorState.dayQuotaReached,
+    journey: {
+      dayIndex: maturadorJourney.dayIndex,
+      dailyTarget: maturadorJourney.dailyTarget,
+      dailySent: maturadorJourney.dailySent,
+      startDate: maturadorJourney.startDate,
+      history: maturadorJourney.history,
+    },
   }
 }
 
