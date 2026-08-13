@@ -104,15 +104,35 @@ type MaturadorJourney = {
 }
 
 // Configurações da jornada do maturador Wuzapi, ajustáveis pela engrenagem.
-type MaturadorSettings = {
+// A jornada tem 10 dias, cada um com sua própria meta (dia 11+ repete a meta
+// do dia 10 no backend).
+type MaturadorDaySettings = {
   sendMin: number
   sendMax: number
   receiveMin: number
   receiveMax: number
-  participantsCount: number  // 0 = todas as instâncias conectadas/selecionadas
+  partners: number  // parceiros fixos que cada canal deve ter até esse dia
 }
 
-const DEFAULT_MATURADOR_SETTINGS: MaturadorSettings = { sendMin: 5, sendMax: 10, receiveMin: 5, receiveMax: 10, participantsCount: 0 }
+type MaturadorSettings = {
+  days: MaturadorDaySettings[]  // 10 posições, uma por dia da jornada
+  participantsCount: number     // 0 = todas as instâncias conectadas/selecionadas
+}
+
+const DEFAULT_MATURADOR_DAYS: MaturadorDaySettings[] = [
+  { sendMin: 5, sendMax: 10, receiveMin: 3, receiveMax: 6, partners: 1 },
+  { sendMin: 7, sendMax: 13, receiveMin: 4, receiveMax: 8, partners: 1 },
+  { sendMin: 10, sendMax: 16, receiveMin: 5, receiveMax: 10, partners: 2 },
+  { sendMin: 12, sendMax: 18, receiveMin: 6, receiveMax: 12, partners: 2 },
+  { sendMin: 15, sendMax: 22, receiveMin: 8, receiveMax: 14, partners: 3 },
+  { sendMin: 18, sendMax: 25, receiveMin: 10, receiveMax: 16, partners: 3 },
+  { sendMin: 20, sendMax: 28, receiveMin: 12, receiveMax: 18, partners: 4 },
+  { sendMin: 23, sendMax: 30, receiveMin: 14, receiveMax: 20, partners: 4 },
+  { sendMin: 25, sendMax: 33, receiveMin: 16, receiveMax: 22, partners: 5 },
+  { sendMin: 25, sendMax: 35, receiveMin: 18, receiveMax: 25, partners: 5 },
+]
+
+const DEFAULT_MATURADOR_SETTINGS: MaturadorSettings = { days: DEFAULT_MATURADOR_DAYS.map(d => ({ ...d })), participantsCount: 0 }
 
 // Retorna data local no formato YYYY-MM-DD (não UTC)
 function localDateKey(): string {
@@ -1422,58 +1442,87 @@ function WuzapiMaturadorTab() {
 function WuzapiMaturadorSettingsModal({
   settings, onSave, onClose
 }: { settings: MaturadorSettings; onSave: (s: MaturadorSettings) => void; onClose: () => void }) {
-  const [sendMin, setSendMin] = useState(settings.sendMin)
-  const [sendMax, setSendMax] = useState(settings.sendMax)
-  const [receiveMin, setReceiveMin] = useState(settings.receiveMin)
-  const [receiveMax, setReceiveMax] = useState(settings.receiveMax)
+  const [days, setDays] = useState<MaturadorDaySettings[]>(
+    Array.from({ length: 10 }, (_, i) => ({ ...(settings.days?.[i] || DEFAULT_MATURADOR_DAYS[i]) }))
+  )
   const [participantsCount, setParticipantsCount] = useState(settings.participantsCount)
 
+  function updateDay(i: number, patch: Partial<MaturadorDaySettings>) {
+    setDays(prev => prev.map((d, idx) => idx === i ? { ...d, ...patch } : d))
+  }
+
   function save() {
-    if (sendMin < 1 || sendMax < sendMin) return alert('A meta de envio precisa ter mínimo ≥ 1 e máximo ≥ mínimo.')
-    if (receiveMin < 0 || receiveMax < receiveMin) return alert('A meta de recebimento precisa ter máximo ≥ mínimo.')
+    for (let i = 0; i < days.length; i++) {
+      const d = days[i]
+      if (d.sendMin < 1 || d.sendMax < d.sendMin) return alert(`Dia ${i + 1}: a meta de envio precisa ter mínimo ≥ 1 e máximo ≥ mínimo.`)
+      if (d.receiveMin < 0 || d.receiveMax < d.receiveMin) return alert(`Dia ${i + 1}: a meta de recebimento precisa ter máximo ≥ mínimo.`)
+      if (d.partners < 1) return alert(`Dia ${i + 1}: cada canal precisa de pelo menos 1 parceiro fixo.`)
+    }
     if (participantsCount < 0) return alert('A quantidade de contatos participantes não pode ser negativa.')
-    onSave({ sendMin, sendMax, receiveMin, receiveMax, participantsCount })
+    onSave({ days, participantsCount })
   }
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-      <div className="bg-gray-800 rounded-xl border border-gray-700 p-6 w-full max-w-md space-y-4">
+      <div className="bg-gray-800 rounded-xl border border-gray-700 p-6 w-full max-w-3xl space-y-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-white flex items-center gap-2"><Settings size={15} /> Metas da Jornada</h2>
+          <h2 className="text-sm font-semibold text-white flex items-center gap-2"><Settings size={15} /> Metas da Jornada (10 dias)</h2>
           <button onClick={onClose} className="text-gray-500 hover:text-gray-300"><X size={16} /></button>
         </div>
 
-        <div className="space-y-4">
-          <div>
-            <label className="block text-xs text-gray-400 mb-1.5">Mensagens enviadas por dia</label>
-            <div className="flex items-center gap-2">
-              <input type="number" min={1} value={sendMin} onChange={e => setSendMin(+e.target.value)}
-                className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white text-center focus:outline-none focus:border-green-500" />
-              <span className="text-xs text-gray-500 shrink-0">até</span>
-              <input type="number" min={1} value={sendMax} onChange={e => setSendMax(+e.target.value)}
-                className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white text-center focus:outline-none focus:border-green-500" />
-            </div>
-            <p className="text-xs text-gray-500 mt-1">Total de mensagens que o grupo troca por dia — um número aleatório dentro dessa faixa é sorteado a cada dia novo.</p>
-          </div>
+        <p className="text-xs text-gray-500">
+          Cada linha é um dia da esteira de aquecimento (o dia 11 em diante repete a meta do dia 10). "Parceiros fixos" é quantos
+          canais diferentes cada participante deve trocar mensagens até aquele dia — os parceiros nunca somem, só vão sendo
+          adicionados aos poucos, então o número que um canal chama continua sendo o mesmo que troca mensagens com ele.
+        </p>
 
-          <div>
-            <label className="block text-xs text-gray-400 mb-1.5">Mensagens recebidas por dia (por canal)</label>
-            <div className="flex items-center gap-2">
-              <input type="number" min={0} value={receiveMin} onChange={e => setReceiveMin(+e.target.value)}
-                className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white text-center focus:outline-none focus:border-green-500" />
-              <span className="text-xs text-gray-500 shrink-0">até</span>
-              <input type="number" min={0} value={receiveMax} onChange={e => setReceiveMax(+e.target.value)}
-                className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white text-center focus:outline-none focus:border-green-500" />
-            </div>
-            <p className="text-xs text-gray-500 mt-1">O maturador prioriza mandar mensagem pra quem ainda não recebeu o mínimo do dia, distribuindo entre os canais.</p>
-          </div>
+        <div className="overflow-x-auto -mx-1 px-1">
+          <table className="w-full text-xs border-collapse min-w-[640px]">
+            <thead>
+              <tr className="text-gray-400">
+                <th className="text-left font-medium pb-2 pr-2">Dia</th>
+                <th className="text-left font-medium pb-2 pr-2">Enviadas/dia</th>
+                <th className="text-left font-medium pb-2 pr-2">Recebidas/dia (canal)</th>
+                <th className="text-left font-medium pb-2">Parceiros fixos</th>
+              </tr>
+            </thead>
+            <tbody>
+              {days.map((d, i) => (
+                <tr key={i} className="border-t border-gray-700">
+                  <td className="py-1.5 pr-2 text-gray-300 font-semibold">{i + 1}</td>
+                  <td className="py-1.5 pr-2">
+                    <div className="flex items-center gap-1">
+                      <input type="number" min={1} value={d.sendMin} onChange={e => updateDay(i, { sendMin: +e.target.value })}
+                        className="w-14 bg-gray-900 border border-gray-700 rounded-lg px-1.5 py-1 text-white text-center focus:outline-none focus:border-green-500" />
+                      <span className="text-gray-500 shrink-0">até</span>
+                      <input type="number" min={1} value={d.sendMax} onChange={e => updateDay(i, { sendMax: +e.target.value })}
+                        className="w-14 bg-gray-900 border border-gray-700 rounded-lg px-1.5 py-1 text-white text-center focus:outline-none focus:border-green-500" />
+                    </div>
+                  </td>
+                  <td className="py-1.5 pr-2">
+                    <div className="flex items-center gap-1">
+                      <input type="number" min={0} value={d.receiveMin} onChange={e => updateDay(i, { receiveMin: +e.target.value })}
+                        className="w-14 bg-gray-900 border border-gray-700 rounded-lg px-1.5 py-1 text-white text-center focus:outline-none focus:border-green-500" />
+                      <span className="text-gray-500 shrink-0">até</span>
+                      <input type="number" min={0} value={d.receiveMax} onChange={e => updateDay(i, { receiveMax: +e.target.value })}
+                        className="w-14 bg-gray-900 border border-gray-700 rounded-lg px-1.5 py-1 text-white text-center focus:outline-none focus:border-green-500" />
+                    </div>
+                  </td>
+                  <td className="py-1.5">
+                    <input type="number" min={1} value={d.partners} onChange={e => updateDay(i, { partners: +e.target.value })}
+                      className="w-14 bg-gray-900 border border-gray-700 rounded-lg px-1.5 py-1 text-white text-center focus:outline-none focus:border-green-500" />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
 
-          <div>
-            <label className="block text-xs text-gray-400 mb-1.5">Contatos conectados que interagem por dia</label>
-            <input type="number" min={0} value={participantsCount} onChange={e => setParticipantsCount(+e.target.value)}
-              className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white text-center focus:outline-none focus:border-green-500" />
-            <p className="text-xs text-gray-500 mt-1">Quantas das instâncias conectadas/selecionadas participam da jornada no dia — deixe 0 para usar todas.</p>
-          </div>
+        <div>
+          <label className="block text-xs text-gray-400 mb-1.5">Contatos conectados que interagem por dia</label>
+          <input type="number" min={0} value={participantsCount} onChange={e => setParticipantsCount(+e.target.value)}
+            className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white text-center focus:outline-none focus:border-green-500" />
+          <p className="text-xs text-gray-500 mt-1">Quantas das instâncias conectadas/selecionadas participam da jornada no dia — deixe 0 para usar todas.</p>
         </div>
 
         <div className="flex justify-end gap-2">
