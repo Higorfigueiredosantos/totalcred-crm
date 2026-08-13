@@ -108,22 +108,16 @@ const WuzapiConnections = forwardRef<WuzapiConnectionsHandle, {}>((_props, ref) 
 
     setSavingProxy(true)
     try {
-      // O wuzapi recusa mudar o proxy com a sessão conectada ("cannot set
-      // proxy while connected") — em vez de obrigar o usuário a desconectar
-      // manualmente antes de Salvar, faz esse passo aqui: desconecta,
-      // espera o wuzapi processar, aplica o proxy e reconecta sozinho.
-      if (configStatus !== 'disconnected') {
-        await apiFetch(`/api/wuzapi/instances/${encodeURIComponent(configName)}/disconnect`, { method: 'POST' })
-        await new Promise(r => setTimeout(r, 1000))
-      }
-
+      // O backend cuida de tudo: desconecta (se preciso), aplica o proxy
+      // (retentando internamente até o wuzapi realmente aceitar a troca) e
+      // reconecta a sessão sozinho — mesmo proxy vale pro maturador depois,
+      // já que é a mesma sessão do wuzapi por trás dos dois.
       const r = await apiFetch(`/api/wuzapi/instances/${encodeURIComponent(configName)}/proxy`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ proxyUrl: configProxyUrl.trim(), enabled: configProxyEnabled })
       })
       if (r?.error) throw new Error(r.error)
 
-      await reconnect(configName)
       setConfigName(null)
     } catch (e: any) {
       alert(`Erro ao salvar proxy: ${e.message}`)

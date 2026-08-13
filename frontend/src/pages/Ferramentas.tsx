@@ -1042,6 +1042,17 @@ function WuzapiMaturadorTab() {
     try { localStorage.removeItem('wuzapi_maturador_log') } catch {}
   }
 
+  async function deleteJourney(name: string) {
+    if (!confirm(`Apagar a jornada de ${getInstanceLabel(name)}? Ela volta pro dia 1 na próxima vez que participar, e os parceiros fixos dela são desfeitos.`)) return
+    await fetch(`/api/wuzapi-maturador/journey/${encodeURIComponent(name)}`, { method: 'DELETE' })
+    setJourneys(prev => {
+      const next = { ...prev }
+      delete next[name]
+      return next
+    })
+    if (expandedJourney === name) setExpandedJourney(null)
+  }
+
   async function saveJourneySettings(next: MaturadorSettings) {
     const r = await fetch('/api/wuzapi-maturador/settings', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1231,6 +1242,10 @@ function WuzapiMaturadorTab() {
                             {isExpanded ? 'Fechar' : 'Histórico'}
                           </button>
                         )}
+                        <button onClick={() => deleteJourney(name)} title="Apagar jornada"
+                          className="text-gray-600 hover:text-red-400 transition-colors">
+                          <Trash2 size={12} />
+                        </button>
                       </div>
                     </div>
                     <div className="flex justify-between text-[11px] text-gray-500 mb-1">

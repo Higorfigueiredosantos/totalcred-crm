@@ -132,15 +132,7 @@ async function createInstance(name, label) {
     await userClient(entry.token).post('/webhook', { webhookurl: WUZAPI_WEBHOOK_URL, events: ['Message', 'ReadReceipt'] })
   } catch (e) { console.error('[Wuzapi] Falha ao configurar webhook:', e.message) }
 
-  try {
-    await userClient(entry.token).post('/session/connect', { Subscribe: ['Message'], Immediate: false })
-  } catch (e) {
-    // whatsmeow reconecta sessões salvas sozinho ao subir o container — se a
-    // gente chamar /session/connect de novo nesse meio tempo, o wuzapi
-    // responde erro "already connected". Não é falha, é o estado que já
-    // queríamos alcançar.
-    if (!/already connected/i.test(e?.response?.data?.error || e.message || '')) throw e
-  }
+  await connectSession(entry.token)
 
   let qr = null
   try {
@@ -200,16 +192,53 @@ function setLabel(name, label) {
   saveRegistry(registry)
 }
 
+async function connectSession(token) {
+  try {
+    await userClient(token).post('/session/connect', { Subscribe: ['Message'], Immediate: false })
+  } catch (e) {
+    // whatsmeow reconecta sessões salvas sozinho ao subir o container — se a
+    // gente chamar /session/connect de novo nesse meio tempo, o wuzapi
+    // responde erro "already connected". Não é falha, é o estado que já
+    // queríamos alcançar.
+    if (!/already connected/i.test(e?.response?.data?.error || e.message || '')) throw e
+  }
+}
+
 // O wuzapi recusa mudar o proxy enquanto a sessão está conectada ("cannot
-// set proxy while connected") — o erro sobe pra quem chamou decidir
-// desconectar antes.
+// set proxy while connected") — o /session/disconnect não garante que o
+// estado interno já reflete a desconexão no exato instante em que retorna,
+// então tenta de novo algumas vezes com um intervalo curto antes de desistir,
+// em vez de expor esse detalhe de timing pra quem chama.
 async function setProxy(name, proxyUrl, enabled) {
   const entry = loadRegistry()[name]
   if (!entry) throw new Error('Instância não encontrada')
-  await userClient(entry.token).post('/session/proxy', {
-    proxy_url: enabled ? String(proxyUrl || '').trim() : '',
-    enable: !!enabled,
-  })
+  const payload = { proxy_url: enabled ? String(proxyUrl || '').trim() : '', enable: !!enabled }
+
+  const MAX_ATTEMPTS = 6
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      await userClient(entry.token).post('/session/proxy', payload)
+      return { ok: true }
+    } catch (e) {
+      const msg = e?.response?.data?.error || e.message || ''
+      if (attempt >= MAX_ATTEMPTS || !/connect/i.test(msg)) throw e
+      await new Promise(r => setTimeout(r, 500))
+    }
+  }
+}
+
+// Desconecta (se estiver conectada), aplica o proxy e reconecta sozinho —
+// fluxo padrão usado pela tela de configuração da instância pra trocar o
+// proxy sem exigir passos manuais do usuário. O mesmo proxy fica valendo
+// pra qualquer coisa que use essa sessão depois, maturador incluso (é a
+// mesma sessão do wuzapi por trás do envio manual e do maturador).
+async function setProxyAndReconnect(name, proxyUrl, enabled) {
+  const entry = loadRegistry()[name]
+  if (!entry) throw new Error('Instância não encontrada')
+
+  try { await userClient(entry.token).post('/session/disconnect') } catch (e) { /* pode já estar desconectada */ }
+  await setProxy(name, proxyUrl, enabled)
+  await connectSession(entry.token)
   return { ok: true }
 }
 
@@ -962,6 +991,25 @@ function stopMaturador() {
   _broadcast('wuzapi_maturador', { type: 'stopped' })
 }
 
+// Apaga a jornada de um número (volta pro zero — a próxima participação
+// começa de novo no dia 1) e também o tira do grafo de parceiros fixos, já
+// que os parceiros que ele tinha foram formados em função do progresso que
+// está sendo apagado.
+function deleteMaturadorJourney(name) {
+  delete maturadorData.journeys[name]
+  const myPartners = maturadorData.partners[name]
+  if (myPartners) {
+    myPartners.forEach(other => {
+      if (maturadorData.partners[other]) {
+        maturadorData.partners[other] = maturadorData.partners[other].filter(n => n !== name)
+      }
+    })
+    delete maturadorData.partners[name]
+  }
+  saveMaturadorJourney()
+  return { ok: true }
+}
+
 function getMaturadorStatus() {
   return {
     running: maturadorState.running,
@@ -989,6 +1037,7 @@ module.exports = {
   removeInstance,
   setLabel,
   setProxy,
+  setProxyAndReconnect,
   sendText,
   sendButtons,
   sendImage,
@@ -1003,4 +1052,5 @@ module.exports = {
   getMaturadorStatus,
   getMaturadorSettings,
   setMaturadorSettings,
+  deleteMaturadorJourney,
 }

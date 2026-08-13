@@ -2010,12 +2010,14 @@ app.put('/api/wuzapi/instances/:name/label', (req, res) => {
   res.json({ ok: true })
 })
 
-// O wuzapi rejeita mudar proxy com a sessão conectada — o erro sobe direto
-// pro frontend explicar que precisa desconectar antes.
+// O wuzapi rejeita mudar proxy com a sessão conectada, então esse endpoint já
+// desconecta, aplica o proxy (com retry embutido pro timing do wuzapi) e
+// reconecta sozinho — o proxy fica valendo pra sessão inteira, maturador
+// incluso, já que é a mesma sessão do wuzapi por trás dos dois.
 app.put('/api/wuzapi/instances/:name/proxy', async (req, res) => {
   const { proxyUrl, enabled } = req.body || {}
   try {
-    res.json(await wuzapi.setProxy(req.params.name, proxyUrl, !!enabled))
+    res.json(await wuzapi.setProxyAndReconnect(req.params.name, proxyUrl, !!enabled))
   } catch (e) {
     res.status(502).json({ error: e?.response?.data?.error || e.message })
   }
@@ -2129,6 +2131,10 @@ app.post('/api/wuzapi-maturador/settings', (req, res) => {
   } catch (e) {
     res.status(400).json({ error: e.message })
   }
+})
+
+app.delete('/api/wuzapi-maturador/journey/:name', (req, res) => {
+  res.json(wuzapi.deleteMaturadorJourney(req.params.name))
 })
 
 // ── Maturador Routes ──────────────────────────────────────────────────────────
