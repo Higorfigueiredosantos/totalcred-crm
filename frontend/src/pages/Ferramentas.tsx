@@ -7,7 +7,7 @@ import {
 } from 'lucide-react'
 import { onWSMessage } from '../api/websocket'
 import { useWuzapiInstances } from '../hooks/useWuzapiInstances'
-import type { AutobotRule, AutobotConfig } from '../types'
+import type { AutobotRule, AutobotConfig, WuzapiInstance } from '../types'
 import { v4 as uuid } from '../utils/uuid'
 
 type Tab = 'maturador' | 'maturador-wuzapi' | 'filtro' | 'grupos' | 'gmaps' | 'autobot'
@@ -92,15 +92,16 @@ type WarmingEntry = {
   dailyStats: Record<string, DayStat>  // chave YYYY-MM-DD local
 }
 
-// Jornada de aquecimento do maturador Wuzapi (meta diária de mensagens,
-// controlada pelo backend — sobrevive a reload/reconexão do navegador).
-type MaturadorJourney = {
+// Jornada de aquecimento do maturador Wuzapi — cada número (instância) tem a
+// sua própria, começando no dia 1 na primeira vez que participa (controlada
+// pelo backend, sobrevive a reload/reconexão do navegador).
+type MaturadorJourneyEntry = {
   dayIndex: number
   dailyTarget: number
   dailySent: number
+  dailyReceived: number
   startDate: string | null
-  history: Record<string, { day: number; target: number; sent: number }>
-  participantsToday?: string[]
+  history: Record<string, { day: number; target: number; sent: number; received: number }>
 }
 
 // Configurações da jornada do maturador Wuzapi, ajustáveis pela engrenagem.
@@ -115,8 +116,8 @@ type MaturadorDaySettings = {
 }
 
 type MaturadorSettings = {
-  days: MaturadorDaySettings[]  // 10 posições, uma por dia da jornada
-  participantsCount: number     // 0 = todas as instâncias conectadas/selecionadas
+  days: MaturadorDaySettings[]         // 10 posições, uma por dia da jornada
+  participantInstances: string[]       // nomes das instâncias participantes — vazio = todas conectadas/selecionadas
 }
 
 const DEFAULT_MATURADOR_DAYS: MaturadorDaySettings[] = [
@@ -132,7 +133,7 @@ const DEFAULT_MATURADOR_DAYS: MaturadorDaySettings[] = [
   { sendMin: 25, sendMax: 35, receiveMin: 18, receiveMax: 25, partners: 5 },
 ]
 
-const DEFAULT_MATURADOR_SETTINGS: MaturadorSettings = { days: DEFAULT_MATURADOR_DAYS.map(d => ({ ...d })), participantsCount: 0 }
+const DEFAULT_MATURADOR_SETTINGS: MaturadorSettings = { days: DEFAULT_MATURADOR_DAYS.map(d => ({ ...d })), participantInstances: [] }
 
 // Retorna data local no formato YYYY-MM-DD (não UTC)
 function localDateKey(): string {
@@ -826,8 +827,9 @@ function WuzapiMaturadorTab() {
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [selectedInstances, setSelectedInstances] = useState<string[]>([])
 
-  // Jornada de aquecimento (meta diária de mensagens — vem do backend)
-  const [journey, setJourney] = useState<MaturadorJourney>({ dayIndex: 0, dailyTarget: 0, dailySent: 0, startDate: null, history: {} })
+  // Jornada de aquecimento — uma por número (vem do backend)
+  const [journeys, setJourneys] = useState<Record<string, MaturadorJourneyEntry>>({})
+  const [expandedJourney, setExpandedJourney] = useState<string | null>(null)
   const [dayQuotaReached, setDayQuotaReached] = useState(false)
   const [journeySettings, setJourneySettings] = useState<MaturadorSettings>(DEFAULT_MATURADOR_SETTINGS)
   const [showSettings, setShowSettings] = useState(false)
@@ -859,7 +861,7 @@ function WuzapiMaturadorTab() {
 
     fetch('/api/wuzapi-maturador/status').then(r => r.json()).then((d: any) => {
       if (typeof d.mediaEnabled === 'boolean') setMediaEnabled(d.mediaEnabled)
-      if (d.journey) setJourney(d.journey)
+      if (d.journeys) setJourneys(d.journeys)
       if (d.settings) setJourneySettings(d.settings)
       if (typeof d.dayQuotaReached === 'boolean') setDayQuotaReached(d.dayQuotaReached)
       if (d.running) {
@@ -890,18 +892,33 @@ function WuzapiMaturadorTab() {
         addLog({ ts, text: 'Maturador parado.', kind: 'system' })
       }
       if (payload.type === 'day_started') {
-        setJourney(prev => ({ ...prev, dayIndex: payload.day, dailyTarget: payload.target, dailySent: 0 }))
+        setJourneys(prev => ({
+          ...prev,
+          [payload.instanceName]: {
+            ...(prev[payload.instanceName] || { startDate: null, history: {}, dailyReceived: 0 }),
+            dayIndex: payload.day, dailyTarget: payload.target, dailySent: 0, dailyReceived: 0,
+          },
+        }))
         setDayQuotaReached(false)
-        addLog({ ts, text: `Dia ${payload.day} da jornada iniciado — meta de ${payload.target} mensagens hoje.`, kind: 'system' })
+        addLog({ ts, text: `${getInstanceLabel(payload.instanceName)}: dia ${payload.day} da jornada iniciado — meta de ${payload.target} mensagens hoje.`, kind: 'system' })
       }
       if (payload.type === 'day_complete') {
         setDayQuotaReached(true)
-        addLog({ ts, text: `Meta do dia ${payload.day} atingida (${payload.sent}/${payload.target}) — aguardando o próximo dia.`, kind: 'system' })
+        addLog({ ts, text: 'Meta de hoje atingida para todos os números selecionados — aguardando o próximo dia.', kind: 'system' })
       }
       if (payload.type === 'log') {
-        if (payload.day) {
-          setJourney(prev => ({ ...prev, dayIndex: payload.day, dailyTarget: payload.dailyTarget ?? prev.dailyTarget, dailySent: payload.dailySent ?? prev.dailySent }))
-        }
+        setJourneys(prev => {
+          const next = { ...prev }
+          if (payload.from) {
+            const cur = next[payload.from] || { dayIndex: payload.senderDay, dailyTarget: payload.senderTarget, dailySent: 0, dailyReceived: 0, startDate: null, history: {} }
+            next[payload.from] = { ...cur, dayIndex: payload.senderDay ?? cur.dayIndex, dailyTarget: payload.senderTarget ?? cur.dailyTarget, dailySent: payload.senderSent ?? cur.dailySent }
+          }
+          if (payload.to) {
+            const cur = next[payload.to] || { dayIndex: payload.receiverDay, dailyTarget: 0, dailySent: 0, dailyReceived: 0, startDate: null, history: {} }
+            next[payload.to] = { ...cur, dayIndex: payload.receiverDay ?? cur.dayIndex, dailyReceived: payload.receiverReceived ?? (cur.dailyReceived + 1) }
+          }
+          return next
+        })
         // Registrar estatística diária para sender e receiver (canal conectado)
         const day = localDateKey()
         setWarmingDates(prev => {
@@ -1046,8 +1063,7 @@ function WuzapiMaturadorTab() {
   }
 
   const msgCount = log.filter(l => l.kind === 'msg').length
-  const dayProgressPct = journey.dailyTarget ? Math.min((journey.dailySent / journey.dailyTarget) * 100, 100) : 0
-  const journeyHistoryDays = Object.entries(journey.history).sort(([a], [b]) => b.localeCompare(a))
+  const journeyNames = Object.keys(journeys).sort((a, b) => getInstanceLabel(a).localeCompare(getInstanceLabel(b)))
 
   return (
     <div className="space-y-5 max-w-2xl">
@@ -1140,7 +1156,7 @@ function WuzapiMaturadorTab() {
               running && dayQuotaReached ? 'bg-indigo-400' : status === 'running' ? 'bg-green-400 animate-pulse' : 'bg-yellow-400'
             }`} />
             {running && dayQuotaReached
-              ? `Meta do dia ${journey.dayIndex} atingida (${journey.dailySent}/${journey.dailyTarget}) — aguardando o próximo dia`
+              ? 'Meta de hoje atingida para todos os números — aguardando o próximo dia'
               : status === 'running'
               ? `Maturando... ${msgCount} mensagens enviadas nesta sessão`
               : 'Pausado — clique em Retomar para continuar'}
@@ -1181,60 +1197,65 @@ function WuzapiMaturadorTab() {
         </div>
       </div>
 
-      {/* Jornada de Aquecimento — meta diária de mensagens */}
+      {/* Jornada de Aquecimento — cada número tem a sua própria, dia 1..10 */}
       <div className="bg-gray-800 rounded-xl border border-gray-700 p-5 space-y-4">
           <div className="flex items-center justify-between">
             <div>
               <h2 className="text-sm font-semibold text-white mb-1">Jornada de Aquecimento</h2>
-              <p className="text-xs text-gray-400">
-                Meta diária de mensagens trocadas entre os canais
-                {journeySettings.participantsCount > 0 && ` — ${journeySettings.participantsCount} das conectadas participam por dia`}.
-              </p>
+              <p className="text-xs text-gray-400">Cada número tem sua própria esteira de 10 dias, começando no dia em que entra no maturador.</p>
             </div>
-            <div className="flex items-center gap-2 shrink-0">
-              {journey.dayIndex > 0 && (
-                <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-indigo-900/40 text-indigo-300">Dia {journey.dayIndex}</span>
-              )}
-              <button onClick={() => setShowSettings(true)} title="Ajustar metas da jornada"
-                className="text-gray-500 hover:text-white p-1.5 rounded-lg hover:bg-gray-700 transition-colors">
-                <Settings size={15} />
-              </button>
-            </div>
+            <button onClick={() => setShowSettings(true)} title="Ajustar metas da jornada"
+              className="text-gray-500 hover:text-white p-1.5 rounded-lg hover:bg-gray-700 transition-colors shrink-0">
+              <Settings size={15} />
+            </button>
           </div>
 
-          {journey.dayIndex === 0 && (
-            <p className="text-xs text-gray-500">A jornada começa assim que o maturador for iniciado. Ajuste as metas na engrenagem acima antes de começar, se quiser.</p>
-          )}
-
-          {journey.dayIndex > 0 && (
-          <div>
-            <div className="flex justify-between text-[11px] text-gray-500 mb-1.5">
-              <span>{dayQuotaReached ? 'Meta de hoje atingida 🎉' : 'Enviando hoje...'}</span>
-              <span>{journey.dailySent}/{journey.dailyTarget || '—'} mensagens</span>
-            </div>
-            <div className="w-full bg-gray-700 rounded-full h-2">
-              <div className={`h-2 rounded-full transition-all ${dayQuotaReached ? 'bg-green-500' : 'bg-indigo-500'}`}
-                style={{ width: `${dayProgressPct}%` }} />
-            </div>
-            {dayQuotaReached && (
-              <p className="text-[11px] text-green-400/80 mt-1.5">A jornada continua sozinha — aguardando o próximo dia para retomar os envios.</p>
-            )}
-          </div>
-          )}
-
-          {journeyHistoryDays.length > 0 && (
-            <div>
-              <p className="text-[10px] text-gray-500 uppercase tracking-wider font-semibold mb-2">Histórico da jornada</p>
-              <div className="space-y-1.5">
-                {journeyHistoryDays.map(([date, h]) => (
-                  <div key={date} className="flex items-center justify-between text-xs bg-gray-900 border border-gray-700 rounded-lg px-3 py-2">
-                    <span className="text-gray-400">Dia {h.day} <span className="text-gray-600">— {fmtDay(date)}</span></span>
-                    <span className={h.sent >= h.target ? 'text-green-400' : 'text-gray-300'}>
-                      {h.sent}/{h.target} {h.sent >= h.target ? '✓' : ''}
-                    </span>
+          {journeyNames.length === 0 ? (
+            <p className="text-xs text-gray-500">A jornada começa assim que o maturador for iniciado. Ajuste as metas e escolha os números na engrenagem acima antes de começar, se quiser.</p>
+          ) : (
+            <div className="space-y-3">
+              {journeyNames.map(name => {
+                const j = journeys[name]
+                const pct = j.dailyTarget ? Math.min((j.dailySent / j.dailyTarget) * 100, 100) : 0
+                const done = j.dailyTarget > 0 && j.dailySent >= j.dailyTarget
+                const isExpanded = expandedJourney === name
+                const historyDays = Object.entries(j.history || {}).sort(([a], [b]) => b.localeCompare(a))
+                return (
+                  <div key={name} className="bg-gray-900 rounded-lg border border-gray-700 p-3">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-xs font-semibold text-white">{getInstanceLabel(name)}</span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-900/40 text-indigo-300">Dia {j.dayIndex}</span>
+                        {historyDays.length > 0 && (
+                          <button onClick={() => setExpandedJourney(isExpanded ? null : name)} className="text-[10px] text-indigo-400 hover:text-indigo-300">
+                            {isExpanded ? 'Fechar' : 'Histórico'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex justify-between text-[11px] text-gray-500 mb-1">
+                      <span>{done ? 'Meta de hoje atingida 🎉' : 'Enviando hoje...'}</span>
+                      <span>{j.dailySent}/{j.dailyTarget || '—'} enviadas · {j.dailyReceived} recebidas</span>
+                    </div>
+                    <div className="w-full bg-gray-700 rounded-full h-1.5">
+                      <div className={`h-1.5 rounded-full transition-all ${done ? 'bg-green-500' : 'bg-indigo-500'}`}
+                        style={{ width: `${pct}%` }} />
+                    </div>
+                    {isExpanded && (
+                      <div className="mt-2 space-y-1">
+                        {historyDays.map(([date, h]) => (
+                          <div key={date} className="flex items-center justify-between text-[11px] bg-gray-800 border border-gray-700 rounded px-2 py-1">
+                            <span className="text-gray-400">Dia {h.day} <span className="text-gray-600">— {fmtDay(date)}</span></span>
+                            <span className={h.sent >= h.target ? 'text-green-400' : 'text-gray-300'}>
+                              {h.sent}/{h.target} enviadas · {h.received} recebidas {h.sent >= h.target ? '✓' : ''}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                ))}
-              </div>
+                )
+              })}
             </div>
           )}
       </div>
@@ -1431,6 +1452,7 @@ function WuzapiMaturadorTab() {
       {showSettings && (
         <WuzapiMaturadorSettingsModal
           settings={journeySettings}
+          instances={instances}
           onSave={saveJourneySettings}
           onClose={() => setShowSettings(false)}
         />
@@ -1440,15 +1462,19 @@ function WuzapiMaturadorTab() {
 }
 
 function WuzapiMaturadorSettingsModal({
-  settings, onSave, onClose
-}: { settings: MaturadorSettings; onSave: (s: MaturadorSettings) => void; onClose: () => void }) {
+  settings, instances, onSave, onClose
+}: { settings: MaturadorSettings; instances: WuzapiInstance[]; onSave: (s: MaturadorSettings) => void; onClose: () => void }) {
   const [days, setDays] = useState<MaturadorDaySettings[]>(
     Array.from({ length: 10 }, (_, i) => ({ ...(settings.days?.[i] || DEFAULT_MATURADOR_DAYS[i]) }))
   )
-  const [participantsCount, setParticipantsCount] = useState(settings.participantsCount)
+  const [participantInstances, setParticipantInstances] = useState<string[]>(settings.participantInstances || [])
 
   function updateDay(i: number, patch: Partial<MaturadorDaySettings>) {
     setDays(prev => prev.map((d, idx) => idx === i ? { ...d, ...patch } : d))
+  }
+
+  function toggleParticipant(name: string) {
+    setParticipantInstances(prev => prev.includes(name) ? prev.filter(n => n !== name) : [...prev, name])
   }
 
   function save() {
@@ -1458,8 +1484,7 @@ function WuzapiMaturadorSettingsModal({
       if (d.receiveMin < 0 || d.receiveMax < d.receiveMin) return alert(`Dia ${i + 1}: a meta de recebimento precisa ter máximo ≥ mínimo.`)
       if (d.partners < 1) return alert(`Dia ${i + 1}: cada canal precisa de pelo menos 1 parceiro fixo.`)
     }
-    if (participantsCount < 0) return alert('A quantidade de contatos participantes não pode ser negativa.')
-    onSave({ days, participantsCount })
+    onSave({ days, participantInstances })
   }
 
   return (
@@ -1519,10 +1544,32 @@ function WuzapiMaturadorSettingsModal({
         </div>
 
         <div>
-          <label className="block text-xs text-gray-400 mb-1.5">Contatos conectados que interagem por dia</label>
-          <input type="number" min={0} value={participantsCount} onChange={e => setParticipantsCount(+e.target.value)}
-            className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white text-center focus:outline-none focus:border-green-500" />
-          <p className="text-xs text-gray-500 mt-1">Quantas das instâncias conectadas/selecionadas participam da jornada no dia — deixe 0 para usar todas.</p>
+          <label className="block text-xs text-gray-400 mb-1.5">Números que participam da jornada</label>
+          {instances.length === 0 ? (
+            <p className="text-xs text-gray-600">Nenhuma instância Wuzapi cadastrada ainda.</p>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {instances.map(inst => {
+                const sel = participantInstances.includes(inst.name)
+                const label = inst.label || inst.name
+                return (
+                  <button key={inst.name} type="button" onClick={() => toggleParticipant(inst.name)}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+                      sel
+                        ? 'bg-green-900/40 border-green-600 text-green-300'
+                        : inst.status === 'connected'
+                        ? 'bg-gray-700 border-gray-600 text-gray-400 hover:border-gray-500 hover:text-gray-200'
+                        : 'bg-gray-900 border-gray-800 text-gray-600'
+                    }`}>
+                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${inst.status === 'connected' ? 'bg-green-400' : 'bg-gray-600'}`} />
+                    {label}
+                    {sel && <span className="text-green-400 ml-0.5">✓</span>}
+                  </button>
+                )
+              })}
+            </div>
+          )}
+          <p className="text-xs text-gray-500 mt-1.5">Escolha quais números entram na jornada — nenhum selecionado usa todos os conectados/selecionados ao iniciar.</p>
         </div>
 
         <div className="flex justify-end gap-2">

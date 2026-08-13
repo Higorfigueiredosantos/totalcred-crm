@@ -601,16 +601,18 @@ const MATURADOR_IMAGE_CHANCE = 0.20
 
 // ── Configurações da jornada de aquecimento (editáveis pelo usuário, via
 // engrenagem na tela) ───────────────────────────────────────────────────────
-// A jornada tem 10 dias, cada um com sua própria meta (dia 11+ repete a meta
-// do dia 10). Por dia: sendMin/sendMax — quantas mensagens no total o pool de
-// instâncias deve trocar; receiveMin/receiveMax — quantas mensagens cada
-// instância participante deve *receber* no dia (o maturador prioriza como
-// destinatário quem ainda não bateu o mínimo, depois quem ainda não bateu o
-// máximo, e só ignora a cota se todo mundo já bateu o máximo, pra não travar
-// o envio); partners — quantos parceiros fixos cada canal deve ter até esse
-// dia (ver findMaturadorPartners abaixo). participantsCount (fora do array de
-// dias): quantas das instâncias conectadas/selecionadas devem de fato
-// participar da jornada — 0 (ou ≥ ao total de conectadas) usa todas.
+// Cada número tem sua própria jornada de 10 dias (ver maturadorData.journeys
+// abaixo) — o dia 1 começa na primeira vez que o número participa, então
+// números adicionados depois começam do zero mesmo que os outros já estejam
+// mais avançados. Por dia: sendMin/sendMax — quantas mensagens esse número
+// deve enviar; receiveMin/receiveMax — quantas mensagens esse número deve
+// *receber* no dia (o maturador prioriza como destinatário quem ainda não
+// bateu o mínimo, depois quem ainda não bateu o máximo, e só ignora a cota se
+// todo mundo já bateu o máximo, pra não travar o envio); partners — quantos
+// parceiros fixos esse número deve ter até esse dia (ver growMaturadorPartners
+// abaixo). participantInstances (fora do array de dias): nomes das instâncias
+// que participam da jornada — vazio usa todas as conectadas/selecionadas ao
+// iniciar o maturador.
 const MATURADOR_JOURNEY_DAYS = 10
 const DEFAULT_MATURADOR_DAYS = [
   { sendMin: 5, sendMax: 10, receiveMin: 3, receiveMax: 6, partners: 1 },
@@ -624,7 +626,7 @@ const DEFAULT_MATURADOR_DAYS = [
   { sendMin: 25, sendMax: 33, receiveMin: 16, receiveMax: 22, partners: 5 },
   { sendMin: 25, sendMax: 35, receiveMin: 18, receiveMax: 25, partners: 5 },
 ]
-const DEFAULT_MATURADOR_SETTINGS = { days: DEFAULT_MATURADOR_DAYS.map(d => ({ ...d })), participantsCount: 0 }
+const DEFAULT_MATURADOR_SETTINGS = { days: DEFAULT_MATURADOR_DAYS.map(d => ({ ...d })), participantInstances: [] }
 
 function numOr(val, fallback) {
   const n = Number(val)
@@ -644,20 +646,27 @@ function sanitizeMaturadorDays(days, fallbackDays) {
   return Array.from({ length: MATURADOR_JOURNEY_DAYS }, (_, i) => sanitizeMaturadorDay(days?.[i], fallbackDays[i]))
 }
 
+function sanitizeParticipantInstances(list) {
+  if (!Array.isArray(list)) return []
+  return [...new Set(list.filter(n => typeof n === 'string' && n))]
+}
+
 function loadMaturadorSettings() {
   try {
     if (fs.existsSync(MATURADOR_SETTINGS_FILE)) {
       const raw = JSON.parse(fs.readFileSync(MATURADOR_SETTINGS_FILE, 'utf8'))
       // Compatibilidade com o formato antigo (sem array de dias — uma meta
       // única pra jornada toda): usa os valores antigos como base do dia 1 e
-      // deixa o crescimento padrão nos demais dias.
+      // deixa o crescimento padrão nos demais dias. O antigo participantsCount
+      // (quantidade aleatória) não tem equivalente direto na seleção nomeada,
+      // então vira lista vazia (= todas participam).
       const legacyDay = ('sendMin' in raw && !raw.days) ? { ...DEFAULT_MATURADOR_DAYS[0], ...raw } : null
       const days = sanitizeMaturadorDays(raw.days, legacyDay ? [legacyDay, ...DEFAULT_MATURADOR_DAYS.slice(1)] : DEFAULT_MATURADOR_DAYS)
-      const participantsCount = Math.max(0, Math.round(Number(raw.participantsCount)) || 0)
-      return { days, participantsCount }
+      const participantInstances = sanitizeParticipantInstances(raw.participantInstances)
+      return { days, participantInstances }
     }
   } catch (e) {}
-  return { days: DEFAULT_MATURADOR_DAYS.map(d => ({ ...d })), participantsCount: 0 }
+  return { days: DEFAULT_MATURADOR_DAYS.map(d => ({ ...d })), participantInstances: [] }
 }
 
 function saveMaturadorSettingsFile() {
@@ -682,8 +691,10 @@ function getMaturadorDaySettings(dayIndex) {
 
 function setMaturadorSettings(patch = {}) {
   const days = patch.days ? sanitizeMaturadorDays(patch.days, maturadorSettings.days) : maturadorSettings.days
-  const participantsCount = Math.max(0, Math.round(numOr(patch.participantsCount, maturadorSettings.participantsCount)))
-  maturadorSettings = { days, participantsCount }
+  const participantInstances = patch.participantInstances !== undefined
+    ? sanitizeParticipantInstances(patch.participantInstances)
+    : maturadorSettings.participantInstances
+  maturadorSettings = { days, participantInstances }
   saveMaturadorSettingsFile()
   return maturadorSettings
 }
@@ -701,81 +712,74 @@ function loadMaturadorJourney() {
   try {
     if (fs.existsSync(MATURADOR_JOURNEY_FILE)) {
       const raw = JSON.parse(fs.readFileSync(MATURADOR_JOURNEY_FILE, 'utf8'))
-      return { partners: {}, ...raw }
+      // Formato antigo era uma única jornada pro pool todo (tinha "dayIndex"
+      // na raiz) — não dá pra migrar 1:1 pra jornada por número, então cada
+      // instância recomeça do dia 1 (só os parceiros fixos já formados são
+      // preservados, se existirem).
+      if ('dayIndex' in raw) return { journeys: {}, partners: raw.partners || {} }
+      return { journeys: raw.journeys || {}, partners: raw.partners || {} }
     }
   } catch (e) {}
-  return { dayIndex: 0, dailyTarget: 0, dailySent: 0, lastActiveDate: null, startDate: null, history: {}, receiveCounts: {}, participantsToday: [], partners: {} }
+  return { journeys: {}, partners: {} }
 }
 
 function saveMaturadorJourney() {
   try {
     ensureDataDir()
-    fs.writeFileSync(MATURADOR_JOURNEY_FILE, JSON.stringify(maturadorJourney, null, 2))
+    fs.writeFileSync(MATURADOR_JOURNEY_FILE, JSON.stringify(maturadorData, null, 2))
   } catch (e) { console.error('[Wuzapi] Erro ao salvar jornada do maturador:', e.message) }
 }
 
-let maturadorJourney = loadMaturadorJourney()
+// maturadorData.journeys: uma jornada de aquecimento independente por número
+// (nome da instância) — cada uma com seu próprio dia 1..10, criada na
+// primeira vez que o número participa. maturadorData.partners: grafo de
+// parceiros fixos entre números, compartilhado por todos.
+let maturadorData = loadMaturadorJourney()
 
-// Escolhe, dentre as instâncias prontas, quais participam do dia — respeita
-// participantsCount (0 ou >= total = todas participam).
-function pickDailyParticipants(readyNames) {
-  const count = maturadorSettings.participantsCount
-  if (!count || count >= readyNames.length) return [...readyNames]
-  const pool = [...readyNames]
-  const picked = []
-  while (picked.length < count && pool.length) {
-    const idx = Math.floor(Math.random() * pool.length)
-    picked.push(pool.splice(idx, 1)[0])
-  }
-  return picked
+// Garante a jornada do dia pra uma instância: cria na primeira vez, ou avança
+// pro próximo dia se a data mudou desde a última vez que essa instância
+// participou. Idempotente dentro do mesmo dia calendário.
+function ensureInstanceJourneyDay(name) {
+  const today = todayKey()
+  let j = maturadorData.journeys[name]
+  if (j && j.lastActiveDate === today) return { journey: j, isNewDay: false }
+
+  if (!j) j = maturadorData.journeys[name] = { dayIndex: 0, dailyTarget: 0, dailySent: 0, dailyReceived: 0, lastActiveDate: null, startDate: null, history: {} }
+  j.dayIndex = j.lastActiveDate ? j.dayIndex + 1 : 1
+  const daySettings = getMaturadorDaySettings(j.dayIndex)
+  j.dailyTarget = randomInt(daySettings.sendMin, daySettings.sendMax)
+  j.dailySent = 0
+  j.dailyReceived = 0
+  j.lastActiveDate = today
+  if (!j.startDate) j.startDate = today
+  j.history[today] = { day: j.dayIndex, target: j.dailyTarget, sent: 0, received: 0 }
+  return { journey: j, isNewDay: true }
 }
 
-// Forma/cresce os pares fixos entre os participantes do dia: cada canal só
-// troca mensagens com os parceiros que já tem (nunca perde um parceiro
-// antigo), e ganha parceiros novos aos poucos até atingir targetDegree —
-// assim "o número que um canal chama" é sempre o mesmo que troca mensagens
-// com ele, o que deixa o padrão de conversa mais parecido com uso real.
-function growMaturadorPartners(participants, targetDegree) {
-  const partners = maturadorJourney.partners || (maturadorJourney.partners = {})
+// Forma/cresce os pares fixos entre os participantes: cada canal só troca
+// mensagens com os parceiros que já tem (nunca perde um parceiro antigo), e
+// ganha parceiros novos aos poucos até atingir a meta de parceiros do seu
+// próprio dia (targetDegreeByName) — assim "o número que um canal chama" é
+// sempre o mesmo que troca mensagens com ele, o que deixa o padrão de
+// conversa mais parecido com uso real. Como cada número tem sua própria
+// jornada, a meta de parceiros pode ser diferente pra cada lado do par.
+function growMaturadorPartners(participants, targetDegreeByName) {
+  const partners = maturadorData.partners || (maturadorData.partners = {})
   participants.forEach(p => { if (!partners[p]) partners[p] = [] })
 
-  let needMore = participants.filter(p => partners[p].length < targetDegree)
+  let needMore = participants.filter(p => partners[p].length < targetDegreeByName[p])
   let guard = 0
   while (needMore.length >= 2 && guard < 1000) {
     guard++
     const aIdx = Math.floor(Math.random() * needMore.length)
     const a = needMore[aIdx]
-    const candidates = participants.filter(b => b !== a && !partners[a].includes(b) && partners[b].length < targetDegree)
+    const candidates = participants.filter(b => b !== a && !partners[a].includes(b) && partners[b].length < targetDegreeByName[b])
     if (!candidates.length) { needMore.splice(aIdx, 1); continue }
     const b = candidates[Math.floor(Math.random() * candidates.length)]
     partners[a].push(b)
     partners[b].push(a)
-    needMore = participants.filter(p => partners[p].length < targetDegree)
+    needMore = participants.filter(p => partners[p].length < targetDegreeByName[p])
   }
-}
-
-// Roda um dia novo na jornada se o dia ativo anterior já foi encerrado (ou é
-// a primeira vez). Retorna true se um dia novo começou agora.
-async function ensureMaturadorJourneyDay() {
-  const today = todayKey()
-  if (maturadorJourney.lastActiveDate === today) return false
-
-  maturadorJourney.dayIndex = maturadorJourney.lastActiveDate ? maturadorJourney.dayIndex + 1 : 1
-  const daySettings = getMaturadorDaySettings(maturadorJourney.dayIndex)
-  maturadorJourney.dailyTarget = randomInt(daySettings.sendMin, daySettings.sendMax)
-  maturadorJourney.dailySent = 0
-  maturadorJourney.receiveCounts = {}
-  maturadorJourney.lastActiveDate = today
-  if (!maturadorJourney.startDate) maturadorJourney.startDate = today
-  maturadorJourney.history[today] = { day: maturadorJourney.dayIndex, target: maturadorJourney.dailyTarget, sent: 0 }
-
-  const ready = await getReadyMaturadorInstances(maturadorState.instanceNames)
-  maturadorJourney.participantsToday = pickDailyParticipants(ready.map(r => r.name))
-  growMaturadorPartners(maturadorJourney.participantsToday, daySettings.partners)
-
-  saveMaturadorJourney()
-  _broadcast('wuzapi_maturador', { type: 'day_started', day: maturadorJourney.dayIndex, target: maturadorJourney.dailyTarget, date: today })
-  return true
 }
 
 // Enquanto a meta do dia já foi batida, só verifica de tempos em tempos se
@@ -812,56 +816,80 @@ async function getReadyMaturadorInstances(names) {
     .filter(i => i.phone)
 }
 
+// Dos números prontos (conectados e dentro do pool escolhido ao iniciar),
+// filtra pra quem está marcado em participantInstances — vazio usa todos.
+function selectJourneyParticipants(readyAll) {
+  const selected = maturadorSettings.participantInstances
+  if (!selected || !selected.length) return readyAll
+  return readyAll.filter(r => selected.includes(r.name))
+}
+
 async function runMaturadorLoop(minDelay, maxDelay) {
   if (!maturadorState.running) return
 
-  await ensureMaturadorJourneyDay()
+  const readyAll = await getReadyMaturadorInstances(maturadorState.instanceNames)
+  const ready = selectJourneyParticipants(readyAll)
 
-  // Meta do dia já batida — não manda mais nada, só espera virar o dia
-  // (checando de tempos em tempos, sem bater na API do wuzapi à toa).
-  if (maturadorJourney.dailySent >= maturadorJourney.dailyTarget) {
-    if (!maturadorState.dayQuotaReached) {
-      maturadorState.dayQuotaReached = true
-      _broadcast('wuzapi_maturador', {
-        type: 'day_complete', day: maturadorJourney.dayIndex,
-        target: maturadorJourney.dailyTarget, sent: maturadorJourney.dailySent,
-      })
-    }
-    maturadorState.timer = setTimeout(() => runMaturadorLoop(minDelay, maxDelay), MATURADOR_DAY_CHECK_MS)
+  if (ready.length < 2) {
+    _broadcast('wuzapi_maturador', { type: 'waiting', message: '⚠️ Aguardando pelo menos 2 instâncias Wuzapi conectadas...' })
+    if (!maturadorState.running) return
+    const waitDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay
+    maturadorState.timer = setTimeout(() => runMaturadorLoop(minDelay, maxDelay), waitDelay * 1000)
     return
   }
-  maturadorState.dayQuotaReached = false
 
-  const readyAll = await getReadyMaturadorInstances(maturadorState.instanceNames)
-  const participants = maturadorJourney.participantsToday && maturadorJourney.participantsToday.length
-    ? maturadorJourney.participantsToday
-    : readyAll.map(r => r.name)
-  const ready = readyAll.filter(r => participants.includes(r.name))
+  // Garante (cria ou avança) a jornada de hoje de cada número pronto — cada
+  // um no seu próprio ritmo, começando do dia 1 na primeira vez que participa.
+  const journeysByName = {}
+  ready.forEach(r => {
+    const { journey, isNewDay } = ensureInstanceJourneyDay(r.name)
+    journeysByName[r.name] = journey
+    if (isNewDay) _broadcast('wuzapi_maturador', { type: 'day_started', instanceName: r.name, day: journey.dayIndex, target: journey.dailyTarget })
+  })
 
-  // Salvaguarda: garante que os parceiros do dia existem mesmo se a jornada
-  // já estava em andamento quando essa configuração foi habilitada (não
-  // espera virar o dia pra formar os pares). Idempotente — não faz nada se
-  // todo mundo já está na meta de parceiros do dia.
-  const daySettings = getMaturadorDaySettings(maturadorJourney.dayIndex)
-  growMaturadorPartners(participants, daySettings.partners)
+  // Cresce os pares fixos conforme a meta de parceiros do dia de cada número
+  // (pode ser diferente pra cada lado, já que cada um tem sua própria jornada).
+  const targetDegreeByName = {}
+  ready.forEach(r => { targetDegreeByName[r.name] = getMaturadorDaySettings(journeysByName[r.name].dayIndex).partners })
+  growMaturadorPartners(ready.map(r => r.name), targetDegreeByName)
+  saveMaturadorJourney()
 
   const readyNames = new Set(ready.map(r => r.name))
-  const sendersWithPartner = ready.filter(r => (maturadorJourney.partners[r.name] || []).some(p => readyNames.has(p)))
+  const eligibleSenders = ready.filter(r => {
+    if (journeysByName[r.name].dailySent >= journeysByName[r.name].dailyTarget) return false
+    return (maturadorData.partners[r.name] || []).some(p => readyNames.has(p))
+  })
 
-  if (sendersWithPartner.length >= 1) {
-    const sender = sendersWithPartner[Math.floor(Math.random() * sendersWithPartner.length)]
-    const partnerNames = maturadorJourney.partners[sender.name].filter(p => readyNames.has(p))
+  if (!eligibleSenders.length) {
+    const allDone = ready.every(r => journeysByName[r.name].dailySent >= journeysByName[r.name].dailyTarget)
+    if (allDone) {
+      if (!maturadorState.dayQuotaReached) {
+        maturadorState.dayQuotaReached = true
+        _broadcast('wuzapi_maturador', { type: 'day_complete' })
+      }
+      maturadorState.timer = setTimeout(() => runMaturadorLoop(minDelay, maxDelay), MATURADOR_DAY_CHECK_MS)
+      return
+    }
+    maturadorState.dayQuotaReached = false
+    _broadcast('wuzapi_maturador', { type: 'waiting', message: '⚠️ Nenhum parceiro fixo conectado hoje ainda — aguardando.' })
+  } else {
+    maturadorState.dayQuotaReached = false
+    const sender = eligibleSenders[Math.floor(Math.random() * eligibleSenders.length)]
+    const senderJourney = journeysByName[sender.name]
+    const partnerNames = (maturadorData.partners[sender.name] || []).filter(p => readyNames.has(p))
 
     // Escolhe o destinatário (sempre um dos parceiros fixos do remetente)
-    // priorizando quem ainda não bateu a cota mínima de recebimento do dia,
-    // depois quem ainda não bateu a cota máxima, e só ignora a cota se todo
-    // mundo já estiver no máximo (não trava o envio).
-    const receiveCounts = maturadorJourney.receiveCounts || (maturadorJourney.receiveCounts = {})
+    // priorizando quem ainda não bateu a cota mínima de recebimento do
+    // *próprio dia dele*, depois quem ainda não bateu a cota máxima, e só
+    // ignora a cota se todo mundo já estiver no máximo (não trava o envio).
     const others = ready.filter(r => partnerNames.includes(r.name))
-    let candidates = others.filter(r => (receiveCounts[r.name] || 0) < daySettings.receiveMin)
-    if (!candidates.length) candidates = others.filter(r => (receiveCounts[r.name] || 0) < daySettings.receiveMax)
+    const belowMin = (r) => journeysByName[r.name].dailyReceived < getMaturadorDaySettings(journeysByName[r.name].dayIndex).receiveMin
+    const belowMax = (r) => journeysByName[r.name].dailyReceived < getMaturadorDaySettings(journeysByName[r.name].dayIndex).receiveMax
+    let candidates = others.filter(belowMin)
+    if (!candidates.length) candidates = others.filter(belowMax)
     if (!candidates.length) candidates = others
     const receiver = candidates[Math.floor(Math.random() * candidates.length)]
+    const receiverJourney = journeysByName[receiver.name]
 
     try {
       const images = maturadorState.mediaEnabled ? safeReadDir(MATURADOR_IMAGES_DIR) : []
@@ -890,22 +918,19 @@ async function runMaturadorLoop(minDelay, maxDelay) {
       }
 
       maturadorState.msgCount++
-      maturadorJourney.dailySent++
-      receiveCounts[receiver.name] = (receiveCounts[receiver.name] || 0) + 1
-      maturadorJourney.history[maturadorJourney.lastActiveDate].sent = maturadorJourney.dailySent
+      senderJourney.dailySent++
+      receiverJourney.dailyReceived++
+      senderJourney.history[senderJourney.lastActiveDate].sent = senderJourney.dailySent
+      receiverJourney.history[receiverJourney.lastActiveDate].received = receiverJourney.dailyReceived
       saveMaturadorJourney()
       _broadcast('wuzapi_maturador', {
         type: 'log', from: sender.name, to: receiver.name, toNumber: receiver.phone, msgType, message, fileName, ts: Date.now(),
-        day: maturadorJourney.dayIndex, dailyTarget: maturadorJourney.dailyTarget, dailySent: maturadorJourney.dailySent,
+        senderDay: senderJourney.dayIndex, senderTarget: senderJourney.dailyTarget, senderSent: senderJourney.dailySent,
+        receiverDay: receiverJourney.dayIndex, receiverReceived: receiverJourney.dailyReceived,
       })
     } catch (e) {
       _broadcast('wuzapi_maturador', { type: 'error', instanceName: sender.name, error: e?.response?.data?.error || e.message })
     }
-  } else {
-    const message = ready.length < 2
-      ? '⚠️ Aguardando pelo menos 2 instâncias Wuzapi conectadas...'
-      : '⚠️ Nenhum parceiro fixo conectado hoje ainda — aguardando.'
-    _broadcast('wuzapi_maturador', { type: 'waiting', message })
   }
 
   if (!maturadorState.running) return
@@ -946,15 +971,10 @@ function getMaturadorStatus() {
     mediaEnabled: maturadorState.mediaEnabled,
     dayQuotaReached: maturadorState.dayQuotaReached,
     settings: maturadorSettings,
-    journey: {
-      dayIndex: maturadorJourney.dayIndex,
-      dailyTarget: maturadorJourney.dailyTarget,
-      dailySent: maturadorJourney.dailySent,
-      startDate: maturadorJourney.startDate,
-      history: maturadorJourney.history,
-      participantsToday: maturadorJourney.participantsToday || [],
-      partners: maturadorJourney.partners || {},
-    },
+    // Uma jornada por número (nome da instância) + o grafo de parceiros
+    // fixos, compartilhado entre todas.
+    journeys: maturadorData.journeys,
+    partners: maturadorData.partners,
   }
 }
 
