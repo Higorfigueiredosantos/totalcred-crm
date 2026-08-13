@@ -1217,7 +1217,6 @@ function WuzapiMaturadorTab() {
               </div>
             </div>
           )}
-        </div>
       </div>
 
       <MaturadorMediaLibrary />
