@@ -3,7 +3,7 @@ import {
   Wrench, Play, Square, Download, Search, CheckCircle, XCircle,
   Users, ExternalLink, MapPin, Phone, Building, RefreshCw, Upload, X,
   Bot, Plus, Trash2, Save, Power, Clock, MessageSquare, AlertCircle,
-  Image as ImageIcon, Mic,
+  Image as ImageIcon, Mic, Settings,
 } from 'lucide-react'
 import { onWSMessage } from '../api/websocket'
 import { useWuzapiInstances } from '../hooks/useWuzapiInstances'
@@ -100,7 +100,19 @@ type MaturadorJourney = {
   dailySent: number
   startDate: string | null
   history: Record<string, { day: number; target: number; sent: number }>
+  participantsToday?: string[]
 }
+
+// Configurações da jornada do maturador Wuzapi, ajustáveis pela engrenagem.
+type MaturadorSettings = {
+  sendMin: number
+  sendMax: number
+  receiveMin: number
+  receiveMax: number
+  participantsCount: number  // 0 = todas as instâncias conectadas/selecionadas
+}
+
+const DEFAULT_MATURADOR_SETTINGS: MaturadorSettings = { sendMin: 5, sendMax: 10, receiveMin: 5, receiveMax: 10, participantsCount: 0 }
 
 // Retorna data local no formato YYYY-MM-DD (não UTC)
 function localDateKey(): string {
@@ -775,9 +787,10 @@ function MaturadorTab() {
 // ── WUZAPI MATURADOR TAB ────────────────────────────────────────────────────────
 // Mesma lógica do maturador dos Chips, mas as instâncias e o envio passam
 // pela API do Wuzapi (BETA). Além disso tem uma "Jornada de Aquecimento" com
-// meta diária de mensagens controlada pelo backend (dia 1: 5–10 msgs, dia 2:
-// 7–13, dia 3: 12–16, dia 4: 14–17, dia 5: 15–23, dia 6+: 25–35) — assim que
-// a meta do dia é batida o maturador para sozinho até o dia seguinte.
+// meta diária de mensagens controlada pelo backend e configurável pela
+// engrenagem (quantas enviar/receber por dia, quantos contatos conectados
+// participam) — assim que a meta do dia é batida o maturador para sozinho
+// até o dia seguinte.
 
 function WuzapiMaturadorTab() {
   const { instances } = useWuzapiInstances()
@@ -796,6 +809,8 @@ function WuzapiMaturadorTab() {
   // Jornada de aquecimento (meta diária de mensagens — vem do backend)
   const [journey, setJourney] = useState<MaturadorJourney>({ dayIndex: 0, dailyTarget: 0, dailySent: 0, startDate: null, history: {} })
   const [dayQuotaReached, setDayQuotaReached] = useState(false)
+  const [journeySettings, setJourneySettings] = useState<MaturadorSettings>(DEFAULT_MATURADOR_SETTINGS)
+  const [showSettings, setShowSettings] = useState(false)
 
   // Canais no maturador: histórico de mensagens enviadas/recebidas por instância
   const [warmingDates, setWarmingDates] = useState<Record<string, WarmingEntry>>(() => {
@@ -825,6 +840,7 @@ function WuzapiMaturadorTab() {
     fetch('/api/wuzapi-maturador/status').then(r => r.json()).then((d: any) => {
       if (typeof d.mediaEnabled === 'boolean') setMediaEnabled(d.mediaEnabled)
       if (d.journey) setJourney(d.journey)
+      if (d.settings) setJourneySettings(d.settings)
       if (typeof d.dayQuotaReached === 'boolean') setDayQuotaReached(d.dayQuotaReached)
       if (d.running) {
         setStatus('running')
@@ -989,6 +1005,17 @@ function WuzapiMaturadorTab() {
     try { localStorage.removeItem('wuzapi_maturador_log') } catch {}
   }
 
+  async function saveJourneySettings(next: MaturadorSettings) {
+    const r = await fetch('/api/wuzapi-maturador/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(next)
+    })
+    const d = await r.json()
+    if (!r.ok) { alert(d.error); return }
+    setJourneySettings(d)
+    setShowSettings(false)
+  }
+
   function getInstanceLabel(name: string) {
     return instances.find(i => i.name === name)?.label || name
   }
@@ -1135,16 +1162,31 @@ function WuzapiMaturadorTab() {
       </div>
 
       {/* Jornada de Aquecimento — meta diária de mensagens */}
-      {journey.dayIndex > 0 && (
-        <div className="bg-gray-800 rounded-xl border border-gray-700 p-5 space-y-4">
+      <div className="bg-gray-800 rounded-xl border border-gray-700 p-5 space-y-4">
           <div className="flex items-center justify-between">
             <div>
               <h2 className="text-sm font-semibold text-white mb-1">Jornada de Aquecimento</h2>
-              <p className="text-xs text-gray-400">Meta diária de mensagens trocadas entre os canais — aumenta a cada dia.</p>
+              <p className="text-xs text-gray-400">
+                Meta diária de mensagens trocadas entre os canais
+                {journeySettings.participantsCount > 0 && ` — ${journeySettings.participantsCount} das conectadas participam por dia`}.
+              </p>
             </div>
-            <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-indigo-900/40 text-indigo-300 shrink-0">Dia {journey.dayIndex}</span>
+            <div className="flex items-center gap-2 shrink-0">
+              {journey.dayIndex > 0 && (
+                <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-indigo-900/40 text-indigo-300">Dia {journey.dayIndex}</span>
+              )}
+              <button onClick={() => setShowSettings(true)} title="Ajustar metas da jornada"
+                className="text-gray-500 hover:text-white p-1.5 rounded-lg hover:bg-gray-700 transition-colors">
+                <Settings size={15} />
+              </button>
+            </div>
           </div>
 
+          {journey.dayIndex === 0 && (
+            <p className="text-xs text-gray-500">A jornada começa assim que o maturador for iniciado. Ajuste as metas na engrenagem acima antes de começar, se quiser.</p>
+          )}
+
+          {journey.dayIndex > 0 && (
           <div>
             <div className="flex justify-between text-[11px] text-gray-500 mb-1.5">
               <span>{dayQuotaReached ? 'Meta de hoje atingida 🎉' : 'Enviando hoje...'}</span>
@@ -1158,6 +1200,7 @@ function WuzapiMaturadorTab() {
               <p className="text-[11px] text-green-400/80 mt-1.5">A jornada continua sozinha — aguardando o próximo dia para retomar os envios.</p>
             )}
           </div>
+          )}
 
           {journeyHistoryDays.length > 0 && (
             <div>
@@ -1175,7 +1218,7 @@ function WuzapiMaturadorTab() {
             </div>
           )}
         </div>
-      )}
+      </div>
 
       <MaturadorMediaLibrary />
 
@@ -1365,6 +1408,82 @@ function WuzapiMaturadorTab() {
           </div>
         </div>
       )}
+
+      {showSettings && (
+        <WuzapiMaturadorSettingsModal
+          settings={journeySettings}
+          onSave={saveJourneySettings}
+          onClose={() => setShowSettings(false)}
+        />
+      )}
+    </div>
+  )
+}
+
+function WuzapiMaturadorSettingsModal({
+  settings, onSave, onClose
+}: { settings: MaturadorSettings; onSave: (s: MaturadorSettings) => void; onClose: () => void }) {
+  const [sendMin, setSendMin] = useState(settings.sendMin)
+  const [sendMax, setSendMax] = useState(settings.sendMax)
+  const [receiveMin, setReceiveMin] = useState(settings.receiveMin)
+  const [receiveMax, setReceiveMax] = useState(settings.receiveMax)
+  const [participantsCount, setParticipantsCount] = useState(settings.participantsCount)
+
+  function save() {
+    if (sendMin < 1 || sendMax < sendMin) return alert('A meta de envio precisa ter mínimo ≥ 1 e máximo ≥ mínimo.')
+    if (receiveMin < 0 || receiveMax < receiveMin) return alert('A meta de recebimento precisa ter máximo ≥ mínimo.')
+    if (participantsCount < 0) return alert('A quantidade de contatos participantes não pode ser negativa.')
+    onSave({ sendMin, sendMax, receiveMin, receiveMax, participantsCount })
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+      <div className="bg-gray-800 rounded-xl border border-gray-700 p-6 w-full max-w-md space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-white flex items-center gap-2"><Settings size={15} /> Metas da Jornada</h2>
+          <button onClick={onClose} className="text-gray-500 hover:text-gray-300"><X size={16} /></button>
+        </div>
+
+        <div className="space-y-4">
+          <div>
+            <label className="block text-xs text-gray-400 mb-1.5">Mensagens enviadas por dia</label>
+            <div className="flex items-center gap-2">
+              <input type="number" min={1} value={sendMin} onChange={e => setSendMin(+e.target.value)}
+                className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white text-center focus:outline-none focus:border-green-500" />
+              <span className="text-xs text-gray-500 shrink-0">até</span>
+              <input type="number" min={1} value={sendMax} onChange={e => setSendMax(+e.target.value)}
+                className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white text-center focus:outline-none focus:border-green-500" />
+            </div>
+            <p className="text-xs text-gray-500 mt-1">Total de mensagens que o grupo troca por dia — um número aleatório dentro dessa faixa é sorteado a cada dia novo.</p>
+          </div>
+
+          <div>
+            <label className="block text-xs text-gray-400 mb-1.5">Mensagens recebidas por dia (por canal)</label>
+            <div className="flex items-center gap-2">
+              <input type="number" min={0} value={receiveMin} onChange={e => setReceiveMin(+e.target.value)}
+                className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white text-center focus:outline-none focus:border-green-500" />
+              <span className="text-xs text-gray-500 shrink-0">até</span>
+              <input type="number" min={0} value={receiveMax} onChange={e => setReceiveMax(+e.target.value)}
+                className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white text-center focus:outline-none focus:border-green-500" />
+            </div>
+            <p className="text-xs text-gray-500 mt-1">O maturador prioriza mandar mensagem pra quem ainda não recebeu o mínimo do dia, distribuindo entre os canais.</p>
+          </div>
+
+          <div>
+            <label className="block text-xs text-gray-400 mb-1.5">Contatos conectados que interagem por dia</label>
+            <input type="number" min={0} value={participantsCount} onChange={e => setParticipantsCount(+e.target.value)}
+              className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white text-center focus:outline-none focus:border-green-500" />
+            <p className="text-xs text-gray-500 mt-1">Quantas das instâncias conectadas/selecionadas participam da jornada no dia — deixe 0 para usar todas.</p>
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-2">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-white">Cancelar</button>
+          <button onClick={save} className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-500 text-white text-sm rounded-lg">
+            <Save size={14} /> Salvar
+          </button>
+        </div>
+      </div>
     </div>
   )
 }

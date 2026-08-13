@@ -20,6 +20,7 @@ const DATA_DIR = path.join(__dirname, 'data')
 const INSTANCES_FILE = path.join(DATA_DIR, 'wuzapi_instances.json')
 const HISTORY_FILE = path.join(DATA_DIR, 'wuzapi_campaigns_history.json')
 const MATURADOR_JOURNEY_FILE = path.join(DATA_DIR, 'wuzapi_maturador_journey.json')
+const MATURADOR_SETTINGS_FILE = path.join(DATA_DIR, 'wuzapi_maturador_settings.json')
 
 // Mesma biblioteca de fotos/áudios usada pelo maturador dos chips (whatsapp-web.js)
 // — um único lugar pra gerenciar mídia, reaproveitado pelos dois maturadores.
@@ -598,18 +599,47 @@ const maturadorPhrases = require('./maturadorPhrases')
 const MATURADOR_AUDIO_CHANCE = 0.15
 const MATURADOR_IMAGE_CHANCE = 0.20
 
-// ── Jornada de aquecimento (metas diárias de mensagens) ────────────────────
-// Dia 1: 5–10 msgs, dia 2: 7–13, dia 3: 12–16, dia 4: 14–17, dia 5: 15–23,
-// dia 6 em diante: 25–35. "Dia" aqui é dia ATIVO (em que o maturador de fato
-// rodou), não dia de calendário corrido — se ficar uma semana sem rodar, o
-// próximo dia ativo continua de onde parou, não pula dias.
-function maturadorDailyRange(day) {
-  if (day <= 1) return [5, 10]
-  if (day === 2) return [7, 13]
-  if (day === 3) return [12, 16]
-  if (day === 4) return [14, 17]
-  if (day === 5) return [15, 23]
-  return [25, 35]
+// ── Configurações da jornada de aquecimento (editáveis pelo usuário, via
+// engrenagem na tela) ───────────────────────────────────────────────────────
+// sendMin/sendMax: quantas mensagens no total o pool de instâncias deve
+// trocar por dia (a meta diária da jornada). receiveMin/receiveMax: quantas
+// mensagens cada instância participante deve *receber* no dia — o maturador
+// prioriza como destinatário quem ainda não bateu o mínimo, depois quem
+// ainda não bateu o máximo, e só ignora a cota se todo mundo já bateu o
+// máximo (pra não travar o envio). participantsCount: quantas das instâncias
+// conectadas/selecionadas devem de fato trocar mensagens no dia — 0 (ou ≥ ao
+// total de conectadas) usa todas.
+const DEFAULT_MATURADOR_SETTINGS = { sendMin: 5, sendMax: 10, receiveMin: 5, receiveMax: 10, participantsCount: 0 }
+
+function loadMaturadorSettings() {
+  try {
+    if (fs.existsSync(MATURADOR_SETTINGS_FILE)) return { ...DEFAULT_MATURADOR_SETTINGS, ...JSON.parse(fs.readFileSync(MATURADOR_SETTINGS_FILE, 'utf8')) }
+  } catch (e) {}
+  return { ...DEFAULT_MATURADOR_SETTINGS }
+}
+
+function saveMaturadorSettingsFile() {
+  try {
+    ensureDataDir()
+    fs.writeFileSync(MATURADOR_SETTINGS_FILE, JSON.stringify(maturadorSettings, null, 2))
+  } catch (e) { console.error('[Wuzapi] Erro ao salvar configurações do maturador:', e.message) }
+}
+
+let maturadorSettings = loadMaturadorSettings()
+
+function getMaturadorSettings() {
+  return maturadorSettings
+}
+
+function setMaturadorSettings(patch = {}) {
+  const sendMin = Math.max(1, Math.round(Number(patch.sendMin)) || maturadorSettings.sendMin)
+  const sendMax = Math.max(sendMin, Math.round(Number(patch.sendMax)) || maturadorSettings.sendMax)
+  const receiveMin = Math.max(0, Math.round(Number(patch.receiveMin) ?? maturadorSettings.receiveMin))
+  const receiveMax = Math.max(receiveMin, Math.round(Number(patch.receiveMax)) || maturadorSettings.receiveMax)
+  const participantsCount = Math.max(0, Math.round(Number(patch.participantsCount) ?? maturadorSettings.participantsCount))
+  maturadorSettings = { sendMin, sendMax, receiveMin, receiveMax, participantsCount }
+  saveMaturadorSettingsFile()
+  return maturadorSettings
 }
 
 function randomInt(min, max) {
@@ -625,7 +655,7 @@ function loadMaturadorJourney() {
   try {
     if (fs.existsSync(MATURADOR_JOURNEY_FILE)) return JSON.parse(fs.readFileSync(MATURADOR_JOURNEY_FILE, 'utf8'))
   } catch (e) {}
-  return { dayIndex: 0, dailyTarget: 0, dailySent: 0, lastActiveDate: null, startDate: null, history: {} }
+  return { dayIndex: 0, dailyTarget: 0, dailySent: 0, lastActiveDate: null, startDate: null, history: {}, receiveCounts: {}, participantsToday: [] }
 }
 
 function saveMaturadorJourney() {
@@ -637,19 +667,37 @@ function saveMaturadorJourney() {
 
 let maturadorJourney = loadMaturadorJourney()
 
+// Escolhe, dentre as instâncias prontas, quais participam do dia — respeita
+// participantsCount (0 ou >= total = todas participam).
+function pickDailyParticipants(readyNames) {
+  const count = maturadorSettings.participantsCount
+  if (!count || count >= readyNames.length) return [...readyNames]
+  const pool = [...readyNames]
+  const picked = []
+  while (picked.length < count && pool.length) {
+    const idx = Math.floor(Math.random() * pool.length)
+    picked.push(pool.splice(idx, 1)[0])
+  }
+  return picked
+}
+
 // Roda um dia novo na jornada se o dia ativo anterior já foi encerrado (ou é
 // a primeira vez). Retorna true se um dia novo começou agora.
-function ensureMaturadorJourneyDay() {
+async function ensureMaturadorJourneyDay() {
   const today = todayKey()
   if (maturadorJourney.lastActiveDate === today) return false
 
   maturadorJourney.dayIndex = maturadorJourney.lastActiveDate ? maturadorJourney.dayIndex + 1 : 1
-  const [min, max] = maturadorDailyRange(maturadorJourney.dayIndex)
-  maturadorJourney.dailyTarget = randomInt(min, max)
+  maturadorJourney.dailyTarget = randomInt(maturadorSettings.sendMin, maturadorSettings.sendMax)
   maturadorJourney.dailySent = 0
+  maturadorJourney.receiveCounts = {}
   maturadorJourney.lastActiveDate = today
   if (!maturadorJourney.startDate) maturadorJourney.startDate = today
   maturadorJourney.history[today] = { day: maturadorJourney.dayIndex, target: maturadorJourney.dailyTarget, sent: 0 }
+
+  const ready = await getReadyMaturadorInstances(maturadorState.instanceNames)
+  maturadorJourney.participantsToday = pickDailyParticipants(ready.map(r => r.name))
+
   saveMaturadorJourney()
   _broadcast('wuzapi_maturador', { type: 'day_started', day: maturadorJourney.dayIndex, target: maturadorJourney.dailyTarget, date: today })
   return true
@@ -692,7 +740,7 @@ async function getReadyMaturadorInstances(names) {
 async function runMaturadorLoop(minDelay, maxDelay) {
   if (!maturadorState.running) return
 
-  ensureMaturadorJourneyDay()
+  await ensureMaturadorJourneyDay()
 
   // Meta do dia já batida — não manda mais nada, só espera virar o dia
   // (checando de tempos em tempos, sem bater na API do wuzapi à toa).
@@ -709,14 +757,25 @@ async function runMaturadorLoop(minDelay, maxDelay) {
   }
   maturadorState.dayQuotaReached = false
 
-  const ready = await getReadyMaturadorInstances(maturadorState.instanceNames)
+  const readyAll = await getReadyMaturadorInstances(maturadorState.instanceNames)
+  const participants = maturadorJourney.participantsToday && maturadorJourney.participantsToday.length
+    ? maturadorJourney.participantsToday
+    : readyAll.map(r => r.name)
+  const ready = readyAll.filter(r => participants.includes(r.name))
 
   if (ready.length >= 2) {
     const senderIdx = Math.floor(Math.random() * ready.length)
-    let receiverIdx
-    do { receiverIdx = Math.floor(Math.random() * ready.length) } while (receiverIdx === senderIdx)
     const sender = ready[senderIdx]
-    const receiver = ready[receiverIdx]
+
+    // Escolhe o destinatário priorizando quem ainda não bateu a cota mínima
+    // de recebimento do dia, depois quem ainda não bateu a cota máxima, e só
+    // ignora a cota se todo mundo já estiver no máximo (não trava o envio).
+    const receiveCounts = maturadorJourney.receiveCounts || (maturadorJourney.receiveCounts = {})
+    const others = ready.filter((_, i) => i !== senderIdx)
+    let candidates = others.filter(r => (receiveCounts[r.name] || 0) < maturadorSettings.receiveMin)
+    if (!candidates.length) candidates = others.filter(r => (receiveCounts[r.name] || 0) < maturadorSettings.receiveMax)
+    if (!candidates.length) candidates = others
+    const receiver = candidates[Math.floor(Math.random() * candidates.length)]
 
     try {
       const images = maturadorState.mediaEnabled ? safeReadDir(MATURADOR_IMAGES_DIR) : []
@@ -746,6 +805,7 @@ async function runMaturadorLoop(minDelay, maxDelay) {
 
       maturadorState.msgCount++
       maturadorJourney.dailySent++
+      receiveCounts[receiver.name] = (receiveCounts[receiver.name] || 0) + 1
       maturadorJourney.history[maturadorJourney.lastActiveDate].sent = maturadorJourney.dailySent
       saveMaturadorJourney()
       _broadcast('wuzapi_maturador', {
@@ -796,12 +856,14 @@ function getMaturadorStatus() {
     maxDelay: maturadorState.maxDelay,
     mediaEnabled: maturadorState.mediaEnabled,
     dayQuotaReached: maturadorState.dayQuotaReached,
+    settings: maturadorSettings,
     journey: {
       dayIndex: maturadorJourney.dayIndex,
       dailyTarget: maturadorJourney.dailyTarget,
       dailySent: maturadorJourney.dailySent,
       startDate: maturadorJourney.startDate,
       history: maturadorJourney.history,
+      participantsToday: maturadorJourney.participantsToday || [],
     },
   }
 }
@@ -829,4 +891,6 @@ module.exports = {
   startMaturador,
   stopMaturador,
   getMaturadorStatus,
+  getMaturadorSettings,
+  setMaturadorSettings,
 }

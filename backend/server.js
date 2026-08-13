@@ -2119,6 +2119,18 @@ app.post('/api/wuzapi-maturador/stop', (_req, res) => {
   res.json({ ok: true })
 })
 
+app.get('/api/wuzapi-maturador/settings', (_req, res) => {
+  res.json(wuzapi.getMaturadorSettings())
+})
+
+app.post('/api/wuzapi-maturador/settings', (req, res) => {
+  try {
+    res.json(wuzapi.setMaturadorSettings(req.body || {}))
+  } catch (e) {
+    res.status(400).json({ error: e.message })
+  }
+})
+
 // ── Maturador Routes ──────────────────────────────────────────────────────────
 
 app.get('/api/maturador/status', (_req, res) => {
