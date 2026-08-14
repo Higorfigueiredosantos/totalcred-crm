@@ -682,9 +682,15 @@ const MATURADOR_BURST_GAP_MAX = 15
 // bateu o mínimo, depois quem ainda não bateu o máximo, e só ignora a cota se
 // todo mundo já bateu o máximo, pra não travar o envio); partners — quantos
 // parceiros fixos esse número deve ter até esse dia (ver growMaturadorPartners
-// abaixo). participantInstances (fora do array de dias): nomes das instâncias
-// que participam da jornada — vazio usa todas as conectadas/selecionadas ao
-// iniciar o maturador.
+// abaixo — só se aplica no modo "pairs", ver adiante). participantInstances
+// (fora do array de dias): nomes das instâncias que participam da jornada —
+// vazio usa todas as conectadas/selecionadas ao iniciar o maturador.
+// matrixInstances: nomes marcados como "número matriz" — só usado no modo
+// "hub" (ver runMaturadorLoop): números matriz são os únicos que iniciam
+// conversa (mandam mensagem) e não têm limite de envio/recebimento; os
+// demais só recebem, respeitando a cota (receiveMin/receiveMax) do dia
+// deles. O modo (pairs/hub) é escolhido ao iniciar o maturador, não é salvo
+// aqui nas configurações.
 const MATURADOR_JOURNEY_DAYS = 10
 const DEFAULT_MATURADOR_DAYS = [
   { sendMin: 5, sendMax: 10, receiveMin: 3, receiveMax: 6, partners: 1 },
@@ -698,7 +704,7 @@ const DEFAULT_MATURADOR_DAYS = [
   { sendMin: 25, sendMax: 33, receiveMin: 16, receiveMax: 22, partners: 5 },
   { sendMin: 25, sendMax: 35, receiveMin: 18, receiveMax: 25, partners: 5 },
 ]
-const DEFAULT_MATURADOR_SETTINGS = { days: DEFAULT_MATURADOR_DAYS.map(d => ({ ...d })), participantInstances: [] }
+const DEFAULT_MATURADOR_SETTINGS = { days: DEFAULT_MATURADOR_DAYS.map(d => ({ ...d })), participantInstances: [], matrixInstances: [] }
 
 function numOr(val, fallback) {
   const n = Number(val)
@@ -735,10 +741,11 @@ function loadMaturadorSettings() {
       const legacyDay = ('sendMin' in raw && !raw.days) ? { ...DEFAULT_MATURADOR_DAYS[0], ...raw } : null
       const days = sanitizeMaturadorDays(raw.days, legacyDay ? [legacyDay, ...DEFAULT_MATURADOR_DAYS.slice(1)] : DEFAULT_MATURADOR_DAYS)
       const participantInstances = sanitizeParticipantInstances(raw.participantInstances)
-      return { days, participantInstances }
+      const matrixInstances = sanitizeParticipantInstances(raw.matrixInstances)
+      return { days, participantInstances, matrixInstances }
     }
   } catch (e) {}
-  return { days: DEFAULT_MATURADOR_DAYS.map(d => ({ ...d })), participantInstances: [] }
+  return { days: DEFAULT_MATURADOR_DAYS.map(d => ({ ...d })), participantInstances: [], matrixInstances: [] }
 }
 
 function saveMaturadorSettingsFile() {
@@ -766,7 +773,10 @@ function setMaturadorSettings(patch = {}) {
   const participantInstances = patch.participantInstances !== undefined
     ? sanitizeParticipantInstances(patch.participantInstances)
     : maturadorSettings.participantInstances
-  maturadorSettings = { days, participantInstances }
+  const matrixInstances = patch.matrixInstances !== undefined
+    ? sanitizeParticipantInstances(patch.matrixInstances)
+    : maturadorSettings.matrixInstances
+  maturadorSettings = { days, participantInstances, matrixInstances }
   saveMaturadorSettingsFile()
   return maturadorSettings
 }
@@ -876,7 +886,7 @@ function phoneFromJid(jid) {
   return String(jid).split('@')[0].split(':')[0] || null
 }
 
-const maturadorState = { running: false, timer: null, instanceNames: [], minDelay: 60, maxDelay: 300, mediaEnabled: true, msgCount: 0, dayQuotaReached: false }
+const maturadorState = { running: false, timer: null, instanceNames: [], minDelay: 60, maxDelay: 300, mediaEnabled: true, msgCount: 0, dayQuotaReached: false, mode: 'pairs' }
 
 async function getReadyMaturadorInstances(names) {
   let all
@@ -894,6 +904,163 @@ function selectJourneyParticipants(readyAll) {
   const selected = maturadorSettings.participantInstances
   if (!selected || !selected.length) return readyAll
   return readyAll.filter(r => selected.includes(r.name))
+}
+
+// Manda uma mensagem (texto/imagem/áudio, sorteado) do sender pro receiver e
+// atualiza as duas jornadas. Retorna true em caso de sucesso, false se falhou
+// (já broadcasta o erro) — quem chama decide se para a rajada nesse caso.
+async function sendOneMaturadorMessage(sender, receiver, senderJourney, receiverJourney) {
+  try {
+    const images = maturadorState.mediaEnabled ? safeReadDir(MATURADOR_IMAGES_DIR) : []
+    const audios = maturadorState.mediaEnabled ? safeReadDir(MATURADOR_AUDIOS_DIR) : []
+    const roll = Math.random()
+
+    let msgType = 'text'
+    let message
+    let fileName
+
+    if (roll < MATURADOR_AUDIO_CHANCE && audios.length) {
+      fileName = audios[Math.floor(Math.random() * audios.length)]
+      const dataUri = fileToDataUri(path.join(MATURADOR_AUDIOS_DIR, fileName), 'audio/ogg; codecs=opus')
+      await sendAudio(sender.name, receiver.phone, dataUri)
+      msgType = 'audio'
+    } else if (roll < MATURADOR_AUDIO_CHANCE + MATURADOR_IMAGE_CHANCE && images.length) {
+      fileName = images[Math.floor(Math.random() * images.length)]
+      const ext = path.extname(fileName).toLowerCase()
+      const dataUri = fileToDataUri(path.join(MATURADOR_IMAGES_DIR, fileName), MIME_BY_EXT[ext] || 'image/jpeg')
+      message = Math.random() < 0.5 ? maturadorPhrases.pickShort() : undefined
+      await sendImage(sender.name, receiver.phone, dataUri, message)
+      msgType = 'image'
+    } else {
+      message = maturadorPhrases.pick(maturadorState.msgCount)
+      await sendText(sender.name, receiver.phone, message)
+    }
+
+    maturadorState.msgCount++
+    senderJourney.dailySent++
+    receiverJourney.dailyReceived++
+    senderJourney.history[senderJourney.lastActiveDate].sent = senderJourney.dailySent
+    receiverJourney.history[receiverJourney.lastActiveDate].received = receiverJourney.dailyReceived
+    saveMaturadorJourney()
+    _broadcast('wuzapi_maturador', {
+      type: 'log', from: sender.name, to: receiver.name, toNumber: receiver.phone, msgType, message, fileName, ts: Date.now(),
+      senderDay: senderJourney.dayIndex, senderTarget: senderJourney.dailyTarget, senderSent: senderJourney.dailySent,
+      receiverDay: receiverJourney.dayIndex, receiverReceived: receiverJourney.dailyReceived,
+    })
+    return true
+  } catch (e) {
+    _broadcast('wuzapi_maturador', { type: 'error', instanceName: sender.name, error: e?.response?.data?.error || e.message })
+    return false
+  }
+}
+
+// Modo "entre si": pares fixos entre todos os participantes (ver
+// growMaturadorPartners) — qualquer um pode enviar, dentro da cota do
+// próprio dia. Retorna true se todo mundo já bateu a meta de hoje.
+async function runMaturadorPairsTick(ready, readyNames, journeysByName) {
+  const targetDegreeByName = {}
+  ready.forEach(r => { targetDegreeByName[r.name] = getMaturadorDaySettings(journeysByName[r.name].dayIndex).partners })
+  growMaturadorPartners(ready.map(r => r.name), targetDegreeByName)
+
+  const eligibleSenders = ready.filter(r => {
+    if (journeysByName[r.name].dailySent >= journeysByName[r.name].dailyTarget) return false
+    return (maturadorData.partners[r.name] || []).some(p => readyNames.has(p))
+  })
+
+  if (!eligibleSenders.length) {
+    if (ready.every(r => journeysByName[r.name].dailySent >= journeysByName[r.name].dailyTarget)) return true
+    _broadcast('wuzapi_maturador', { type: 'waiting', message: '⚠️ Nenhum parceiro fixo conectado hoje ainda — aguardando.' })
+    return false
+  }
+
+  const sender = eligibleSenders[Math.floor(Math.random() * eligibleSenders.length)]
+  const senderJourney = journeysByName[sender.name]
+
+  // A primeira mensagem do dia de cada canal sai sozinha — só depois disso
+  // o maturador passa a poder mandar de 1 a 3 mensagens seguidas do mesmo
+  // remetente (com um intervalo curto entre elas), parecido com alguém
+  // digitando várias mensagens rápidas de verdade.
+  const remainingQuota = senderJourney.dailyTarget - senderJourney.dailySent
+  const burstSize = senderJourney.dailySent === 0 ? 1 : Math.min(randomInt(1, 3), remainingQuota)
+
+  for (let i = 0; i < burstSize; i++) {
+    if (!maturadorState.running) return false
+
+    // Escolhe o destinatário (sempre um dos parceiros fixos do remetente)
+    // priorizando quem ainda não bateu a cota mínima de recebimento do
+    // *próprio dia dele*, depois quem ainda não bateu a cota máxima, e só
+    // ignora a cota se todo mundo já estiver no máximo (não trava o envio).
+    const partnerNames = (maturadorData.partners[sender.name] || []).filter(p => readyNames.has(p))
+    if (!partnerNames.length) break
+    const others = ready.filter(r => partnerNames.includes(r.name))
+    const belowMin = (r) => journeysByName[r.name].dailyReceived < getMaturadorDaySettings(journeysByName[r.name].dayIndex).receiveMin
+    const belowMax = (r) => journeysByName[r.name].dailyReceived < getMaturadorDaySettings(journeysByName[r.name].dayIndex).receiveMax
+    let candidates = others.filter(belowMin)
+    if (!candidates.length) candidates = others.filter(belowMax)
+    if (!candidates.length) candidates = others
+    const receiver = candidates[Math.floor(Math.random() * candidates.length)]
+    const receiverJourney = journeysByName[receiver.name]
+
+    const ok = await sendOneMaturadorMessage(sender, receiver, senderJourney, receiverJourney)
+    if (!ok) break
+
+    if (senderJourney.dailySent >= senderJourney.dailyTarget) break
+    if (i < burstSize - 1) {
+      const gap = randomInt(MATURADOR_BURST_GAP_MIN, MATURADOR_BURST_GAP_MAX)
+      await new Promise(r => setTimeout(r, gap * 1000))
+    }
+  }
+  return false
+}
+
+// Modo "matriz": só os números marcados como matriz (settings.matrixInstances)
+// iniciam conversa — sempre mandando pra um número "receptor" (não-matriz).
+// Sem grafo de parceiros fixos (matriz fala com qualquer receptor). Matriz
+// não tem cota de envio nem de recebimento; a cota do dia (receiveMin/
+// receiveMax) vale só pro receptor. Retorna true se todos os receptores já
+// bateram a meta de hoje.
+async function runMaturadorHubTick(ready, journeysByName) {
+  const matrixSet = new Set(maturadorSettings.matrixInstances)
+  const matrixReady = ready.filter(r => matrixSet.has(r.name))
+  const regularReady = ready.filter(r => !matrixSet.has(r.name))
+
+  if (!matrixReady.length || !regularReady.length) {
+    _broadcast('wuzapi_maturador', { type: 'waiting', message: '⚠️ Selecione pelo menos 1 número matriz e 1 receptor (conectados) na engrenagem.' })
+    return false
+  }
+
+  const belowMin = (r) => journeysByName[r.name].dailyReceived < getMaturadorDaySettings(journeysByName[r.name].dayIndex).receiveMin
+  const belowMax = (r) => journeysByName[r.name].dailyReceived < getMaturadorDaySettings(journeysByName[r.name].dayIndex).receiveMax
+  const anyPending = () => regularReady.some(belowMax)
+
+  if (!anyPending()) return true
+
+  const sender = matrixReady[Math.floor(Math.random() * matrixReady.length)]
+  const senderJourney = journeysByName[sender.name]
+
+  // Matriz não tem limite de envio — só a primeira mensagem do dia sai
+  // sozinha, o resto pode ser rajada de 1 a 3 igual no modo "entre si".
+  const burstSize = senderJourney.dailySent === 0 ? 1 : randomInt(1, 3)
+
+  for (let i = 0; i < burstSize; i++) {
+    if (!maturadorState.running) return false
+
+    let candidates = regularReady.filter(belowMin)
+    if (!candidates.length) candidates = regularReady.filter(belowMax)
+    if (!candidates.length) break
+    const receiver = candidates[Math.floor(Math.random() * candidates.length)]
+    const receiverJourney = journeysByName[receiver.name]
+
+    const ok = await sendOneMaturadorMessage(sender, receiver, senderJourney, receiverJourney)
+    if (!ok) break
+
+    if (!anyPending()) break
+    if (i < burstSize - 1) {
+      const gap = randomInt(MATURADOR_BURST_GAP_MIN, MATURADOR_BURST_GAP_MAX)
+      await new Promise(r => setTimeout(r, gap * 1000))
+    }
+  }
+  return false
 }
 
 async function runMaturadorLoop(minDelay, maxDelay) {
@@ -918,119 +1085,31 @@ async function runMaturadorLoop(minDelay, maxDelay) {
     journeysByName[r.name] = journey
     if (isNewDay) _broadcast('wuzapi_maturador', { type: 'day_started', instanceName: r.name, day: journey.dayIndex, target: journey.dailyTarget })
   })
-
-  // Cresce os pares fixos conforme a meta de parceiros do dia de cada número
-  // (pode ser diferente pra cada lado, já que cada um tem sua própria jornada).
-  const targetDegreeByName = {}
-  ready.forEach(r => { targetDegreeByName[r.name] = getMaturadorDaySettings(journeysByName[r.name].dayIndex).partners })
-  growMaturadorPartners(ready.map(r => r.name), targetDegreeByName)
   saveMaturadorJourney()
 
   const readyNames = new Set(ready.map(r => r.name))
-  const eligibleSenders = ready.filter(r => {
-    if (journeysByName[r.name].dailySent >= journeysByName[r.name].dailyTarget) return false
-    return (maturadorData.partners[r.name] || []).some(p => readyNames.has(p))
-  })
-
-  if (!eligibleSenders.length) {
-    const allDone = ready.every(r => journeysByName[r.name].dailySent >= journeysByName[r.name].dailyTarget)
-    if (allDone) {
-      if (!maturadorState.dayQuotaReached) {
-        maturadorState.dayQuotaReached = true
-        _broadcast('wuzapi_maturador', { type: 'day_complete' })
-      }
-      maturadorState.timer = setTimeout(() => runMaturadorLoop(minDelay, maxDelay), MATURADOR_DAY_CHECK_MS)
-      return
-    }
-    maturadorState.dayQuotaReached = false
-    _broadcast('wuzapi_maturador', { type: 'waiting', message: '⚠️ Nenhum parceiro fixo conectado hoje ainda — aguardando.' })
-  } else {
-    maturadorState.dayQuotaReached = false
-    const sender = eligibleSenders[Math.floor(Math.random() * eligibleSenders.length)]
-    const senderJourney = journeysByName[sender.name]
-
-    // A primeira mensagem do dia de cada canal sai sozinha — só depois disso
-    // o maturador passa a poder mandar de 1 a 3 mensagens seguidas do mesmo
-    // remetente (com um intervalo curto entre elas), parecido com alguém
-    // digitando várias mensagens rápidas de verdade.
-    const remainingQuota = senderJourney.dailyTarget - senderJourney.dailySent
-    const burstSize = senderJourney.dailySent === 0 ? 1 : Math.min(randomInt(1, 3), remainingQuota)
-
-    for (let i = 0; i < burstSize; i++) {
-      if (!maturadorState.running) return
-
-      // Escolhe o destinatário (sempre um dos parceiros fixos do remetente)
-      // priorizando quem ainda não bateu a cota mínima de recebimento do
-      // *próprio dia dele*, depois quem ainda não bateu a cota máxima, e só
-      // ignora a cota se todo mundo já estiver no máximo (não trava o envio).
-      const partnerNames = (maturadorData.partners[sender.name] || []).filter(p => readyNames.has(p))
-      if (!partnerNames.length) break
-      const others = ready.filter(r => partnerNames.includes(r.name))
-      const belowMin = (r) => journeysByName[r.name].dailyReceived < getMaturadorDaySettings(journeysByName[r.name].dayIndex).receiveMin
-      const belowMax = (r) => journeysByName[r.name].dailyReceived < getMaturadorDaySettings(journeysByName[r.name].dayIndex).receiveMax
-      let candidates = others.filter(belowMin)
-      if (!candidates.length) candidates = others.filter(belowMax)
-      if (!candidates.length) candidates = others
-      const receiver = candidates[Math.floor(Math.random() * candidates.length)]
-      const receiverJourney = journeysByName[receiver.name]
-
-      try {
-        const images = maturadorState.mediaEnabled ? safeReadDir(MATURADOR_IMAGES_DIR) : []
-        const audios = maturadorState.mediaEnabled ? safeReadDir(MATURADOR_AUDIOS_DIR) : []
-        const roll = Math.random()
-
-        let msgType = 'text'
-        let message
-        let fileName
-
-        if (roll < MATURADOR_AUDIO_CHANCE && audios.length) {
-          fileName = audios[Math.floor(Math.random() * audios.length)]
-          const dataUri = fileToDataUri(path.join(MATURADOR_AUDIOS_DIR, fileName), 'audio/ogg; codecs=opus')
-          await sendAudio(sender.name, receiver.phone, dataUri)
-          msgType = 'audio'
-        } else if (roll < MATURADOR_AUDIO_CHANCE + MATURADOR_IMAGE_CHANCE && images.length) {
-          fileName = images[Math.floor(Math.random() * images.length)]
-          const ext = path.extname(fileName).toLowerCase()
-          const dataUri = fileToDataUri(path.join(MATURADOR_IMAGES_DIR, fileName), MIME_BY_EXT[ext] || 'image/jpeg')
-          message = Math.random() < 0.5 ? maturadorPhrases.pickShort() : undefined
-          await sendImage(sender.name, receiver.phone, dataUri, message)
-          msgType = 'image'
-        } else {
-          message = maturadorPhrases.pick(maturadorState.msgCount)
-          await sendText(sender.name, receiver.phone, message)
-        }
-
-        maturadorState.msgCount++
-        senderJourney.dailySent++
-        receiverJourney.dailyReceived++
-        senderJourney.history[senderJourney.lastActiveDate].sent = senderJourney.dailySent
-        receiverJourney.history[receiverJourney.lastActiveDate].received = receiverJourney.dailyReceived
-        saveMaturadorJourney()
-        _broadcast('wuzapi_maturador', {
-          type: 'log', from: sender.name, to: receiver.name, toNumber: receiver.phone, msgType, message, fileName, ts: Date.now(),
-          senderDay: senderJourney.dayIndex, senderTarget: senderJourney.dailyTarget, senderSent: senderJourney.dailySent,
-          receiverDay: receiverJourney.dayIndex, receiverReceived: receiverJourney.dailyReceived,
-        })
-      } catch (e) {
-        _broadcast('wuzapi_maturador', { type: 'error', instanceName: sender.name, error: e?.response?.data?.error || e.message })
-        break
-      }
-
-      if (senderJourney.dailySent >= senderJourney.dailyTarget) break
-      if (i < burstSize - 1) {
-        const gap = randomInt(MATURADOR_BURST_GAP_MIN, MATURADOR_BURST_GAP_MAX)
-        await new Promise(r => setTimeout(r, gap * 1000))
-      }
-    }
-  }
+  const allDone = maturadorState.mode === 'hub'
+    ? await runMaturadorHubTick(ready, journeysByName)
+    : await runMaturadorPairsTick(ready, readyNames, journeysByName)
 
   if (!maturadorState.running) return
+
+  if (allDone) {
+    if (!maturadorState.dayQuotaReached) {
+      maturadorState.dayQuotaReached = true
+      _broadcast('wuzapi_maturador', { type: 'day_complete' })
+    }
+    maturadorState.timer = setTimeout(() => runMaturadorLoop(minDelay, maxDelay), MATURADOR_DAY_CHECK_MS)
+    return
+  }
+  maturadorState.dayQuotaReached = false
+
   const delay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay
   _broadcast('wuzapi_maturador', { type: 'delay', seconds: delay })
   maturadorState.timer = setTimeout(() => runMaturadorLoop(minDelay, maxDelay), delay * 1000)
 }
 
-async function startMaturador({ instanceNames, minDelay, maxDelay, mediaEnabled } = {}) {
+async function startMaturador({ instanceNames, minDelay, maxDelay, mediaEnabled, mode } = {}) {
   const ready = await getReadyMaturadorInstances(instanceNames)
   if (ready.length < 2) throw new Error('Você precisa de pelo menos 2 instâncias Wuzapi conectadas para o maturador.')
 
@@ -1042,6 +1121,7 @@ async function startMaturador({ instanceNames, minDelay, maxDelay, mediaEnabled 
   maturadorState.maxDelay = max
   maturadorState.mediaEnabled = mediaEnabled !== false
   maturadorState.msgCount = 0
+  maturadorState.mode = mode === 'hub' ? 'hub' : 'pairs'
 
   _broadcast('wuzapi_maturador', { type: 'started' })
   runMaturadorLoop(min, max)
@@ -1080,6 +1160,7 @@ function getMaturadorStatus() {
     maxDelay: maturadorState.maxDelay,
     mediaEnabled: maturadorState.mediaEnabled,
     dayQuotaReached: maturadorState.dayQuotaReached,
+    mode: maturadorState.mode,
     settings: maturadorSettings,
     // Uma jornada por número (nome da instância) + o grafo de parceiros
     // fixos, compartilhado entre todas.

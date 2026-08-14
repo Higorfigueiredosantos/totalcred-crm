@@ -118,7 +118,14 @@ type MaturadorDaySettings = {
 type MaturadorSettings = {
   days: MaturadorDaySettings[]         // 10 posições, uma por dia da jornada
   participantInstances: string[]       // nomes das instâncias participantes — vazio = todas conectadas/selecionadas
+  matrixInstances: string[]            // nomes marcados como "número matriz" — só usado no modo Matriz
 }
+
+// Modo "entre si": pares fixos entre todos os participantes (o de sempre).
+// Modo "matriz": só os números matriz iniciam conversa, sempre com um
+// receptor — matriz não tem limite de envio/recebimento, a cota do dia vale
+// só pro receptor. Escolhido ao clicar em Iniciar (não fica salvo).
+type MaturadorMode = 'pairs' | 'hub'
 
 const DEFAULT_MATURADOR_DAYS: MaturadorDaySettings[] = [
   { sendMin: 5, sendMax: 10, receiveMin: 3, receiveMax: 6, partners: 1 },
@@ -133,7 +140,7 @@ const DEFAULT_MATURADOR_DAYS: MaturadorDaySettings[] = [
   { sendMin: 25, sendMax: 35, receiveMin: 18, receiveMax: 25, partners: 5 },
 ]
 
-const DEFAULT_MATURADOR_SETTINGS: MaturadorSettings = { days: DEFAULT_MATURADOR_DAYS.map(d => ({ ...d })), participantInstances: [] }
+const DEFAULT_MATURADOR_SETTINGS: MaturadorSettings = { days: DEFAULT_MATURADOR_DAYS.map(d => ({ ...d })), participantInstances: [], matrixInstances: [] }
 
 // Retorna data local no formato YYYY-MM-DD (não UTC)
 function localDateKey(): string {
@@ -826,6 +833,7 @@ function WuzapiMaturadorTab() {
   const logRef = useRef<HTMLDivElement>(null)
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [selectedInstances, setSelectedInstances] = useState<string[]>([])
+  const [mode, setMode] = useState<MaturadorMode>('pairs')
 
   // Jornada de aquecimento — uma por número (vem do backend)
   const [journeys, setJourneys] = useState<Record<string, MaturadorJourneyEntry>>({})
@@ -864,6 +872,7 @@ function WuzapiMaturadorTab() {
       if (d.journeys) setJourneys(d.journeys)
       if (d.settings) setJourneySettings(d.settings)
       if (typeof d.dayQuotaReached === 'boolean') setDayQuotaReached(d.dayQuotaReached)
+      if (d.mode === 'hub' || d.mode === 'pairs') setMode(d.mode)
       if (d.running) {
         setStatus('running')
         if (d.minDelay) setMinDelay(d.minDelay)
@@ -1006,9 +1015,12 @@ function WuzapiMaturadorTab() {
 
   async function start() {
     if (selectedInstances.length < 2) return alert('Selecione pelo menos 2 instâncias para iniciar o maturador.')
+    if (mode === 'hub' && !journeySettings.matrixInstances.length) {
+      return alert('Marque pelo menos um número matriz na engrenagem antes de iniciar no modo Matriz.')
+    }
     const r = await fetch('/api/wuzapi-maturador/start', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ minDelay, maxDelay, instanceNames: selectedInstances, mediaEnabled })
+      body: JSON.stringify({ minDelay, maxDelay, instanceNames: selectedInstances, mediaEnabled, mode })
     })
     const d = await r.json()
     if (!r.ok) { alert(d.error); return }
@@ -1026,7 +1038,7 @@ function WuzapiMaturadorTab() {
   async function resume() {
     const r = await fetch('/api/wuzapi-maturador/start', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ minDelay, maxDelay, instanceNames: selectedInstances, mediaEnabled })
+      body: JSON.stringify({ minDelay, maxDelay, instanceNames: selectedInstances, mediaEnabled, mode })
     })
     if (!r.ok) { const d = await r.json(); alert(d.error); return }
     setStatus('running')
@@ -1120,6 +1132,30 @@ function WuzapiMaturadorTab() {
           )}
           {connectedInstances.length > 0 && selectedInstances.length < 2 && (
             <p className="text-xs text-yellow-400/80 mt-1.5">⚠️ Selecione pelo menos 2 instâncias para iniciar</p>
+          )}
+        </div>
+
+        {/* Modo da jornada */}
+        <div>
+          <label className="block text-xs font-medium text-gray-400 mb-2">Modo da jornada</label>
+          <div className="flex gap-2">
+            <button type="button" disabled={running} onClick={() => setMode('pairs')}
+              className={`flex-1 text-left px-3 py-2 rounded-lg text-xs border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                mode === 'pairs' ? 'bg-green-900/40 border-green-600 text-green-300' : 'bg-gray-700 border-gray-600 text-gray-400 hover:border-gray-500 hover:text-gray-200'
+              }`}>
+              <span className="font-semibold block">Entre si</span>
+              <span className="text-[10px] opacity-80">Cada número troca mensagens com parceiros fixos que vão crescendo aos poucos.</span>
+            </button>
+            <button type="button" disabled={running} onClick={() => setMode('hub')}
+              className={`flex-1 text-left px-3 py-2 rounded-lg text-xs border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                mode === 'hub' ? 'bg-green-900/40 border-green-600 text-green-300' : 'bg-gray-700 border-gray-600 text-gray-400 hover:border-gray-500 hover:text-gray-200'
+              }`}>
+              <span className="font-semibold block">Matriz</span>
+              <span className="text-[10px] opacity-80">Só os números matriz (escolhidos na engrenagem) iniciam conversa com os demais — sem limite pra eles.</span>
+            </button>
+          </div>
+          {mode === 'hub' && !journeySettings.matrixInstances.length && (
+            <p className="text-xs text-yellow-400/80 mt-1.5">⚠️ Nenhum número matriz marcado ainda — ajuste na engrenagem abaixo antes de iniciar.</p>
           )}
         </div>
 
@@ -1227,14 +1263,18 @@ function WuzapiMaturadorTab() {
             <div className="space-y-3">
               {journeyNames.map(name => {
                 const j = journeys[name]
+                const isMatrix = journeySettings.matrixInstances.includes(name)
                 const pct = j.dailyTarget ? Math.min((j.dailySent / j.dailyTarget) * 100, 100) : 0
-                const done = j.dailyTarget > 0 && j.dailySent >= j.dailyTarget
+                const done = !isMatrix && j.dailyTarget > 0 && j.dailySent >= j.dailyTarget
                 const isExpanded = expandedJourney === name
                 const historyDays = Object.entries(j.history || {}).sort(([a], [b]) => b.localeCompare(a))
                 return (
                   <div key={name} className="bg-gray-900 rounded-lg border border-gray-700 p-3">
                     <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-xs font-semibold text-white">{getInstanceLabel(name)}</span>
+                      <span className="text-xs font-semibold text-white flex items-center gap-1.5">
+                        {getInstanceLabel(name)}
+                        {isMatrix && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-indigo-900/40 text-indigo-300">Matriz</span>}
+                      </span>
                       <div className="flex items-center gap-2">
                         <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-900/40 text-indigo-300">Dia {j.dayIndex}</span>
                         {historyDays.length > 0 && (
@@ -1249,13 +1289,15 @@ function WuzapiMaturadorTab() {
                       </div>
                     </div>
                     <div className="flex justify-between text-[11px] text-gray-500 mb-1">
-                      <span>{done ? 'Meta de hoje atingida 🎉' : 'Enviando hoje...'}</span>
-                      <span>{j.dailySent}/{j.dailyTarget || '—'} enviadas · {j.dailyReceived} recebidas</span>
+                      <span>{isMatrix ? 'Sem limite' : done ? 'Meta de hoje atingida 🎉' : 'Enviando hoje...'}</span>
+                      <span>{j.dailySent} enviadas · {j.dailyReceived} recebidas</span>
                     </div>
-                    <div className="w-full bg-gray-700 rounded-full h-1.5">
-                      <div className={`h-1.5 rounded-full transition-all ${done ? 'bg-green-500' : 'bg-indigo-500'}`}
-                        style={{ width: `${pct}%` }} />
-                    </div>
+                    {!isMatrix && (
+                      <div className="w-full bg-gray-700 rounded-full h-1.5">
+                        <div className={`h-1.5 rounded-full transition-all ${done ? 'bg-green-500' : 'bg-indigo-500'}`}
+                          style={{ width: `${pct}%` }} />
+                      </div>
+                    )}
                     {isExpanded && (
                       <div className="mt-2 space-y-1">
                         {historyDays.map(([date, h]) => (
@@ -1483,6 +1525,7 @@ function WuzapiMaturadorSettingsModal({
     Array.from({ length: 10 }, (_, i) => ({ ...(settings.days?.[i] || DEFAULT_MATURADOR_DAYS[i]) }))
   )
   const [participantInstances, setParticipantInstances] = useState<string[]>(settings.participantInstances || [])
+  const [matrixInstances, setMatrixInstances] = useState<string[]>(settings.matrixInstances || [])
 
   function updateDay(i: number, patch: Partial<MaturadorDaySettings>) {
     setDays(prev => prev.map((d, idx) => idx === i ? { ...d, ...patch } : d))
@@ -1492,6 +1535,10 @@ function WuzapiMaturadorSettingsModal({
     setParticipantInstances(prev => prev.includes(name) ? prev.filter(n => n !== name) : [...prev, name])
   }
 
+  function toggleMatrix(name: string) {
+    setMatrixInstances(prev => prev.includes(name) ? prev.filter(n => n !== name) : [...prev, name])
+  }
+
   function save() {
     for (let i = 0; i < days.length; i++) {
       const d = days[i]
@@ -1499,7 +1546,7 @@ function WuzapiMaturadorSettingsModal({
       if (d.receiveMin < 0 || d.receiveMax < d.receiveMin) return alert(`Dia ${i + 1}: a meta de recebimento precisa ter máximo ≥ mínimo.`)
       if (d.partners < 1) return alert(`Dia ${i + 1}: cada canal precisa de pelo menos 1 parceiro fixo.`)
     }
-    onSave({ days, participantInstances })
+    onSave({ days, participantInstances, matrixInstances })
   }
 
   return (
@@ -1585,6 +1632,38 @@ function WuzapiMaturadorSettingsModal({
             </div>
           )}
           <p className="text-xs text-gray-500 mt-1.5">Escolha quais números entram na jornada — nenhum selecionado usa todos os conectados/selecionados ao iniciar.</p>
+        </div>
+
+        <div>
+          <label className="block text-xs text-gray-400 mb-1.5">Números matriz (modo Matriz)</label>
+          {instances.length === 0 ? (
+            <p className="text-xs text-gray-600">Nenhuma instância Wuzapi cadastrada ainda.</p>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {instances.map(inst => {
+                const sel = matrixInstances.includes(inst.name)
+                const label = inst.label || inst.name
+                return (
+                  <button key={inst.name} type="button" onClick={() => toggleMatrix(inst.name)}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+                      sel
+                        ? 'bg-indigo-900/40 border-indigo-600 text-indigo-300'
+                        : inst.status === 'connected'
+                        ? 'bg-gray-700 border-gray-600 text-gray-400 hover:border-gray-500 hover:text-gray-200'
+                        : 'bg-gray-900 border-gray-800 text-gray-600'
+                    }`}>
+                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${inst.status === 'connected' ? 'bg-green-400' : 'bg-gray-600'}`} />
+                    {label}
+                    {sel && <span className="text-indigo-300 ml-0.5">✓</span>}
+                  </button>
+                )
+              })}
+            </div>
+          )}
+          <p className="text-xs text-gray-500 mt-1.5">
+            No modo Matriz, só esses números iniciam conversa (mandam mensagem primeiro) com os demais — eles não têm limite de
+            envio nem de recebimento; a meta do dia acima vale só pros números receptores.
+          </p>
         </div>
 
         <div className="flex justify-end gap-2">
