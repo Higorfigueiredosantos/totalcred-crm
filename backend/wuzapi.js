@@ -127,10 +127,13 @@ async function createInstance(name, label) {
 
   // Garante o webhook configurado mesmo pra instâncias criadas antes dessa
   // funcionalidade existir (o registro local não muda, então precisa
-  // reconfirmar do lado do wuzapi a cada (re)conexão).
-  try {
-    await userClient(entry.token).post('/webhook', { webhookurl: WUZAPI_WEBHOOK_URL, events: ['Message', 'ReadReceipt'] })
-  } catch (e) { console.error('[Wuzapi] Falha ao configurar webhook:', e.message) }
+  // reconfirmar do lado do wuzapi a cada (re)conexão). Pra instância recém
+  // criada, o usuário pode não estar imediatamente disponível pro wuzapi
+  // aceitar chamadas autenticadas com o token — sem retry, essa chamada
+  // falhava silenciosamente logo após criar e a instância nunca recebia
+  // mensagens no CRM (o próximo reconectar já funcionava, porque por aí o
+  // wuzapi já tinha processado o usuário novo).
+  await ensureWuzapiWebhook(entry.token)
 
   await connectSession(entry.token)
 
@@ -190,6 +193,27 @@ function setLabel(name, label) {
   if (!registry[name]) return
   registry[name].label = label
   saveRegistry(registry)
+}
+
+// Tenta configurar o webhook algumas vezes antes de desistir — cobre o caso
+// de instância recém criada, onde o wuzapi pode levar um instante pra aceitar
+// chamadas autenticadas com o token novo. Não lança erro no final: falha de
+// webhook não deve impedir a instância de existir, só fica sem receber
+// mensagens no CRM até o próximo reconectar tentar de novo.
+async function ensureWuzapiWebhook(token) {
+  const MAX_ATTEMPTS = 5
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      await userClient(token).post('/webhook', { webhookurl: WUZAPI_WEBHOOK_URL, events: ['Message', 'ReadReceipt'] })
+      return
+    } catch (e) {
+      if (attempt >= MAX_ATTEMPTS) {
+        console.error('[Wuzapi] Falha ao configurar webhook após tentativas:', e.message)
+        return
+      }
+      await new Promise(r => setTimeout(r, 400))
+    }
+  }
 }
 
 async function connectSession(token) {
@@ -628,6 +652,12 @@ const maturadorPhrases = require('./maturadorPhrases')
 const MATURADOR_AUDIO_CHANCE = 0.15
 const MATURADOR_IMAGE_CHANCE = 0.20
 
+// Intervalo (segundos) entre mensagens dentro de uma mesma rajada — bem mais
+// curto que o delay normal entre rajadas (minDelay/maxDelay), simulando
+// alguém mandando várias mensagens rápidas seguidas.
+const MATURADOR_BURST_GAP_MIN = 4
+const MATURADOR_BURST_GAP_MAX = 15
+
 // ── Configurações da jornada de aquecimento (editáveis pelo usuário, via
 // engrenagem na tela) ───────────────────────────────────────────────────────
 // Cada número tem sua própria jornada de 10 dias (ver maturadorData.journeys
@@ -905,60 +935,79 @@ async function runMaturadorLoop(minDelay, maxDelay) {
     maturadorState.dayQuotaReached = false
     const sender = eligibleSenders[Math.floor(Math.random() * eligibleSenders.length)]
     const senderJourney = journeysByName[sender.name]
-    const partnerNames = (maturadorData.partners[sender.name] || []).filter(p => readyNames.has(p))
 
-    // Escolhe o destinatário (sempre um dos parceiros fixos do remetente)
-    // priorizando quem ainda não bateu a cota mínima de recebimento do
-    // *próprio dia dele*, depois quem ainda não bateu a cota máxima, e só
-    // ignora a cota se todo mundo já estiver no máximo (não trava o envio).
-    const others = ready.filter(r => partnerNames.includes(r.name))
-    const belowMin = (r) => journeysByName[r.name].dailyReceived < getMaturadorDaySettings(journeysByName[r.name].dayIndex).receiveMin
-    const belowMax = (r) => journeysByName[r.name].dailyReceived < getMaturadorDaySettings(journeysByName[r.name].dayIndex).receiveMax
-    let candidates = others.filter(belowMin)
-    if (!candidates.length) candidates = others.filter(belowMax)
-    if (!candidates.length) candidates = others
-    const receiver = candidates[Math.floor(Math.random() * candidates.length)]
-    const receiverJourney = journeysByName[receiver.name]
+    // A primeira mensagem do dia de cada canal sai sozinha — só depois disso
+    // o maturador passa a poder mandar de 1 a 3 mensagens seguidas do mesmo
+    // remetente (com um intervalo curto entre elas), parecido com alguém
+    // digitando várias mensagens rápidas de verdade.
+    const remainingQuota = senderJourney.dailyTarget - senderJourney.dailySent
+    const burstSize = senderJourney.dailySent === 0 ? 1 : Math.min(randomInt(1, 3), remainingQuota)
 
-    try {
-      const images = maturadorState.mediaEnabled ? safeReadDir(MATURADOR_IMAGES_DIR) : []
-      const audios = maturadorState.mediaEnabled ? safeReadDir(MATURADOR_AUDIOS_DIR) : []
-      const roll = Math.random()
+    for (let i = 0; i < burstSize; i++) {
+      if (!maturadorState.running) return
 
-      let msgType = 'text'
-      let message
-      let fileName
+      // Escolhe o destinatário (sempre um dos parceiros fixos do remetente)
+      // priorizando quem ainda não bateu a cota mínima de recebimento do
+      // *próprio dia dele*, depois quem ainda não bateu a cota máxima, e só
+      // ignora a cota se todo mundo já estiver no máximo (não trava o envio).
+      const partnerNames = (maturadorData.partners[sender.name] || []).filter(p => readyNames.has(p))
+      if (!partnerNames.length) break
+      const others = ready.filter(r => partnerNames.includes(r.name))
+      const belowMin = (r) => journeysByName[r.name].dailyReceived < getMaturadorDaySettings(journeysByName[r.name].dayIndex).receiveMin
+      const belowMax = (r) => journeysByName[r.name].dailyReceived < getMaturadorDaySettings(journeysByName[r.name].dayIndex).receiveMax
+      let candidates = others.filter(belowMin)
+      if (!candidates.length) candidates = others.filter(belowMax)
+      if (!candidates.length) candidates = others
+      const receiver = candidates[Math.floor(Math.random() * candidates.length)]
+      const receiverJourney = journeysByName[receiver.name]
 
-      if (roll < MATURADOR_AUDIO_CHANCE && audios.length) {
-        fileName = audios[Math.floor(Math.random() * audios.length)]
-        const dataUri = fileToDataUri(path.join(MATURADOR_AUDIOS_DIR, fileName), 'audio/ogg; codecs=opus')
-        await sendAudio(sender.name, receiver.phone, dataUri)
-        msgType = 'audio'
-      } else if (roll < MATURADOR_AUDIO_CHANCE + MATURADOR_IMAGE_CHANCE && images.length) {
-        fileName = images[Math.floor(Math.random() * images.length)]
-        const ext = path.extname(fileName).toLowerCase()
-        const dataUri = fileToDataUri(path.join(MATURADOR_IMAGES_DIR, fileName), MIME_BY_EXT[ext] || 'image/jpeg')
-        message = Math.random() < 0.5 ? maturadorPhrases.pickShort() : undefined
-        await sendImage(sender.name, receiver.phone, dataUri, message)
-        msgType = 'image'
-      } else {
-        message = maturadorPhrases.pick(maturadorState.msgCount)
-        await sendText(sender.name, receiver.phone, message)
+      try {
+        const images = maturadorState.mediaEnabled ? safeReadDir(MATURADOR_IMAGES_DIR) : []
+        const audios = maturadorState.mediaEnabled ? safeReadDir(MATURADOR_AUDIOS_DIR) : []
+        const roll = Math.random()
+
+        let msgType = 'text'
+        let message
+        let fileName
+
+        if (roll < MATURADOR_AUDIO_CHANCE && audios.length) {
+          fileName = audios[Math.floor(Math.random() * audios.length)]
+          const dataUri = fileToDataUri(path.join(MATURADOR_AUDIOS_DIR, fileName), 'audio/ogg; codecs=opus')
+          await sendAudio(sender.name, receiver.phone, dataUri)
+          msgType = 'audio'
+        } else if (roll < MATURADOR_AUDIO_CHANCE + MATURADOR_IMAGE_CHANCE && images.length) {
+          fileName = images[Math.floor(Math.random() * images.length)]
+          const ext = path.extname(fileName).toLowerCase()
+          const dataUri = fileToDataUri(path.join(MATURADOR_IMAGES_DIR, fileName), MIME_BY_EXT[ext] || 'image/jpeg')
+          message = Math.random() < 0.5 ? maturadorPhrases.pickShort() : undefined
+          await sendImage(sender.name, receiver.phone, dataUri, message)
+          msgType = 'image'
+        } else {
+          message = maturadorPhrases.pick(maturadorState.msgCount)
+          await sendText(sender.name, receiver.phone, message)
+        }
+
+        maturadorState.msgCount++
+        senderJourney.dailySent++
+        receiverJourney.dailyReceived++
+        senderJourney.history[senderJourney.lastActiveDate].sent = senderJourney.dailySent
+        receiverJourney.history[receiverJourney.lastActiveDate].received = receiverJourney.dailyReceived
+        saveMaturadorJourney()
+        _broadcast('wuzapi_maturador', {
+          type: 'log', from: sender.name, to: receiver.name, toNumber: receiver.phone, msgType, message, fileName, ts: Date.now(),
+          senderDay: senderJourney.dayIndex, senderTarget: senderJourney.dailyTarget, senderSent: senderJourney.dailySent,
+          receiverDay: receiverJourney.dayIndex, receiverReceived: receiverJourney.dailyReceived,
+        })
+      } catch (e) {
+        _broadcast('wuzapi_maturador', { type: 'error', instanceName: sender.name, error: e?.response?.data?.error || e.message })
+        break
       }
 
-      maturadorState.msgCount++
-      senderJourney.dailySent++
-      receiverJourney.dailyReceived++
-      senderJourney.history[senderJourney.lastActiveDate].sent = senderJourney.dailySent
-      receiverJourney.history[receiverJourney.lastActiveDate].received = receiverJourney.dailyReceived
-      saveMaturadorJourney()
-      _broadcast('wuzapi_maturador', {
-        type: 'log', from: sender.name, to: receiver.name, toNumber: receiver.phone, msgType, message, fileName, ts: Date.now(),
-        senderDay: senderJourney.dayIndex, senderTarget: senderJourney.dailyTarget, senderSent: senderJourney.dailySent,
-        receiverDay: receiverJourney.dayIndex, receiverReceived: receiverJourney.dailyReceived,
-      })
-    } catch (e) {
-      _broadcast('wuzapi_maturador', { type: 'error', instanceName: sender.name, error: e?.response?.data?.error || e.message })
+      if (senderJourney.dailySent >= senderJourney.dailyTarget) break
+      if (i < burstSize - 1) {
+        const gap = randomInt(MATURADOR_BURST_GAP_MIN, MATURADOR_BURST_GAP_MAX)
+        await new Promise(r => setTimeout(r, gap * 1000))
+      }
     }
   }
 
