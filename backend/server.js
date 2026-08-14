@@ -27,6 +27,15 @@ const wuzapi = require('./wuzapi')
 
 const app = express()
 const server = http.createServer(app)
+// O timeout padrão de keep-alive do Node (5s) é mais curto que o de clientes
+// como o cliente HTTP do wuzapi (Go), que reaproveita conexões — se o Node
+// fecha o socket do lado dele bem no instante em que o wuzapi tenta reusá-lo
+// pra mandar o webhook seguinte, a requisição chega incompleta/quebrada e o
+// wuzapi via isso como falha (nos logs dele: "status=502"), derrubando
+// mensagens do webhook mesmo com o backend saudável. Alongar o keep-alive
+// (e o headersTimeout, que precisa ser maior) evita essa corrida.
+server.keepAliveTimeout = 65000
+server.headersTimeout = 66000
 // noServer + roteamento manual do 'upgrade': com { server, path } o ws aborta
 // (400) qualquer conexão cujo caminho não bata EXATAMENTE com o path daquela
 // instância — como o listener de '/ws' é registrado primeiro, ele rejeitava

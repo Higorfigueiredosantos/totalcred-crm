@@ -34,6 +34,7 @@ let _getConvId = (channel, contact) => `${channel}:${contact}`
 function init({ broadcast, getConvId }) {
   if (broadcast) _broadcast = broadcast
   if (getConvId) _getConvId = getConvId
+  resyncAllWebhooks()
 }
 
 function ensureDataDir() {
@@ -213,6 +214,18 @@ async function ensureWuzapiWebhook(token) {
       }
       await new Promise(r => setTimeout(r, 400))
     }
+  }
+}
+
+// Reconfirma o webhook de todas as instâncias já registradas — roda uma vez
+// ao subir o backend, sem travar o startup (chamada solta, sem await lá
+// fora). Cobre o caso de WUZAPI_WEBHOOK_URL ter mudado (ex.: trocar a URL
+// interna pela pública, necessária pra instâncias com proxy — ver
+// ensureWuzapiWebhook) sem precisar reconectar cada instância na mão.
+async function resyncAllWebhooks() {
+  const registry = loadRegistry()
+  for (const name of Object.keys(registry)) {
+    try { await ensureWuzapiWebhook(registry[name].token) } catch (e) {}
   }
 }
 
