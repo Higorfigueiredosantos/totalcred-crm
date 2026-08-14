@@ -903,7 +903,12 @@ async function getReadyMaturadorInstances(names) {
 function selectJourneyParticipants(readyAll) {
   const selected = maturadorSettings.participantInstances
   if (!selected || !selected.length) return readyAll
-  return readyAll.filter(r => selected.includes(r.name))
+  // Marcar um número como matriz já garante a participação dele — não faz
+  // sentido exigir que o usuário adicione o mesmo nome nas duas listas
+  // separadas pra ele não ficar de fora quando participantInstances estiver
+  // restringindo a uma lista que ainda não inclui a matriz.
+  const matrix = maturadorSettings.matrixInstances || []
+  return readyAll.filter(r => selected.includes(r.name) || matrix.includes(r.name))
 }
 
 // Manda uma mensagem (texto/imagem/áudio, sorteado) do sender pro receiver e

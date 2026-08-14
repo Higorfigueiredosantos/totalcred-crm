@@ -1631,7 +1631,7 @@ function WuzapiMaturadorSettingsModal({
               })}
             </div>
           )}
-          <p className="text-xs text-gray-500 mt-1.5">Escolha quais números entram na jornada — nenhum selecionado usa todos os conectados/selecionados ao iniciar.</p>
+          <p className="text-xs text-gray-500 mt-1.5">Escolha quais números entram na jornada — nenhum selecionado usa todos os conectados/selecionados ao iniciar. Números marcados como matriz abaixo sempre participam, mesmo que não estejam marcados aqui.</p>
         </div>
 
         <div>
