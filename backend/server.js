@@ -1457,7 +1457,7 @@ const maturadorPhrases = require('./maturadorPhrases')
 // Probabilidades de cada tipo de envio quando a biblioteca de mídia tem arquivos
 // disponíveis (a soma não precisa ser 1 — o que sobra vira texto).
 const MATURADOR_AUDIO_CHANCE = 0.15
-const MATURADOR_IMAGE_CHANCE = 0.20
+const MATURADOR_IMAGE_CHANCE = 0.08
 
 async function runMaturadorLoop(minDelay, maxDelay) {
   if (!maturadorState.running) return

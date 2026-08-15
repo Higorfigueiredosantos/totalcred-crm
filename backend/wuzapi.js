@@ -694,7 +694,7 @@ async function runCampaign(data) {
 const maturadorPhrases = require('./maturadorPhrases')
 
 const MATURADOR_AUDIO_CHANCE = 0.15
-const MATURADOR_IMAGE_CHANCE = 0.20
+const MATURADOR_IMAGE_CHANCE = 0.08
 
 // Intervalo (segundos) entre mensagens dentro de uma mesma rajada — bem mais
 // curto que o delay normal entre rajadas (minDelay/maxDelay), simulando
@@ -760,6 +760,10 @@ function sanitizeParticipantInstances(list) {
   return [...new Set(list.filter(n => typeof n === 'string' && n))]
 }
 
+function sanitizeMaturadorMode(mode, fallback) {
+  return mode === 'hub' || mode === 'pairs' ? mode : (fallback === 'hub' ? 'hub' : 'pairs')
+}
+
 function loadMaturadorSettings() {
   try {
     if (fs.existsSync(MATURADOR_SETTINGS_FILE)) {
@@ -773,10 +777,11 @@ function loadMaturadorSettings() {
       const days = sanitizeMaturadorDays(raw.days, legacyDay ? [legacyDay, ...DEFAULT_MATURADOR_DAYS.slice(1)] : DEFAULT_MATURADOR_DAYS)
       const participantInstances = sanitizeParticipantInstances(raw.participantInstances)
       const matrixInstances = sanitizeParticipantInstances(raw.matrixInstances)
-      return { days, participantInstances, matrixInstances }
+      const mode = sanitizeMaturadorMode(raw.mode, 'pairs')
+      return { days, participantInstances, matrixInstances, mode }
     }
   } catch (e) {}
-  return { days: DEFAULT_MATURADOR_DAYS.map(d => ({ ...d })), participantInstances: [], matrixInstances: [] }
+  return { days: DEFAULT_MATURADOR_DAYS.map(d => ({ ...d })), participantInstances: [], matrixInstances: [], mode: 'pairs' }
 }
 
 function saveMaturadorSettingsFile() {
@@ -807,7 +812,8 @@ function setMaturadorSettings(patch = {}) {
   const matrixInstances = patch.matrixInstances !== undefined
     ? sanitizeParticipantInstances(patch.matrixInstances)
     : maturadorSettings.matrixInstances
-  maturadorSettings = { days, participantInstances, matrixInstances }
+  const mode = patch.mode !== undefined ? sanitizeMaturadorMode(patch.mode, maturadorSettings.mode) : maturadorSettings.mode
+  maturadorSettings = { days, participantInstances, matrixInstances, mode }
   saveMaturadorSettingsFile()
   return maturadorSettings
 }
@@ -917,7 +923,20 @@ function phoneFromJid(jid) {
   return String(jid).split('@')[0].split(':')[0] || null
 }
 
-const maturadorState = { running: false, timer: null, instanceNames: [], minDelay: 60, maxDelay: 300, mediaEnabled: true, msgCount: 0, dayQuotaReached: false, mode: 'pairs' }
+const maturadorState = { running: false, timer: null, instanceNames: [], minDelay: 60, maxDelay: 300, mediaEnabled: true, msgCount: 0, dayQuotaReached: false, mode: maturadorSettings.mode }
+
+// Identificador da "rodada" atual do maturador — incrementado a cada
+// start/stop. Cada runMaturadorLoop carrega o id que tinha quando foi
+// iniciado e só continua agendando a próxima mensagem se ainda for o id
+// vigente; isso evita que um Iniciar/Retomar clicado enquanto o maturador já
+// estava rodando (ex.: duplo clique, ou o timer antigo ainda não tinha sido
+// limpo) crie um segundo loop rodando em paralelo — o que fazia mensagens
+// saírem fora do horário esperado e, no modo Matriz, às vezes o primeiro
+// envio da rodada nova não ser da matriz (dois loops competindo).
+let maturadorRunId = 0
+function isCurrentMaturadorRun(runId) {
+  return maturadorState.running && runId === maturadorRunId
+}
 
 async function getReadyMaturadorInstances(names) {
   let all
@@ -993,7 +1012,7 @@ async function sendOneMaturadorMessage(sender, receiver, senderJourney, receiver
 // Modo "entre si": pares fixos entre todos os participantes (ver
 // growMaturadorPartners) — qualquer um pode enviar, dentro da cota do
 // próprio dia. Retorna true se todo mundo já bateu a meta de hoje.
-async function runMaturadorPairsTick(ready, readyNames, journeysByName) {
+async function runMaturadorPairsTick(ready, readyNames, journeysByName, runId) {
   const targetDegreeByName = {}
   ready.forEach(r => { targetDegreeByName[r.name] = getMaturadorDaySettings(journeysByName[r.name].dayIndex).partners })
   growMaturadorPartners(ready.map(r => r.name), targetDegreeByName)
@@ -1020,7 +1039,7 @@ async function runMaturadorPairsTick(ready, readyNames, journeysByName) {
   const burstSize = senderJourney.dailySent === 0 ? 1 : Math.min(randomInt(1, 3), remainingQuota)
 
   for (let i = 0; i < burstSize; i++) {
-    if (!maturadorState.running) return false
+    if (!isCurrentMaturadorRun(runId)) return false
 
     // Escolhe o destinatário (sempre um dos parceiros fixos do remetente)
     // priorizando quem ainda não bateu a cota mínima de recebimento do
@@ -1055,7 +1074,7 @@ async function runMaturadorPairsTick(ready, readyNames, journeysByName) {
 // não tem cota de envio nem de recebimento; a cota do dia (receiveMin/
 // receiveMax) vale só pro receptor. Retorna true se todos os receptores já
 // bateram a meta de hoje.
-async function runMaturadorHubTick(ready, journeysByName) {
+async function runMaturadorHubTick(ready, journeysByName, runId) {
   const matrixSet = new Set(maturadorSettings.matrixInstances)
   const matrixReady = ready.filter(r => matrixSet.has(r.name))
   const regularReady = ready.filter(r => !matrixSet.has(r.name))
@@ -1079,7 +1098,7 @@ async function runMaturadorHubTick(ready, journeysByName) {
   const burstSize = senderJourney.dailySent === 0 ? 1 : randomInt(1, 3)
 
   for (let i = 0; i < burstSize; i++) {
-    if (!maturadorState.running) return false
+    if (!isCurrentMaturadorRun(runId)) return false
 
     let candidates = regularReady.filter(belowMin)
     if (!candidates.length) candidates = regularReady.filter(belowMax)
@@ -1094,10 +1113,10 @@ async function runMaturadorHubTick(ready, journeysByName) {
     // da própria cota de envio do dia dele (o mesmo sendMin/sendMax que
     // regula o modo "entre si"). Sem isso a conversa fica só de um lado só,
     // o que não parece uma conversa de verdade.
-    if (maturadorState.running && receiverJourney.dailySent < receiverJourney.dailyTarget) {
+    if (isCurrentMaturadorRun(runId) && receiverJourney.dailySent < receiverJourney.dailyTarget) {
       const replyGap = randomInt(MATURADOR_BURST_GAP_MIN, MATURADOR_BURST_GAP_MAX)
       await new Promise(r => setTimeout(r, replyGap * 1000))
-      if (maturadorState.running) await sendOneMaturadorMessage(receiver, sender, receiverJourney, senderJourney)
+      if (isCurrentMaturadorRun(runId)) await sendOneMaturadorMessage(receiver, sender, receiverJourney, senderJourney)
     }
 
     if (!anyPending()) break
@@ -1109,17 +1128,17 @@ async function runMaturadorHubTick(ready, journeysByName) {
   return false
 }
 
-async function runMaturadorLoop(minDelay, maxDelay) {
-  if (!maturadorState.running) return
+async function runMaturadorLoop(minDelay, maxDelay, runId) {
+  if (!isCurrentMaturadorRun(runId)) return
 
   const readyAll = await getReadyMaturadorInstances(maturadorState.instanceNames)
   const ready = selectJourneyParticipants(readyAll)
 
   if (ready.length < 2) {
     _broadcast('wuzapi_maturador', { type: 'waiting', message: '⚠️ Aguardando pelo menos 2 instâncias Wuzapi conectadas...' })
-    if (!maturadorState.running) return
+    if (!isCurrentMaturadorRun(runId)) return
     const waitDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay
-    maturadorState.timer = setTimeout(() => runMaturadorLoop(minDelay, maxDelay), waitDelay * 1000)
+    maturadorState.timer = setTimeout(() => runMaturadorLoop(minDelay, maxDelay, runId), waitDelay * 1000)
     return
   }
 
@@ -1135,29 +1154,36 @@ async function runMaturadorLoop(minDelay, maxDelay) {
 
   const readyNames = new Set(ready.map(r => r.name))
   const allDone = maturadorState.mode === 'hub'
-    ? await runMaturadorHubTick(ready, journeysByName)
-    : await runMaturadorPairsTick(ready, readyNames, journeysByName)
+    ? await runMaturadorHubTick(ready, journeysByName, runId)
+    : await runMaturadorPairsTick(ready, readyNames, journeysByName, runId)
 
-  if (!maturadorState.running) return
+  if (!isCurrentMaturadorRun(runId)) return
 
   if (allDone) {
     if (!maturadorState.dayQuotaReached) {
       maturadorState.dayQuotaReached = true
       _broadcast('wuzapi_maturador', { type: 'day_complete' })
     }
-    maturadorState.timer = setTimeout(() => runMaturadorLoop(minDelay, maxDelay), MATURADOR_DAY_CHECK_MS)
+    maturadorState.timer = setTimeout(() => runMaturadorLoop(minDelay, maxDelay, runId), MATURADOR_DAY_CHECK_MS)
     return
   }
   maturadorState.dayQuotaReached = false
 
   const delay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay
   _broadcast('wuzapi_maturador', { type: 'delay', seconds: delay })
-  maturadorState.timer = setTimeout(() => runMaturadorLoop(minDelay, maxDelay), delay * 1000)
+  maturadorState.timer = setTimeout(() => runMaturadorLoop(minDelay, maxDelay, runId), delay * 1000)
 }
 
 async function startMaturador({ instanceNames, minDelay, maxDelay, mediaEnabled, mode } = {}) {
   const ready = await getReadyMaturadorInstances(instanceNames)
   if (ready.length < 2) throw new Error('Você precisa de pelo menos 2 instâncias Wuzapi conectadas para o maturador.')
+
+  // Invalida qualquer loop anterior (ex.: Iniciar/Retomar clicado de novo
+  // com o maturador já rodando) antes de começar um novo — nunca deixa dois
+  // loops ativos ao mesmo tempo.
+  if (maturadorState.timer) { clearTimeout(maturadorState.timer); maturadorState.timer = null }
+  maturadorRunId++
+  const runId = maturadorRunId
 
   const min = Number(minDelay) || 60
   const max = Number(maxDelay) || 300
@@ -1167,15 +1193,21 @@ async function startMaturador({ instanceNames, minDelay, maxDelay, mediaEnabled,
   maturadorState.maxDelay = max
   maturadorState.mediaEnabled = mediaEnabled !== false
   maturadorState.msgCount = 0
-  maturadorState.mode = mode === 'hub' ? 'hub' : 'pairs'
+  // O modo persiste entre sessões (settings) — se vier explícito no start,
+  // vira o novo padrão salvo; senão usa o último modo salvo (ex.: depois de
+  // um restart do backend, "Retomar" continua no modo que estava antes, em
+  // vez de sempre voltar pro "entre si").
+  if (mode === 'hub' || mode === 'pairs') setMaturadorSettings({ mode })
+  maturadorState.mode = maturadorSettings.mode
 
   _broadcast('wuzapi_maturador', { type: 'started' })
-  runMaturadorLoop(min, max)
+  runMaturadorLoop(min, max, runId)
 }
 
 function stopMaturador() {
   maturadorState.running = false
-  if (maturadorState.timer) clearTimeout(maturadorState.timer)
+  maturadorRunId++
+  if (maturadorState.timer) { clearTimeout(maturadorState.timer); maturadorState.timer = null }
   _broadcast('wuzapi_maturador', { type: 'stopped' })
 }
 
