@@ -35,6 +35,7 @@ function init({ broadcast, getConvId }) {
   if (broadcast) _broadcast = broadcast
   if (getConvId) _getConvId = getConvId
   resyncAllWebhooks()
+  startWuzapiWatchdog()
 }
 
 function ensureDataDir() {
@@ -227,6 +228,36 @@ async function resyncAllWebhooks() {
   for (const name of Object.keys(registry)) {
     try { await ensureWuzapiWebhook(registry[name].token) } catch (e) {}
   }
+}
+
+// Watchdog: a cada poucos minutos, verifica todas as instâncias cadastradas
+// e tenta reconectar sozinho qualquer uma que caiu (status "disconnected" —
+// nem logada, nem com QR pendente, nem com socket aberto). Sessão pareada
+// reconecta sem precisar de novo QR; se realmente precisar de QR (logout de
+// verdade), /session/connect não resolve isso sozinho, mas não tem problema
+// tentar — só não muda nada nesse caso.
+const WUZAPI_WATCHDOG_INTERVAL_MS = 3 * 60 * 1000
+
+async function reconnectDisconnectedWuzapiInstances() {
+  let all
+  try { all = await listInstances() } catch (e) { return }
+  const registry = loadRegistry()
+  for (const inst of all) {
+    if (inst.status !== 'disconnected') continue
+    const entry = registry[inst.name]
+    if (!entry) continue
+    try {
+      await connectSession(entry.token)
+      console.log(`[Wuzapi] Instância "${inst.name}" estava desconectada — reconexão automática disparada.`)
+    } catch (e) {
+      console.error(`[Wuzapi] Falha ao reconectar automaticamente "${inst.name}":`, e.message)
+    }
+  }
+}
+
+function startWuzapiWatchdog() {
+  reconnectDisconnectedWuzapiInstances()
+  setInterval(() => { reconnectDisconnectedWuzapiInstances() }, WUZAPI_WATCHDOG_INTERVAL_MS)
 }
 
 async function connectSession(token) {
@@ -1058,6 +1089,16 @@ async function runMaturadorHubTick(ready, journeysByName) {
 
     const ok = await sendOneMaturadorMessage(sender, receiver, senderJourney, receiverJourney)
     if (!ok) break
+
+    // A matriz inicia, mas quem está sendo aquecido também responde — dentro
+    // da própria cota de envio do dia dele (o mesmo sendMin/sendMax que
+    // regula o modo "entre si"). Sem isso a conversa fica só de um lado só,
+    // o que não parece uma conversa de verdade.
+    if (maturadorState.running && receiverJourney.dailySent < receiverJourney.dailyTarget) {
+      const replyGap = randomInt(MATURADOR_BURST_GAP_MIN, MATURADOR_BURST_GAP_MAX)
+      await new Promise(r => setTimeout(r, replyGap * 1000))
+      if (maturadorState.running) await sendOneMaturadorMessage(receiver, sender, receiverJourney, senderJourney)
+    }
 
     if (!anyPending()) break
     if (i < burstSize - 1) {
