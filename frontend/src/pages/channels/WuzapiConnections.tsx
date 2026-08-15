@@ -40,6 +40,11 @@ const WuzapiConnections = forwardRef<WuzapiConnectionsHandle, {}>((_props, ref) 
   const [configLabel, setConfigLabel] = useState('')
   const [configProxyUrl, setConfigProxyUrl] = useState('')
   const [configProxyEnabled, setConfigProxyEnabled] = useState(false)
+  // Valores do proxy no momento em que o modal abriu — comparados com os
+  // atuais ao salvar, pra só desconectar/reconectar a sessão quando o
+  // proxy de fato mudou (editar só o nome não deve mexer na sessão).
+  const [initialProxyUrl, setInitialProxyUrl] = useState('')
+  const [initialProxyEnabled, setInitialProxyEnabled] = useState(false)
   const [configStatus, setConfigStatus] = useState<WuzapiStatus>('disconnected')
   const [configGroups, setConfigGroups] = useState(false)
   const [savingProxy, setSavingProxy] = useState(false)
@@ -90,6 +95,8 @@ const WuzapiConnections = forwardRef<WuzapiConnectionsHandle, {}>((_props, ref) 
     setConfigLabel(inst.label || '')
     setConfigProxyUrl(inst.proxyUrl || '')
     setConfigProxyEnabled(!!inst.proxyEnabled)
+    setInitialProxyUrl(inst.proxyUrl || '')
+    setInitialProxyEnabled(!!inst.proxyEnabled)
     setConfigStatus(inst.status)
     setConfigGroups(groupSettings[`wuzapi:${inst.name}`] ?? false)
     setConfigName(inst.name)
@@ -105,6 +112,16 @@ const WuzapiConnections = forwardRef<WuzapiConnectionsHandle, {}>((_props, ref) 
     const updated = { ...groupSettings, [`wuzapi:${configName}`]: configGroups }
     localStorage.setItem('chip_group_settings', JSON.stringify(updated))
     setGroupSettings(updated)
+
+    // Só mexe na sessão (desconectar/aplicar proxy/reconectar) se o proxy
+    // de fato mudou — editar só o nome ou a config de grupo não deve derrubar
+    // a conexão nem arriscar pedir um QR novo à toa.
+    const proxyChanged = configProxyUrl.trim() !== initialProxyUrl || configProxyEnabled !== initialProxyEnabled
+    if (!proxyChanged) {
+      setConfigName(null)
+      loadInstances()
+      return
+    }
 
     setSavingProxy(true)
     try {
