@@ -1168,12 +1168,21 @@ function WuzapiMaturadorTab() {
 
   const journeyNames = Object.keys(journeys).sort((a, b) => getInstanceLabel(a).localeCompare(getInstanceLabel(b)))
 
+  const busyInstanceNames = new Set(campaigns.flatMap(c => c.selectedInstances))
+  const freeInstanceCount = connectedInstances.filter(i => !busyInstanceNames.has(i.name)).length
+  const hasActiveCampaign = campaigns.some(c => c.status !== 'idle')
+
   return (
     <div className="space-y-5 max-w-2xl">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-sm font-semibold text-white mb-1">Maturador de Instâncias (Wuzapi)</h2>
           <p className="text-xs text-gray-400">As instâncias Wuzapi se enviam mensagens entre si automaticamente para aquecimento. Rode quantas campanhas quiser em paralelo — cada instância só pode estar em uma por vez.</p>
+          {hasActiveCampaign && freeInstanceCount < 2 && (
+            <p className="text-xs text-yellow-400/80 mt-1">
+              ⚠️ {freeInstanceCount === 0 ? 'Todas as instâncias conectadas' : 'Só sobrou 1 instância conectada'} já {freeInstanceCount === 0 ? 'estão' : 'está'} em uso — conecte mais números (Canais → Wuzapi) pra rodar outra campanha ao mesmo tempo.
+            </p>
+          )}
         </div>
         <button onClick={addCampaign} title="Adicionar outra campanha de aquecimento"
           className="flex items-center gap-1.5 px-3 py-2 bg-gray-700 hover:bg-gray-600 text-white text-xs font-medium rounded-lg shrink-0">

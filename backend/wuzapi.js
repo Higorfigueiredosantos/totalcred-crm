@@ -982,44 +982,74 @@ function selectJourneyParticipants(readyAll) {
 // Manda uma mensagem (texto/imagem/áudio, sorteado) do sender pro receiver e
 // atualiza as duas jornadas. Retorna true em caso de sucesso, false se falhou
 // (já broadcasta o erro) — quem chama decide se para a rajada nesse caso.
-async function sendOneMaturadorMessage(campaign, sender, receiver, senderJourney, receiverJourney) {
+// Registra uma mensagem individual já enviada (bump nas duas jornadas +
+// broadcast pro front) — usado tanto pro envio único (texto/áudio) quanto
+// pra cada foto de uma rajada de imagens.
+function recordMaturadorSend(campaign, sender, receiver, senderJourney, receiverJourney, msgType, message, fileName) {
+  campaign.msgCount++
+  senderJourney.dailySent++
+  receiverJourney.dailyReceived++
+  senderJourney.history[senderJourney.lastActiveDate].sent = senderJourney.dailySent
+  receiverJourney.history[receiverJourney.lastActiveDate].received = receiverJourney.dailyReceived
+  saveMaturadorJourney()
+  _broadcast('wuzapi_maturador', {
+    type: 'log', campaignId: campaign.id, from: sender.name, to: receiver.name, toNumber: receiver.phone, msgType, message, fileName, ts: Date.now(),
+    senderDay: senderJourney.dayIndex, senderTarget: senderJourney.dailyTarget, senderSent: senderJourney.dailySent,
+    receiverDay: receiverJourney.dayIndex, receiverReceived: receiverJourney.dailyReceived,
+  })
+}
+
+// Quantas fotos manda de uma vez quando o sorteio escolhe imagem — simula
+// alguém compartilhando várias fotos seguidas de um álbum. Repete fotos da
+// biblioteca à vontade (não precisa ser sempre uma diferente) e usa um
+// intervalo curto entre elas — é uma única "ação" de compartilhar fotos, não
+// uma sequência de mensagens de texto, então não segue o delay mínimo/máximo
+// da campanha (esse continua valendo entre as trocas de texto normais).
+const MATURADOR_IMAGE_BURST_MIN = 2
+const MATURADOR_IMAGE_BURST_MAX = 5
+const MATURADOR_IMAGE_GAP_MIN = 2
+const MATURADOR_IMAGE_GAP_MAX = 6
+
+// Manda uma mensagem (texto/imagem/áudio, sorteado) do sender pro receiver e
+// atualiza as duas jornadas. Imagem pode virar uma rajada de várias fotos
+// (ver acima). Retorna true se mandou pelo menos uma mensagem com sucesso,
+// false se falhou de cara (já broadcasta o erro) — quem chama decide se para
+// a rodada nesse caso.
+async function sendOneMaturadorMessage(campaign, sender, receiver, senderJourney, receiverJourney, runId) {
+  const images = campaign.mediaEnabled ? safeReadDir(MATURADOR_IMAGES_DIR) : []
+  const audios = campaign.mediaEnabled ? safeReadDir(MATURADOR_AUDIOS_DIR) : []
+  const roll = Math.random()
+
   try {
-    const images = campaign.mediaEnabled ? safeReadDir(MATURADOR_IMAGES_DIR) : []
-    const audios = campaign.mediaEnabled ? safeReadDir(MATURADOR_AUDIOS_DIR) : []
-    const roll = Math.random()
-
-    let msgType = 'text'
-    let message
-    let fileName
-
     if (roll < MATURADOR_AUDIO_CHANCE && audios.length) {
-      fileName = audios[Math.floor(Math.random() * audios.length)]
+      const fileName = audios[Math.floor(Math.random() * audios.length)]
       const dataUri = fileToDataUri(path.join(MATURADOR_AUDIOS_DIR, fileName), 'audio/ogg; codecs=opus')
       await sendAudio(sender.name, receiver.phone, dataUri)
-      msgType = 'audio'
-    } else if (roll < MATURADOR_AUDIO_CHANCE + MATURADOR_IMAGE_CHANCE && images.length) {
-      fileName = images[Math.floor(Math.random() * images.length)]
-      const ext = path.extname(fileName).toLowerCase()
-      const dataUri = fileToDataUri(path.join(MATURADOR_IMAGES_DIR, fileName), MIME_BY_EXT[ext] || 'image/jpeg')
-      message = Math.random() < 0.5 ? maturadorPhrases.pickShort() : undefined
-      await sendImage(sender.name, receiver.phone, dataUri, message)
-      msgType = 'image'
-    } else {
-      message = maturadorPhrases.pick(campaign.msgCount)
-      await sendText(sender.name, receiver.phone, message)
+      recordMaturadorSend(campaign, sender, receiver, senderJourney, receiverJourney, 'audio', undefined, fileName)
+      return true
     }
 
-    campaign.msgCount++
-    senderJourney.dailySent++
-    receiverJourney.dailyReceived++
-    senderJourney.history[senderJourney.lastActiveDate].sent = senderJourney.dailySent
-    receiverJourney.history[receiverJourney.lastActiveDate].received = receiverJourney.dailyReceived
-    saveMaturadorJourney()
-    _broadcast('wuzapi_maturador', {
-      type: 'log', campaignId: campaign.id, from: sender.name, to: receiver.name, toNumber: receiver.phone, msgType, message, fileName, ts: Date.now(),
-      senderDay: senderJourney.dayIndex, senderTarget: senderJourney.dailyTarget, senderSent: senderJourney.dailySent,
-      receiverDay: receiverJourney.dayIndex, receiverReceived: receiverJourney.dailyReceived,
-    })
+    if (roll < MATURADOR_AUDIO_CHANCE + MATURADOR_IMAGE_CHANCE && images.length) {
+      const remaining = Math.max(senderJourney.dailyTarget - senderJourney.dailySent, 1)
+      const burstSize = Math.min(randomInt(MATURADOR_IMAGE_BURST_MIN, MATURADOR_IMAGE_BURST_MAX), remaining)
+      for (let i = 0; i < burstSize; i++) {
+        if (i > 0 && !isCurrentMaturadorRun(campaign, runId)) break
+        const fileName = images[Math.floor(Math.random() * images.length)]
+        const ext = path.extname(fileName).toLowerCase()
+        const dataUri = fileToDataUri(path.join(MATURADOR_IMAGES_DIR, fileName), MIME_BY_EXT[ext] || 'image/jpeg')
+        const caption = Math.random() < 0.3 ? maturadorPhrases.pickShort() : undefined
+        await sendImage(sender.name, receiver.phone, dataUri, caption)
+        recordMaturadorSend(campaign, sender, receiver, senderJourney, receiverJourney, 'image', caption, fileName)
+        if (i < burstSize - 1) {
+          await new Promise(r => setTimeout(r, randomInt(MATURADOR_IMAGE_GAP_MIN, MATURADOR_IMAGE_GAP_MAX) * 1000))
+        }
+      }
+      return true
+    }
+
+    const message = maturadorPhrases.pick(campaign.msgCount)
+    await sendText(sender.name, receiver.phone, message)
+    recordMaturadorSend(campaign, sender, receiver, senderJourney, receiverJourney, 'text', message, undefined)
     return true
   } catch (e) {
     _broadcast('wuzapi_maturador', { type: 'error', campaignId: campaign.id, instanceName: sender.name, error: e?.response?.data?.error || e.message })
@@ -1081,7 +1111,7 @@ async function runMaturadorPairsTick(campaign, ready, readyNames, journeysByName
     const turnReceiverJourney = journeysByName[turnReceiver.name]
     if (turnSenderJourney.dailySent >= turnSenderJourney.dailyTarget) break
 
-    const ok = await sendOneMaturadorMessage(campaign, turnSender, turnReceiver, turnSenderJourney, turnReceiverJourney)
+    const ok = await sendOneMaturadorMessage(campaign, turnSender, turnReceiver, turnSenderJourney, turnReceiverJourney, runId)
     if (!ok) break
 
     // O intervalo entre as mensagens da troca é o mesmo delay mínimo/máximo
@@ -1147,7 +1177,7 @@ async function runMaturadorHubTick(campaign, ready, journeysByName, runId) {
     const turnReceiverJourney = journeysByName[turnReceiver.name]
     if (!turnIsMatrix && turnSenderJourney.dailySent >= turnSenderJourney.dailyTarget) break
 
-    const ok = await sendOneMaturadorMessage(campaign, turnSender, turnReceiver, turnSenderJourney, turnReceiverJourney)
+    const ok = await sendOneMaturadorMessage(campaign, turnSender, turnReceiver, turnSenderJourney, turnReceiverJourney, runId)
     if (!ok) break
 
     if (!anyPending()) break
@@ -1163,50 +1193,65 @@ async function runMaturadorHubTick(campaign, ready, journeysByName, runId) {
   return false
 }
 
+// Agenda a próxima rodada da campanha — ponto único de scheduling pra
+// garantir que toda saída de runMaturadorLoop passe por aqui (nunca por um
+// "return" solto que esquece de religar o timer).
+function scheduleMaturadorLoop(campaign, runId, delaySeconds) {
+  if (!isCurrentMaturadorRun(campaign, runId)) return
+  campaign.timer = setTimeout(() => runMaturadorLoop(campaign, runId), delaySeconds * 1000)
+}
+
 async function runMaturadorLoop(campaign, runId) {
   if (!isCurrentMaturadorRun(campaign, runId)) return
 
-  const readyAll = await getReadyMaturadorInstances(campaign.instanceNames)
-  const ready = selectJourneyParticipants(readyAll)
+  try {
+    const readyAll = await getReadyMaturadorInstances(campaign.instanceNames)
+    const ready = selectJourneyParticipants(readyAll)
 
-  if (ready.length < 2) {
-    _broadcast('wuzapi_maturador', { type: 'waiting', campaignId: campaign.id, message: '⚠️ Aguardando pelo menos 2 instâncias Wuzapi conectadas...' })
-    if (!isCurrentMaturadorRun(campaign, runId)) return
-    const waitDelay = Math.floor(Math.random() * (campaign.maxDelay - campaign.minDelay + 1)) + campaign.minDelay
-    campaign.timer = setTimeout(() => runMaturadorLoop(campaign, runId), waitDelay * 1000)
-    return
-  }
-
-  // Garante (cria ou avança) a jornada de hoje de cada número pronto — cada
-  // um no seu próprio ritmo, começando do dia 1 na primeira vez que participa.
-  const journeysByName = {}
-  ready.forEach(r => {
-    const { journey, isNewDay } = ensureInstanceJourneyDay(r.name)
-    journeysByName[r.name] = journey
-    if (isNewDay) _broadcast('wuzapi_maturador', { type: 'day_started', campaignId: campaign.id, instanceName: r.name, day: journey.dayIndex, target: journey.dailyTarget })
-  })
-  saveMaturadorJourney()
-
-  const readyNames = new Set(ready.map(r => r.name))
-  const allDone = campaign.mode === 'hub'
-    ? await runMaturadorHubTick(campaign, ready, journeysByName, runId)
-    : await runMaturadorPairsTick(campaign, ready, readyNames, journeysByName, runId)
-
-  if (!isCurrentMaturadorRun(campaign, runId)) return
-
-  if (allDone) {
-    if (!campaign.dayQuotaReached) {
-      campaign.dayQuotaReached = true
-      _broadcast('wuzapi_maturador', { type: 'day_complete', campaignId: campaign.id })
+    if (ready.length < 2) {
+      _broadcast('wuzapi_maturador', { type: 'waiting', campaignId: campaign.id, message: '⚠️ Aguardando pelo menos 2 instâncias Wuzapi conectadas...' })
+      const waitDelay = Math.floor(Math.random() * (campaign.maxDelay - campaign.minDelay + 1)) + campaign.minDelay
+      scheduleMaturadorLoop(campaign, runId, waitDelay)
+      return
     }
-    campaign.timer = setTimeout(() => runMaturadorLoop(campaign, runId), MATURADOR_DAY_CHECK_MS)
-    return
-  }
-  campaign.dayQuotaReached = false
 
-  const delay = Math.floor(Math.random() * (campaign.maxDelay - campaign.minDelay + 1)) + campaign.minDelay
-  _broadcast('wuzapi_maturador', { type: 'delay', campaignId: campaign.id, seconds: delay })
-  campaign.timer = setTimeout(() => runMaturadorLoop(campaign, runId), delay * 1000)
+    // Garante (cria ou avança) a jornada de hoje de cada número pronto — cada
+    // um no seu próprio ritmo, começando do dia 1 na primeira vez que participa.
+    const journeysByName = {}
+    ready.forEach(r => {
+      const { journey, isNewDay } = ensureInstanceJourneyDay(r.name)
+      journeysByName[r.name] = journey
+      if (isNewDay) _broadcast('wuzapi_maturador', { type: 'day_started', campaignId: campaign.id, instanceName: r.name, day: journey.dayIndex, target: journey.dailyTarget })
+    })
+    saveMaturadorJourney()
+
+    const readyNames = new Set(ready.map(r => r.name))
+    const allDone = campaign.mode === 'hub'
+      ? await runMaturadorHubTick(campaign, ready, journeysByName, runId)
+      : await runMaturadorPairsTick(campaign, ready, readyNames, journeysByName, runId)
+
+    if (allDone) {
+      if (!campaign.dayQuotaReached) {
+        campaign.dayQuotaReached = true
+        _broadcast('wuzapi_maturador', { type: 'day_complete', campaignId: campaign.id })
+      }
+      scheduleMaturadorLoop(campaign, runId, MATURADOR_DAY_CHECK_MS / 1000)
+      return
+    }
+    campaign.dayQuotaReached = false
+
+    const delay = Math.floor(Math.random() * (campaign.maxDelay - campaign.minDelay + 1)) + campaign.minDelay
+    _broadcast('wuzapi_maturador', { type: 'delay', campaignId: campaign.id, seconds: delay })
+    scheduleMaturadorLoop(campaign, runId, delay)
+  } catch (e) {
+    // Nunca deixa um erro inesperado (não previsto pelos try/catch internos
+    // de cada envio) travar a campanha pra sempre com o card mostrando
+    // "rodando" e nada mais acontecendo — loga, avisa e tenta de novo em
+    // pouco tempo, em vez de morrer silenciosamente.
+    console.error(`[Wuzapi][Maturador][${campaign.id}] Erro inesperado no loop, tentando de novo em 30s:`, e)
+    _broadcast('wuzapi_maturador', { type: 'error', campaignId: campaign.id, instanceName: '-', error: 'Erro interno inesperado — tentando de novo em instantes.' })
+    scheduleMaturadorLoop(campaign, runId, 30)
+  }
 }
 
 async function startMaturador({ instanceNames, minDelay, maxDelay, mediaEnabled, mode } = {}) {
