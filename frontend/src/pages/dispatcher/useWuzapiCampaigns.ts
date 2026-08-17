@@ -78,6 +78,11 @@ export function useWuzapiCampaigns() {
     }
     if (p.type === 'skipped') addLog(`⏭️ ${p.number} — já enviado anteriormente`)
     if (p.type === 'waiting') { startWait(p.delay); addLog(`⏱️ Aguardando ${p.delay}s`) }
+    if (p.type === 'batch_pause') { startWait(p.seconds); addLog(`⏸️ Pausa de segurança (${p.seconds}s) após ${p.batchCount} envios seguidos`) }
+    if (p.type === 'circuit_break') {
+      setCurrent(prev => prev ? { ...prev, status: 'done', paused: false, endedAt: Date.now() } : prev)
+      addLog(p.reason)
+    }
     if (p.type === 'paused') { setCurrent(prev => prev ? { ...prev, paused: p.paused } : prev); addLog(p.paused ? '⏸️ Pausado' : '▶️ Retomado') }
     if (p.type === 'stopped') { setCurrent(prev => prev ? { ...prev, status: 'done', paused: false, endedAt: Date.now() } : prev); addLog('🛑 Interrompido.') }
     if (p.type === 'done') {

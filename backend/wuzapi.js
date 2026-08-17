@@ -608,14 +608,38 @@ function broadcastOutboundEcho(instanceName, to, payload, messageId) {
   })
 }
 
+// Circuito de segurança: mensagens de botão (recurso de Business API, "forjado"
+// pelo whatsmeow) mandadas rápido demais pra números frios são um dos padrões
+// mais fáceis de flagrar como spam. Depois de várias falhas seguidas o mais
+// provável é a sessão ter caído (número desconectado/precisando de novo QR) —
+// insistir só manda o resto da lista inteira pro vazio. Pausa longa a cada N
+// envios reduz a assinatura de "disparo em massa" de um jeito que o delay
+// curto entre contatos sozinho não cobre.
+const CAMPAIGN_MAX_CONSECUTIVE_FAILURES = 3
+const CAMPAIGN_BATCH_SIZE = 25
+const CAMPAIGN_BATCH_PAUSE_MIN = 90
+const CAMPAIGN_BATCH_PAUSE_MAX = 240
+
 async function runCampaign(data) {
   const { name, payload, instanceNames, contacts, delayMin = 5, delayMax = 15 } = data
+
+  // Nenhuma dessas instâncias pode estar ocupada num maturador rodando —
+  // dobrar o volume de mensagens na mesma sessão só aumenta o risco de
+  // queda/ban, e as duas features brigariam pela mesma conexão.
+  const busy = getBusyInstanceNames()
+  const conflicting = instanceNames.filter(n => busy.has(n))
+  if (conflicting.length) {
+    throw new Error(`Essas instâncias já estão em uso pelo maturador: ${conflicting.join(', ')}. Pare o maturador nelas antes de disparar a campanha.`)
+  }
+
   campaignState.results = []
   campaignState.paused = false
   campaignState.stopped = false
   campaignState.running = true
   campaignState.current = data
   let success = 0, failed = 0
+  let consecutiveFailures = 0
+  let batchCount = 0
   const startedAt = Date.now()
   let rrIndex = 0
 
@@ -646,6 +670,8 @@ async function runCampaign(data) {
       result.sentAt = Date.now()
       if (sent?.messageId) result.messageId = sent.messageId
       success++
+      batchCount++
+      consecutiveFailures = 0
       campaignState.sentNumbers.add(contact.number)
       _broadcast('wuzapi_campaign', { type: 'result', contact: result, success, failed })
       broadcastOutboundEcho(instanceName, contact.number, resolved, sent?.messageId)
@@ -653,10 +679,28 @@ async function runCampaign(data) {
       result.status = 'failed'
       result.error = e?.response?.data?.error || e.message || 'Erro desconhecido'
       failed++
+      consecutiveFailures++
       _broadcast('wuzapi_campaign', { type: 'result', contact: result, success, failed })
+
+      if (consecutiveFailures >= CAMPAIGN_MAX_CONSECUTIVE_FAILURES) {
+        campaignState.stopped = true
+        _broadcast('wuzapi_campaign', {
+          type: 'circuit_break',
+          reason: `⚠️ ${consecutiveFailures} envios seguidos falharam — a instância provavelmente caiu (pode pedir novo QR). Campanha parada automaticamente antes de mandar o resto da lista pro vazio.`,
+        })
+        break
+      }
     }
 
     if (i < contacts.length - 1 && !campaignState.stopped) {
+      // Pausa longa a cada N envios bem-sucedidos — quebra o padrão de
+      // "disparo contínuo" que sozinho o delay curto entre contatos não cobre.
+      if (batchCount >= CAMPAIGN_BATCH_SIZE) {
+        const pause = Math.floor(Math.random() * (CAMPAIGN_BATCH_PAUSE_MAX - CAMPAIGN_BATCH_PAUSE_MIN + 1)) + CAMPAIGN_BATCH_PAUSE_MIN
+        _broadcast('wuzapi_campaign', { type: 'batch_pause', seconds: pause, batchCount })
+        await sleep(pause * 1000)
+        batchCount = 0
+      }
       const delay = Math.floor(Math.random() * (Math.max(delayMax, delayMin) - delayMin + 1)) + delayMin
       _broadcast('wuzapi_campaign', { type: 'waiting', delay, next: i + 2 })
       await sleep(delay * 1000)
@@ -1248,6 +1292,15 @@ async function startMaturador({ instanceNames, minDelay, maxDelay, mediaEnabled,
   const conflicting = names.filter(n => busy.has(n))
   if (conflicting.length) {
     throw new Error(`Essas instâncias já estão em outra campanha em execução: ${conflicting.join(', ')}.`)
+  }
+
+  // Mesma lógica pro disparo em massa (runCampaign) — não dobra o volume de
+  // mensagens numa sessão que já está sendo usada pra um disparo.
+  if (campaignState.running && campaignState.current) {
+    const dispatching = names.filter(n => (campaignState.current.instanceNames || []).includes(n))
+    if (dispatching.length) {
+      throw new Error(`Essas instâncias já estão em uso por um disparo de campanha em andamento: ${dispatching.join(', ')}.`)
+    }
   }
 
   const min = Number(minDelay) || 60
