@@ -979,12 +979,8 @@ function selectJourneyParticipants(readyAll) {
   return readyAll.filter(r => selected.includes(r.name) || matrix.includes(r.name))
 }
 
-// Manda uma mensagem (texto/imagem/áudio, sorteado) do sender pro receiver e
-// atualiza as duas jornadas. Retorna true em caso de sucesso, false se falhou
-// (já broadcasta o erro) — quem chama decide se para a rajada nesse caso.
 // Registra uma mensagem individual já enviada (bump nas duas jornadas +
-// broadcast pro front) — usado tanto pro envio único (texto/áudio) quanto
-// pra cada foto de uma rajada de imagens.
+// broadcast pro front).
 function recordMaturadorSend(campaign, sender, receiver, senderJourney, receiverJourney, msgType, message, fileName) {
   campaign.msgCount++
   senderJourney.dailySent++
@@ -999,23 +995,15 @@ function recordMaturadorSend(campaign, sender, receiver, senderJourney, receiver
   })
 }
 
-// Quantas fotos manda de uma vez quando o sorteio escolhe imagem — simula
-// alguém compartilhando várias fotos seguidas de um álbum. Repete fotos da
-// biblioteca à vontade (não precisa ser sempre uma diferente) e usa um
-// intervalo curto entre elas — é uma única "ação" de compartilhar fotos, não
-// uma sequência de mensagens de texto, então não segue o delay mínimo/máximo
-// da campanha (esse continua valendo entre as trocas de texto normais).
-const MATURADOR_IMAGE_BURST_MIN = 2
-const MATURADOR_IMAGE_BURST_MAX = 5
-const MATURADOR_IMAGE_GAP_MIN = 2
-const MATURADOR_IMAGE_GAP_MAX = 6
-
 // Manda uma mensagem (texto/imagem/áudio, sorteado) do sender pro receiver e
-// atualiza as duas jornadas. Imagem pode virar uma rajada de várias fotos
-// (ver acima). Retorna true se mandou pelo menos uma mensagem com sucesso,
-// false se falhou de cara (já broadcasta o erro) — quem chama decide se para
-// a rodada nesse caso.
-async function sendOneMaturadorMessage(campaign, sender, receiver, senderJourney, receiverJourney, runId) {
+// atualiza as duas jornadas. Sempre UMA mensagem por chamada — "mandar várias
+// fotos seguidas" acontece naturalmente pelo sistema de rodadas de quem chama
+// (várias mensagens da rodada podem sortear imagem, inclusive repetida, mas
+// cada uma é uma "vez" própria: respeita a regra da 1ª mensagem do dia sair
+// sozinha e o delay mínimo/máximo entre elas — nunca um atalho por fora
+// dessas regras). Retorna true em caso de sucesso, false se falhou (já
+// broadcasta o erro) — quem chama decide se para a rodada nesse caso.
+async function sendOneMaturadorMessage(campaign, sender, receiver, senderJourney, receiverJourney) {
   const images = campaign.mediaEnabled ? safeReadDir(MATURADOR_IMAGES_DIR) : []
   const audios = campaign.mediaEnabled ? safeReadDir(MATURADOR_AUDIOS_DIR) : []
   const roll = Math.random()
@@ -1030,20 +1018,12 @@ async function sendOneMaturadorMessage(campaign, sender, receiver, senderJourney
     }
 
     if (roll < MATURADOR_AUDIO_CHANCE + MATURADOR_IMAGE_CHANCE && images.length) {
-      const remaining = Math.max(senderJourney.dailyTarget - senderJourney.dailySent, 1)
-      const burstSize = Math.min(randomInt(MATURADOR_IMAGE_BURST_MIN, MATURADOR_IMAGE_BURST_MAX), remaining)
-      for (let i = 0; i < burstSize; i++) {
-        if (i > 0 && !isCurrentMaturadorRun(campaign, runId)) break
-        const fileName = images[Math.floor(Math.random() * images.length)]
-        const ext = path.extname(fileName).toLowerCase()
-        const dataUri = fileToDataUri(path.join(MATURADOR_IMAGES_DIR, fileName), MIME_BY_EXT[ext] || 'image/jpeg')
-        const caption = Math.random() < 0.3 ? maturadorPhrases.pickShort() : undefined
-        await sendImage(sender.name, receiver.phone, dataUri, caption)
-        recordMaturadorSend(campaign, sender, receiver, senderJourney, receiverJourney, 'image', caption, fileName)
-        if (i < burstSize - 1) {
-          await new Promise(r => setTimeout(r, randomInt(MATURADOR_IMAGE_GAP_MIN, MATURADOR_IMAGE_GAP_MAX) * 1000))
-        }
-      }
+      const fileName = images[Math.floor(Math.random() * images.length)]
+      const ext = path.extname(fileName).toLowerCase()
+      const dataUri = fileToDataUri(path.join(MATURADOR_IMAGES_DIR, fileName), MIME_BY_EXT[ext] || 'image/jpeg')
+      const caption = Math.random() < 0.5 ? maturadorPhrases.pickShort() : undefined
+      await sendImage(sender.name, receiver.phone, dataUri, caption)
+      recordMaturadorSend(campaign, sender, receiver, senderJourney, receiverJourney, 'image', caption, fileName)
       return true
     }
 
@@ -1111,7 +1091,7 @@ async function runMaturadorPairsTick(campaign, ready, readyNames, journeysByName
     const turnReceiverJourney = journeysByName[turnReceiver.name]
     if (turnSenderJourney.dailySent >= turnSenderJourney.dailyTarget) break
 
-    const ok = await sendOneMaturadorMessage(campaign, turnSender, turnReceiver, turnSenderJourney, turnReceiverJourney, runId)
+    const ok = await sendOneMaturadorMessage(campaign, turnSender, turnReceiver, turnSenderJourney, turnReceiverJourney)
     if (!ok) break
 
     // O intervalo entre as mensagens da troca é o mesmo delay mínimo/máximo
@@ -1177,7 +1157,7 @@ async function runMaturadorHubTick(campaign, ready, journeysByName, runId) {
     const turnReceiverJourney = journeysByName[turnReceiver.name]
     if (!turnIsMatrix && turnSenderJourney.dailySent >= turnSenderJourney.dailyTarget) break
 
-    const ok = await sendOneMaturadorMessage(campaign, turnSender, turnReceiver, turnSenderJourney, turnReceiverJourney, runId)
+    const ok = await sendOneMaturadorMessage(campaign, turnSender, turnReceiver, turnSenderJourney, turnReceiverJourney)
     if (!ok) break
 
     if (!anyPending()) break
