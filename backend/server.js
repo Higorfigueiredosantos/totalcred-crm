@@ -2118,16 +2118,17 @@ app.get('/api/wuzapi-maturador/status', (_req, res) => {
 
 app.post('/api/wuzapi-maturador/start', async (req, res) => {
   try {
-    await wuzapi.startMaturador(req.body || {})
-    res.json({ ok: true })
+    const campaign = await wuzapi.startMaturador(req.body || {})
+    res.json({ ok: true, campaign })
   } catch (e) {
     res.status(400).json({ error: e.message })
   }
 })
 
-app.post('/api/wuzapi-maturador/stop', (_req, res) => {
-  wuzapi.stopMaturador()
-  res.json({ ok: true })
+app.post('/api/wuzapi-maturador/stop', (req, res) => {
+  const { id } = req.body || {}
+  if (!id) return res.status(400).json({ error: 'Faltou o id da campanha.' })
+  res.json(wuzapi.stopMaturador(id))
 })
 
 app.get('/api/wuzapi-maturador/settings', (_req, res) => {

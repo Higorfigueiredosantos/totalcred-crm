@@ -820,27 +820,50 @@ function MaturadorTab() {
 // participam) — assim que a meta do dia é batida o maturador para sozinho
 // até o dia seguinte.
 
+type CampaignStatus = 'idle' | 'running' | 'paused'
+
+// Uma campanha = uma seleção de instâncias rodando seu próprio loop de
+// aquecimento. Várias podem existir ao mesmo tempo (ver getBusyInstanceNames
+// no backend) — cada uma só é bloqueada de rodar se outra campanha já
+// estiver usando alguma das mesmas instâncias. localId é gerado no front e
+// sobrevive a pausa/retomada (permite manter o card estável); backendId só
+// existe enquanto a campanha está de fato rodando no servidor.
+type CampaignUI = {
+  localId: string
+  backendId: string | null
+  status: CampaignStatus
+  selectedInstances: string[]
+  mode: MaturadorMode
+  minDelay: number
+  maxDelay: number
+  mediaEnabled: boolean
+  log: LogEntry[]
+  nextIn: number
+  msgCount: number
+  dayQuotaReached: boolean
+}
+
+function makeDraftCampaign(selectedInstances: string[]): CampaignUI {
+  return {
+    localId: uuid(), backendId: null, status: 'idle',
+    selectedInstances, mode: 'pairs', minDelay: 60, maxDelay: 300, mediaEnabled: true,
+    log: [], nextIn: 0, msgCount: 0, dayQuotaReached: false,
+  }
+}
+
 function WuzapiMaturadorTab() {
   const { instances } = useWuzapiInstances()
-  const [status, setStatus] = useState<MaturadorStatus>('idle')
-  const [minDelay, setMinDelay] = useState(60)
-  const [maxDelay, setMaxDelay] = useState(300)
-  const [mediaEnabled, setMediaEnabled] = useState(true)
-  const [log, setLog] = useState<LogEntry[]>(() => {
-    try { return JSON.parse(localStorage.getItem('wuzapi_maturador_log') || '[]') } catch { return [] }
-  })
-  const [nextIn, setNextIn] = useState(0)
-  const logRef = useRef<HTMLDivElement>(null)
-  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const [selectedInstances, setSelectedInstances] = useState<string[]>([])
-  const [mode, setMode] = useState<MaturadorMode>('pairs')
+  const [campaigns, setCampaigns] = useState<CampaignUI[]>([])
+  const [initialized, setInitialized] = useState(false)
+  const countdownRefs = useRef<Record<string, ReturnType<typeof setInterval>>>({})
 
-  // Jornada de aquecimento — uma por número (vem do backend)
+  // Jornada de aquecimento — uma por número (vem do backend), compartilhada
+  // por todas as campanhas (é por instância, não por campanha).
   const [journeys, setJourneys] = useState<Record<string, MaturadorJourneyEntry>>({})
   const [expandedJourney, setExpandedJourney] = useState<string | null>(null)
-  const [dayQuotaReached, setDayQuotaReached] = useState(false)
   const [journeySettings, setJourneySettings] = useState<MaturadorSettings>(DEFAULT_MATURADOR_SETTINGS)
   const [showSettings, setShowSettings] = useState(false)
+  const [openSettingsFor, setOpenSettingsFor] = useState<string | null>(null)
 
   // Canais no maturador: histórico de mensagens enviadas/recebidas por instância
   const [warmingDates, setWarmingDates] = useState<Record<string, WarmingEntry>>(() => {
@@ -856,50 +879,78 @@ function WuzapiMaturadorTab() {
   })
   const [expandedInstance, setExpandedInstance] = useState<string | null>(null)
 
-  const running = status === 'running'
   const connectedInstances = instances.filter(i => i.status === 'connected')
 
   useEffect(() => {
-    // Seleciona as instâncias conectadas por padrão (uma vez, ao montar) —
-    // depois disso a escolha fica a cargo do usuário.
-    fetch('/api/wuzapi/instances').then(r => r.json()).then((list: any[]) => {
-      const ready = (list || []).filter(i => i.status === 'connected').map(i => i.name)
-      setSelectedInstances(prev => prev.length ? prev : ready)
-    }).catch(() => {})
+    let storedCampaigns: CampaignUI[] = []
+    try {
+      const raw = JSON.parse(localStorage.getItem('wuzapi_maturador_campaigns') || '[]')
+      if (Array.isArray(raw)) storedCampaigns = raw
+    } catch {}
 
-    fetch('/api/wuzapi-maturador/status').then(r => r.json()).then((d: any) => {
-      if (typeof d.mediaEnabled === 'boolean') setMediaEnabled(d.mediaEnabled)
-      if (d.journeys) setJourneys(d.journeys)
-      if (d.settings) setJourneySettings(d.settings)
-      if (typeof d.dayQuotaReached === 'boolean') setDayQuotaReached(d.dayQuotaReached)
-      if (d.mode === 'hub' || d.mode === 'pairs') setMode(d.mode)
-      if (d.running) {
-        setStatus('running')
-        if (d.minDelay) setMinDelay(d.minDelay)
-        if (d.maxDelay) setMaxDelay(d.maxDelay)
-        if (d.instanceNames?.length) setSelectedInstances(d.instanceNames)
-        addLog({
-          ts: new Date().toLocaleTimeString('pt-BR'),
-          text: 'Maturador já estava em execução — retomando monitoramento.',
-          kind: 'system',
+    Promise.all([
+      fetch('/api/wuzapi/instances').then(r => r.json()).catch(() => []),
+      fetch('/api/wuzapi-maturador/status').then(r => r.json()).catch(() => null),
+    ]).then(([instanceList, d]) => {
+      if (d?.journeys) setJourneys(d.journeys)
+      if (d?.settings) setJourneySettings(d.settings)
+
+      const backendCampaigns: any[] = d?.campaigns || []
+      const readyNames = (instanceList || []).filter((i: any) => i.status === 'connected').map((i: any) => i.name)
+      const matchedBackendIds = new Set<string>()
+
+      // Campanhas guardadas localmente (rascunhos e as que já estavam
+      // rodando antes de recarregar a página) — reconciliadas com o que o
+      // backend realmente tem em execução agora.
+      let next: CampaignUI[] = storedCampaigns.map(c => ({ ...c, nextIn: 0 })).map(c => {
+        if (!c.backendId) return c
+        const bc = backendCampaigns.find(b => b.id === c.backendId)
+        if (!bc) return { ...c, backendId: null, status: 'idle' as CampaignStatus }
+        matchedBackendIds.add(bc.id)
+        return {
+          ...c, status: 'running' as CampaignStatus,
+          selectedInstances: bc.instanceNames, mode: bc.mode,
+          minDelay: bc.minDelay, maxDelay: bc.maxDelay, mediaEnabled: bc.mediaEnabled,
+          dayQuotaReached: bc.dayQuotaReached, msgCount: bc.msgCount,
+        }
+      })
+
+      // Campanhas rodando no backend que a gente ainda não tinha localmente
+      // (ex.: primeiro carregamento da página com o maturador já ativo).
+      for (const bc of backendCampaigns) {
+        if (matchedBackendIds.has(bc.id)) continue
+        next.push({
+          localId: uuid(), backendId: bc.id, status: 'running',
+          selectedInstances: bc.instanceNames, mode: bc.mode,
+          minDelay: bc.minDelay, maxDelay: bc.maxDelay, mediaEnabled: bc.mediaEnabled,
+          dayQuotaReached: bc.dayQuotaReached, msgCount: bc.msgCount,
+          log: [{ ts: new Date().toLocaleTimeString('pt-BR'), text: 'Maturador já estava em execução — retomando monitoramento.', kind: 'system' }],
+          nextIn: 0,
         })
       }
-    }).catch(() => {})
+
+      if (!next.length) {
+        const draft = makeDraftCampaign(readyNames)
+        next = [draft]
+        // Assim que a aba abre com nenhuma campanha configurada, já pede pra
+        // escolher o modo (Matriz/Entre si) e o delay antes de mais nada.
+        setOpenSettingsFor(draft.localId)
+      }
+      setCampaigns(next)
+      setInitialized(true)
+    })
   }, [])
 
   useEffect(() => {
     const off = onWSMessage('wuzapi_maturador', (payload: any) => {
       const ts = new Date().toLocaleTimeString('pt-BR')
-      if (payload.type === 'started') {
-        setStatus('running')
-        addLog({ ts, text: 'Maturador iniciado!', kind: 'system' })
+      const campaignId = payload.campaignId as string | undefined
+
+      const appendLog = (entry: LogEntry) => {
+        if (!campaignId) return
+        setCampaigns(prev => prev.map(c => c.backendId === campaignId ? { ...c, log: [...c.log.slice(-499), entry] } : c))
       }
-      if (payload.type === 'stopped') {
-        setStatus(prev => prev === 'paused' ? 'paused' : 'idle')
-        setNextIn(0)
-        if (countdownRef.current) clearInterval(countdownRef.current)
-        addLog({ ts, text: 'Maturador parado.', kind: 'system' })
-      }
+
       if (payload.type === 'day_started') {
         setJourneys(prev => ({
           ...prev,
@@ -908,12 +959,12 @@ function WuzapiMaturadorTab() {
             dayIndex: payload.day, dailyTarget: payload.target, dailySent: 0, dailyReceived: 0,
           },
         }))
-        setDayQuotaReached(false)
-        addLog({ ts, text: `${getInstanceLabel(payload.instanceName)}: dia ${payload.day} da jornada iniciado — meta de ${payload.target} mensagens hoje.`, kind: 'system' })
+        setCampaigns(prev => prev.map(c => c.backendId === campaignId ? { ...c, dayQuotaReached: false } : c))
+        appendLog({ ts, text: `${getInstanceLabel(payload.instanceName)}: dia ${payload.day} da jornada iniciado — meta de ${payload.target} mensagens hoje.`, kind: 'system' })
       }
       if (payload.type === 'day_complete') {
-        setDayQuotaReached(true)
-        addLog({ ts, text: 'Meta de hoje atingida para todos os números selecionados — aguardando o próximo dia.', kind: 'system' })
+        setCampaigns(prev => prev.map(c => c.backendId === campaignId ? { ...c, dayQuotaReached: true } : c))
+        appendLog({ ts, text: 'Meta de hoje atingida para todos os números selecionados — aguardando o próximo dia.', kind: 'system' })
       }
       if (payload.type === 'log') {
         setJourneys(prev => {
@@ -944,42 +995,51 @@ function WuzapiMaturadorTab() {
           try { localStorage.setItem('wuzapi_warming_dates', JSON.stringify(updated)) } catch {}
           return updated
         })
-        addLog({ ts, text: '', kind: 'msg', from: payload.from, to: payload.to, msgText: payload.message, msgType: payload.msgType || 'text', fileName: payload.fileName })
+        setCampaigns(prev => prev.map(c => c.backendId === campaignId ? { ...c, msgCount: c.msgCount + 1 } : c))
+        appendLog({ ts, text: '', kind: 'msg', from: payload.from, to: payload.to, msgText: payload.message, msgType: payload.msgType || 'text', fileName: payload.fileName })
       }
       if (payload.type === 'error') {
-        addLog({ ts, text: `[${payload.instanceName}] ${payload.error}`, kind: 'error' })
+        appendLog({ ts, text: `[${payload.instanceName}] ${payload.error}`, kind: 'error' })
       }
       if (payload.type === 'waiting') {
-        addLog({ ts, text: payload.message, kind: 'warn' })
+        appendLog({ ts, text: payload.message, kind: 'warn' })
       }
       if (payload.type === 'delay') {
-        addLog({ ts, text: `Próximo envio em ${payload.seconds}s`, kind: 'delay' })
-        startCountdown(payload.seconds)
+        appendLog({ ts, text: `Próximo envio em ${payload.seconds}s`, kind: 'delay' })
+        if (campaignId) startCountdown(campaignId, payload.seconds)
+      }
+      if (payload.type === 'stopped' && campaignId) {
+        stopCountdown(campaignId)
+        setCampaigns(prev => prev.map(c => c.backendId === campaignId ? { ...c, status: c.status === 'paused' ? 'paused' : 'idle', nextIn: 0 } : c))
       }
     })
-    return () => { off(); if (countdownRef.current) clearInterval(countdownRef.current) }
+    return () => { off(); Object.values(countdownRefs.current).forEach(clearInterval) }
   }, [])
 
   useEffect(() => {
-    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
-  }, [log])
+    if (!initialized) return
+    try { localStorage.setItem('wuzapi_maturador_campaigns', JSON.stringify(campaigns.map(c => ({ ...c, log: c.log.slice(-200) })))) } catch {}
+  }, [campaigns, initialized])
 
-  useEffect(() => {
-    try { localStorage.setItem('wuzapi_maturador_log', JSON.stringify(log.slice(-200))) } catch {}
-  }, [log])
-
-  function addLog(entry: LogEntry) {
-    setLog(prev => [...prev.slice(-499), entry])
+  function updateCampaign(localId: string, updater: (c: CampaignUI) => CampaignUI) {
+    setCampaigns(prev => prev.map(c => c.localId === localId ? updater(c) : c))
   }
 
-  function startCountdown(seconds: number) {
-    if (countdownRef.current) clearInterval(countdownRef.current)
-    setNextIn(seconds)
-    const t = setInterval(() => setNextIn(prev => {
-      if (prev <= 1) { clearInterval(t); return 0 }
-      return prev - 1
-    }), 1000)
-    countdownRef.current = t
+  function startCountdown(campaignId: string, seconds: number) {
+    if (countdownRefs.current[campaignId]) clearInterval(countdownRefs.current[campaignId])
+    setCampaigns(prev => prev.map(c => c.backendId === campaignId ? { ...c, nextIn: seconds } : c))
+    const t = setInterval(() => {
+      setCampaigns(prev => prev.map(c => {
+        if (c.backendId !== campaignId) return c
+        if (c.nextIn <= 1) { clearInterval(t); return { ...c, nextIn: 0 } }
+        return { ...c, nextIn: c.nextIn - 1 }
+      }))
+    }, 1000)
+    countdownRefs.current[campaignId] = t
+  }
+
+  function stopCountdown(campaignId: string) {
+    if (countdownRefs.current[campaignId]) { clearInterval(countdownRefs.current[campaignId]); delete countdownRefs.current[campaignId] }
   }
 
   // Registra ativação — incrementa apenas se hoje (hora local) ainda não foi contado
@@ -1013,45 +1073,66 @@ function WuzapiMaturadorTab() {
     return              { days, status: 'Frio',   badgeCls: 'bg-blue-900/40 text-blue-400',    barColor: 'bg-blue-500',   progress: (days / 15) * 100 }
   }
 
-  async function start() {
-    if (selectedInstances.length < 2) return alert('Selecione pelo menos 2 instâncias para iniciar o maturador.')
-    if (mode === 'hub' && !journeySettings.matrixInstances.length) {
-      return alert('Marque pelo menos um número matriz na engrenagem antes de iniciar no modo Matriz.')
+  function addCampaign() {
+    const busy = new Set(campaigns.flatMap(c => c.selectedInstances))
+    const preset = connectedInstances.map(i => i.name).filter(n => !busy.has(n))
+    const draft = makeDraftCampaign(preset)
+    setCampaigns(prev => [...prev, draft])
+    // Ao criar uma campanha nova (ex.: pra rodar uma Matriz junto com uma
+    // Entre si já em andamento), a engrenagem já abre pra escolher o modo e o
+    // delay antes de mexer na seleção de números.
+    setOpenSettingsFor(draft.localId)
+  }
+
+  function removeCampaign(localId: string) {
+    setCampaigns(prev => prev.filter(c => c.localId !== localId))
+    setOpenSettingsFor(prev => prev === localId ? null : prev)
+  }
+
+  async function launchCampaign(localId: string, resuming: boolean) {
+    const c = campaigns.find(x => x.localId === localId)
+    if (!c) return
+    if (!resuming) {
+      if (c.selectedInstances.length < 2) return alert('Selecione pelo menos 2 instâncias para iniciar essa campanha.')
+      if (c.mode === 'hub' && !journeySettings.matrixInstances.length) {
+        return alert('Marque pelo menos um número matriz na engrenagem antes de iniciar no modo Matriz.')
+      }
     }
     const r = await fetch('/api/wuzapi-maturador/start', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ minDelay, maxDelay, instanceNames: selectedInstances, mediaEnabled, mode })
+      body: JSON.stringify({ minDelay: c.minDelay, maxDelay: c.maxDelay, instanceNames: c.selectedInstances, mediaEnabled: c.mediaEnabled, mode: c.mode })
     })
     const d = await r.json()
     if (!r.ok) { alert(d.error); return }
-    recordWarmingStart(selectedInstances)
+    if (!resuming) recordWarmingStart(c.selectedInstances)
+    updateCampaign(localId, x => ({
+      ...x, backendId: d.campaign.id, status: 'running',
+      ...(resuming ? {} : { msgCount: 0, dayQuotaReached: false }),
+    }))
+    if (resuming) {
+      updateCampaign(localId, x => ({ ...x, log: [...x.log.slice(-499), { ts: new Date().toLocaleTimeString('pt-BR'), text: 'Maturador retomado.', kind: 'system' }] }))
+    }
   }
 
-  async function pause() {
-    await fetch('/api/wuzapi-maturador/stop', { method: 'POST' })
-    setStatus('paused')
-    setNextIn(0)
-    if (countdownRef.current) clearInterval(countdownRef.current)
-    addLog({ ts: new Date().toLocaleTimeString('pt-BR'), text: 'Maturador pausado — clique em Retomar para continuar.', kind: 'warn' })
+  async function pauseCampaign(localId: string) {
+    const c = campaigns.find(x => x.localId === localId)
+    if (!c?.backendId) return
+    const backendId = c.backendId
+    await fetch('/api/wuzapi-maturador/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: backendId }) })
+    stopCountdown(backendId)
+    updateCampaign(localId, x => ({
+      ...x, backendId: null, status: 'paused', nextIn: 0,
+      log: [...x.log.slice(-499), { ts: new Date().toLocaleTimeString('pt-BR'), text: 'Maturador pausado — clique em Retomar para continuar.', kind: 'warn' }],
+    }))
   }
 
-  async function resume() {
-    const r = await fetch('/api/wuzapi-maturador/start', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ minDelay, maxDelay, instanceNames: selectedInstances, mediaEnabled, mode })
-    })
-    if (!r.ok) { const d = await r.json(); alert(d.error); return }
-    setStatus('running')
-    addLog({ ts: new Date().toLocaleTimeString('pt-BR'), text: 'Maturador retomado.', kind: 'system' })
-  }
-
-  async function cancel() {
-    await fetch('/api/wuzapi-maturador/stop', { method: 'POST' })
-    setStatus('idle')
-    setNextIn(0)
-    if (countdownRef.current) clearInterval(countdownRef.current)
-    addLog({ ts: new Date().toLocaleTimeString('pt-BR'), text: 'Maturador cancelado.', kind: 'error' })
-    try { localStorage.removeItem('wuzapi_maturador_log') } catch {}
+  async function cancelCampaign(localId: string) {
+    const c = campaigns.find(x => x.localId === localId)
+    if (c?.backendId) {
+      await fetch('/api/wuzapi-maturador/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: c.backendId }) })
+      stopCountdown(c.backendId)
+    }
+    updateCampaign(localId, x => ({ ...x, backendId: null, status: 'idle', nextIn: 0, log: [] }))
   }
 
   async function deleteJourney(name: string) {
@@ -1085,164 +1166,58 @@ function WuzapiMaturadorTab() {
     return `${d}/${m}/${y}`
   }
 
-  const msgCount = log.filter(l => l.kind === 'msg').length
   const journeyNames = Object.keys(journeys).sort((a, b) => getInstanceLabel(a).localeCompare(getInstanceLabel(b)))
 
   return (
     <div className="space-y-5 max-w-2xl">
-      <div className="bg-gray-800 rounded-xl border border-gray-700 p-5 space-y-4">
+      <div className="flex items-center justify-between">
         <div>
           <h2 className="text-sm font-semibold text-white mb-1">Maturador de Instâncias (Wuzapi)</h2>
-          <p className="text-xs text-gray-400">As instâncias Wuzapi se enviam mensagens entre si automaticamente para aquecimento. Necessário no mínimo 2 instâncias conectadas.</p>
+          <p className="text-xs text-gray-400">As instâncias Wuzapi se enviam mensagens entre si automaticamente para aquecimento. Rode quantas campanhas quiser em paralelo — cada instância só pode estar em uma por vez.</p>
         </div>
-
-        {/* Instance selector */}
-        <div>
-          <label className="block text-xs font-medium text-gray-400 mb-2">
-            Instâncias para o maturador <span className="text-gray-600">({connectedInstances.length} conectada(s))</span>
-          </label>
-          {instances.length === 0 ? (
-            <div className="flex items-center gap-2 text-xs text-yellow-400 bg-yellow-900/20 border border-yellow-900/40 rounded-lg px-3 py-2">
-              ⚠️ Nenhuma instância Wuzapi cadastrada. Acesse Canais → Wuzapi e conecte pelo menos 2.
-            </div>
-          ) : (
-            <div className="flex flex-wrap gap-2">
-              {instances.map(inst => {
-                const sel = selectedInstances.includes(inst.name)
-                const label = inst.label || inst.name
-                return (
-                  <button key={inst.name} type="button" disabled={running || inst.status !== 'connected'}
-                    onClick={() => setSelectedInstances(prev =>
-                      sel ? prev.filter(id => id !== inst.name) : [...prev, inst.name]
-                    )}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border disabled:opacity-40 disabled:cursor-not-allowed ${
-                      sel
-                        ? 'bg-green-900/40 border-green-600 text-green-300'
-                        : inst.status === 'connected'
-                        ? 'bg-gray-700 border-gray-600 text-gray-400 hover:border-gray-500 hover:text-gray-200'
-                        : 'bg-gray-900 border-gray-800 text-gray-600'
-                    }`}>
-                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${inst.status === 'connected' ? 'bg-green-400' : 'bg-gray-600'}`} />
-                    {label}
-                    {sel && <span className="text-green-400 ml-0.5">✓</span>}
-                  </button>
-                )
-              })}
-            </div>
-          )}
-          {connectedInstances.length > 0 && selectedInstances.length < 2 && (
-            <p className="text-xs text-yellow-400/80 mt-1.5">⚠️ Selecione pelo menos 2 instâncias para iniciar</p>
-          )}
-        </div>
-
-        {/* Modo da jornada */}
-        <div>
-          <label className="block text-xs font-medium text-gray-400 mb-2">Modo da jornada</label>
-          <div className="flex gap-2">
-            <button type="button" disabled={running} onClick={() => setMode('pairs')}
-              className={`flex-1 text-left px-3 py-2 rounded-lg text-xs border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-                mode === 'pairs' ? 'bg-green-900/40 border-green-600 text-green-300' : 'bg-gray-700 border-gray-600 text-gray-400 hover:border-gray-500 hover:text-gray-200'
-              }`}>
-              <span className="font-semibold block">Entre si</span>
-              <span className="text-[10px] opacity-80">Cada número troca mensagens com parceiros fixos que vão crescendo aos poucos.</span>
-            </button>
-            <button type="button" disabled={running} onClick={() => setMode('hub')}
-              className={`flex-1 text-left px-3 py-2 rounded-lg text-xs border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-                mode === 'hub' ? 'bg-green-900/40 border-green-600 text-green-300' : 'bg-gray-700 border-gray-600 text-gray-400 hover:border-gray-500 hover:text-gray-200'
-              }`}>
-              <span className="font-semibold block">Matriz</span>
-              <span className="text-[10px] opacity-80">Só os números matriz (escolhidos na engrenagem) iniciam conversa com os demais — sem limite pra eles.</span>
-            </button>
-          </div>
-          {mode === 'hub' && !journeySettings.matrixInstances.length && (
-            <p className="text-xs text-yellow-400/80 mt-1.5">⚠️ Nenhum número matriz marcado ainda — ajuste na engrenagem abaixo antes de iniciar.</p>
-          )}
-        </div>
-
-        <div className="flex items-center gap-4">
-          <div>
-            <label className="block text-xs text-gray-400 mb-1">Delay mínimo</label>
-            <div className="flex items-center gap-1">
-              <input type="number" min={10} value={minDelay} onChange={e => setMinDelay(+e.target.value)}
-                disabled={running}
-                className="w-20 bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm text-white text-center focus:outline-none focus:border-green-500 disabled:opacity-50" />
-              <span className="text-xs text-gray-400">s</span>
-            </div>
-          </div>
-          <div>
-            <label className="block text-xs text-gray-400 mb-1">Delay máximo</label>
-            <div className="flex items-center gap-1">
-              <input type="number" min={10} value={maxDelay} onChange={e => setMaxDelay(+e.target.value)}
-                disabled={running}
-                className="w-20 bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm text-white text-center focus:outline-none focus:border-green-500 disabled:opacity-50" />
-              <span className="text-xs text-gray-400">s</span>
-            </div>
-          </div>
-          {running && nextIn > 0 && (
-            <div className="ml-auto text-center">
-              <p className="text-xs text-gray-500">Próximo em</p>
-              <p className="text-2xl font-mono font-bold text-green-400">{nextIn}s</p>
-            </div>
-          )}
-        </div>
-
-        <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer w-fit">
-          <input type="checkbox" checked={mediaEnabled} disabled={running}
-            onChange={e => setMediaEnabled(e.target.checked)}
-            className="accent-green-500 disabled:opacity-50" />
-          Também enviar fotos e áudios da biblioteca (não só texto)
-        </label>
-
-        {status !== 'idle' && (
-          <div className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs ${
-            running && dayQuotaReached ? 'bg-indigo-900/20 border border-indigo-800/50 text-indigo-300'
-            : status === 'running' ? 'bg-green-900/20 border border-green-800/50 text-green-400'
-            : 'bg-yellow-900/20 border border-yellow-800/50 text-yellow-400'
-          }`}>
-            <span className={`w-2 h-2 rounded-full shrink-0 ${
-              running && dayQuotaReached ? 'bg-indigo-400' : status === 'running' ? 'bg-green-400 animate-pulse' : 'bg-yellow-400'
-            }`} />
-            {running && dayQuotaReached
-              ? 'Meta de hoje atingida para todos os números — aguardando o próximo dia'
-              : status === 'running'
-              ? `Maturando... ${msgCount} mensagens enviadas nesta sessão`
-              : 'Pausado — clique em Retomar para continuar'}
-          </div>
-        )}
-
-        <div className="flex gap-2">
-          {status === 'idle' && (
-            <button onClick={start} disabled={selectedInstances.length < 2}
-              className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm rounded-lg">
-              <Play size={14} /> Iniciar Maturador
-            </button>
-          )}
-          {status === 'running' && (
-            <>
-              <button onClick={pause}
-                className="flex items-center gap-2 px-4 py-2 bg-yellow-600 hover:bg-yellow-500 text-white text-sm rounded-lg">
-                ⏸ Pausar
-              </button>
-              <button onClick={cancel}
-                className="flex items-center gap-2 px-4 py-2 bg-red-800 hover:bg-red-700 text-white text-sm rounded-lg">
-                <Square size={14} /> Cancelar
-              </button>
-            </>
-          )}
-          {status === 'paused' && (
-            <>
-              <button onClick={resume}
-                className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-500 text-white text-sm rounded-lg">
-                <Play size={14} /> Retomar
-              </button>
-              <button onClick={cancel}
-                className="flex items-center gap-2 px-4 py-2 bg-red-800 hover:bg-red-700 text-white text-sm rounded-lg">
-                <Square size={14} /> Cancelar
-              </button>
-            </>
-          )}
-        </div>
+        <button onClick={addCampaign} title="Adicionar outra campanha de aquecimento"
+          className="flex items-center gap-1.5 px-3 py-2 bg-gray-700 hover:bg-gray-600 text-white text-xs font-medium rounded-lg shrink-0">
+          <Plus size={14} /> Nova campanha
+        </button>
       </div>
+
+      {campaigns.length === 0 ? (
+        <div className="bg-gray-800 rounded-xl border border-gray-700 p-5 text-center">
+          <p className="text-xs text-gray-400 mb-3">Nenhuma campanha configurada ainda.</p>
+          <button onClick={addCampaign}
+            className="inline-flex items-center gap-1.5 px-4 py-2 bg-green-600 hover:bg-green-500 text-white text-sm rounded-lg">
+            <Plus size={14} /> Nova campanha
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {campaigns.map(c => (
+            <WuzapiCampaignCard
+              key={c.localId}
+              campaign={c}
+              instances={instances}
+              connectedInstances={connectedInstances}
+              journeySettings={journeySettings}
+              busyElsewhere={(name: string) => campaigns.some(o => o.localId !== c.localId && o.selectedInstances.includes(name))}
+              getInstanceLabel={getInstanceLabel}
+              settingsOpen={openSettingsFor === c.localId}
+              onOpenSettings={() => setOpenSettingsFor(c.localId)}
+              onCloseSettings={() => setOpenSettingsFor(prev => prev === c.localId ? null : prev)}
+              onSelectInstances={(names: string[]) => updateCampaign(c.localId, x => ({ ...x, selectedInstances: names }))}
+              onChangeMode={(mode: MaturadorMode) => updateCampaign(c.localId, x => ({ ...x, mode }))}
+              onChangeMinDelay={(v: number) => updateCampaign(c.localId, x => ({ ...x, minDelay: v }))}
+              onChangeMaxDelay={(v: number) => updateCampaign(c.localId, x => ({ ...x, maxDelay: v }))}
+              onChangeMediaEnabled={(v: boolean) => updateCampaign(c.localId, x => ({ ...x, mediaEnabled: v }))}
+              onStart={() => launchCampaign(c.localId, false)}
+              onPause={() => pauseCampaign(c.localId)}
+              onResume={() => launchCampaign(c.localId, true)}
+              onCancel={() => cancelCampaign(c.localId)}
+              onRemove={() => removeCampaign(c.localId)}
+              onClearLog={() => updateCampaign(c.localId, x => ({ ...x, log: [] }))}
+            />
+          ))}
+        </div>
+      )}
 
       {/* Jornada de Aquecimento — cada número tem a sua própria, dia 1..10 */}
       <div className="bg-gray-800 rounded-xl border border-gray-700 p-5 space-y-4">
@@ -1318,62 +1293,6 @@ function WuzapiMaturadorTab() {
       </div>
 
       <MaturadorMediaLibrary />
-
-      {/* Atividade */}
-      <div>
-        <div className="flex items-center justify-between mb-2">
-          <div className="flex items-center gap-2">
-            <p className="text-xs font-medium text-gray-400">Atividade</p>
-            {msgCount > 0 && (
-              <span className="text-[10px] bg-green-900/30 text-green-400 px-1.5 py-0.5 rounded-full">
-                {msgCount} enviadas
-              </span>
-            )}
-          </div>
-          <button onClick={() => setLog([])} className="text-xs text-gray-600 hover:text-gray-400">Limpar</button>
-        </div>
-        <div ref={logRef} className="h-72 bg-gray-900 rounded-xl border border-gray-700 p-3 overflow-y-auto space-y-1">
-          {log.length === 0 ? (
-            <p className="text-xs text-gray-600 font-mono">Atividade aparecerá aqui quando o maturador iniciar...</p>
-          ) : log.map((l, i) => {
-            if (l.kind === 'msg') {
-              return (
-                <div key={i} className="flex gap-2 py-1 border-b border-gray-800/60">
-                  <span className="text-[10px] text-gray-600 font-mono shrink-0 mt-0.5 w-16">{l.ts}</span>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-1 text-xs flex-wrap">
-                      <span className="font-mono text-green-400 font-semibold">{getInstanceLabel(l.from || '')}</span>
-                      <span className="text-gray-600">→</span>
-                      <span className="font-mono text-blue-400">{getInstanceLabel(l.to || '')}</span>
-                    </div>
-                    {l.msgType === 'image' && (
-                      <p className="text-[11px] text-purple-300 mt-0.5 flex items-center gap-1">
-                        <ImageIcon size={11} /> Imagem enviada{l.msgText ? ` — "${l.msgText}"` : ''}
-                      </p>
-                    )}
-                    {l.msgType === 'audio' && (
-                      <p className="text-[11px] text-orange-300 mt-0.5 flex items-center gap-1">
-                        <Mic size={11} /> Áudio (nota de voz) enviado
-                      </p>
-                    )}
-                    {(!l.msgType || l.msgType === 'text') && l.msgText && (
-                      <p className="text-[11px] text-gray-300 mt-0.5 truncate">{l.msgText}</p>
-                    )}
-                  </div>
-                </div>
-              )
-            }
-            return (
-              <p key={i} className={`text-xs font-mono flex gap-2 ${
-                l.kind === 'error' ? 'text-red-400' : l.kind === 'warn' ? 'text-yellow-400' : l.kind === 'delay' ? 'text-gray-500' : 'text-gray-400'
-              }`}>
-                <span className="text-gray-600 shrink-0 w-16">{l.ts}</span>
-                <span>{l.kind === 'error' ? '❌' : l.kind === 'warn' ? '⚠️' : l.kind === 'delay' ? '⏱️' : '🟢'} {l.text}</span>
-              </p>
-            )
-          })}
-        </div>
-      </div>
 
       {/* Canais no Maturador */}
       {Object.keys(warmingDates).length > 0 && (
@@ -1514,6 +1433,334 @@ function WuzapiMaturadorTab() {
           onClose={() => setShowSettings(false)}
         />
       )}
+    </div>
+  )
+}
+
+// ── Card de uma campanha do maturador Wuzapi ──────────────────────────────────
+// Cada campanha roda de forma independente (própria seleção de instâncias,
+// modo, delay e atividade) — o card só trava a edição enquanto a campanha
+// está "running" (igual sempre foi: pausada, dá pra reajustar antes de
+// retomar).
+function WuzapiCampaignCard({
+  campaign, instances, connectedInstances, journeySettings, busyElsewhere, getInstanceLabel,
+  settingsOpen, onOpenSettings, onCloseSettings,
+  onSelectInstances, onChangeMode, onChangeMinDelay, onChangeMaxDelay, onChangeMediaEnabled,
+  onStart, onPause, onResume, onCancel, onRemove, onClearLog,
+}: {
+  campaign: CampaignUI
+  instances: WuzapiInstance[]
+  connectedInstances: WuzapiInstance[]
+  journeySettings: MaturadorSettings
+  busyElsewhere: (name: string) => boolean
+  getInstanceLabel: (name: string) => string
+  settingsOpen: boolean
+  onOpenSettings: () => void
+  onCloseSettings: () => void
+  onSelectInstances: (names: string[]) => void
+  onChangeMode: (mode: MaturadorMode) => void
+  onChangeMinDelay: (v: number) => void
+  onChangeMaxDelay: (v: number) => void
+  onChangeMediaEnabled: (v: boolean) => void
+  onStart: () => void
+  onPause: () => void
+  onResume: () => void
+  onCancel: () => void
+  onRemove: () => void
+  onClearLog: () => void
+}) {
+  const logRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
+  }, [campaign.log])
+
+  const running = campaign.status === 'running'
+  const locked = running
+  const msgCount = campaign.log.filter(l => l.kind === 'msg').length
+
+  return (
+    <div className="bg-gray-800 rounded-xl border border-gray-700 p-5 space-y-4">
+      {/* Cabeçalho: modo e delay ficam na engrenagem, escolhidos antes de mais nada */}
+      <div className="flex items-center justify-between gap-2 pb-3 border-b border-gray-700/60">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className={`text-[11px] font-semibold px-2 py-1 rounded-full ${
+            campaign.mode === 'hub' ? 'bg-indigo-900/40 text-indigo-300' : 'bg-green-900/40 text-green-300'
+          }`}>
+            {campaign.mode === 'hub' ? 'Matriz' : 'Entre si'}
+          </span>
+          <span className="text-[11px] text-gray-500">Delay {campaign.minDelay}–{campaign.maxDelay}s</span>
+          {campaign.mode === 'hub' && !journeySettings.matrixInstances.length && (
+            <span className="text-[11px] text-yellow-400/80">⚠️ sem número matriz marcado</span>
+          )}
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          <button onClick={onOpenSettings} disabled={locked} title="Escolher modo e delay"
+            className="text-gray-500 hover:text-white p-1.5 rounded-lg hover:bg-gray-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+            <Settings size={14} />
+          </button>
+          {campaign.status === 'idle' && (
+            <button onClick={onRemove} title="Remover campanha" className="text-gray-600 hover:text-red-400 transition-colors p-1.5">
+              <Trash2 size={13} />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {settingsOpen && (
+        <WuzapiCampaignSettingsModal
+          campaign={campaign}
+          journeySettings={journeySettings}
+          onSave={(patch) => {
+            onChangeMode(patch.mode)
+            onChangeMinDelay(patch.minDelay)
+            onChangeMaxDelay(patch.maxDelay)
+            onCloseSettings()
+          }}
+          onClose={onCloseSettings}
+        />
+      )}
+
+      {/* Instance selector */}
+      <div>
+        <label className="block text-xs font-medium text-gray-400 mb-2">
+          Instâncias desta campanha <span className="text-gray-600">({connectedInstances.length} conectada(s))</span>
+        </label>
+        {instances.length === 0 ? (
+          <div className="flex items-center gap-2 text-xs text-yellow-400 bg-yellow-900/20 border border-yellow-900/40 rounded-lg px-3 py-2">
+            ⚠️ Nenhuma instância Wuzapi cadastrada. Acesse Canais → Wuzapi e conecte pelo menos 2.
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {instances.map(inst => {
+              const sel = campaign.selectedInstances.includes(inst.name)
+              const busy = !sel && busyElsewhere(inst.name)
+              const label = inst.label || inst.name
+              return (
+                <button key={inst.name} type="button" disabled={locked || inst.status !== 'connected' || busy}
+                  title={busy ? 'Já está selecionada em outra campanha' : undefined}
+                  onClick={() => onSelectInstances(sel ? campaign.selectedInstances.filter(id => id !== inst.name) : [...campaign.selectedInstances, inst.name])}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border disabled:opacity-40 disabled:cursor-not-allowed ${
+                    sel
+                      ? 'bg-green-900/40 border-green-600 text-green-300'
+                      : inst.status === 'connected'
+                      ? 'bg-gray-700 border-gray-600 text-gray-400 hover:border-gray-500 hover:text-gray-200'
+                      : 'bg-gray-900 border-gray-800 text-gray-600'
+                  }`}>
+                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${inst.status === 'connected' ? 'bg-green-400' : 'bg-gray-600'}`} />
+                  {label}
+                  {sel && <span className="text-green-400 ml-0.5">✓</span>}
+                </button>
+              )
+            })}
+          </div>
+        )}
+        {connectedInstances.length > 0 && campaign.selectedInstances.length < 2 && (
+          <p className="text-xs text-yellow-400/80 mt-1.5">⚠️ Selecione pelo menos 2 instâncias para iniciar</p>
+        )}
+      </div>
+
+      <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer w-fit">
+        <input type="checkbox" checked={campaign.mediaEnabled} disabled={locked}
+          onChange={e => onChangeMediaEnabled(e.target.checked)}
+          className="accent-green-500 disabled:opacity-50" />
+        Também enviar fotos e áudios da biblioteca (não só texto)
+      </label>
+
+      {campaign.status !== 'idle' && (
+        <div className={`flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-xs ${
+          running && campaign.dayQuotaReached ? 'bg-indigo-900/20 border border-indigo-800/50 text-indigo-300'
+          : campaign.status === 'running' ? 'bg-green-900/20 border border-green-800/50 text-green-400'
+          : 'bg-yellow-900/20 border border-yellow-800/50 text-yellow-400'
+        }`}>
+          <span className="flex items-center gap-2">
+            <span className={`w-2 h-2 rounded-full shrink-0 ${
+              running && campaign.dayQuotaReached ? 'bg-indigo-400' : campaign.status === 'running' ? 'bg-green-400 animate-pulse' : 'bg-yellow-400'
+            }`} />
+            {running && campaign.dayQuotaReached
+              ? 'Meta de hoje atingida para todos os números — aguardando o próximo dia'
+              : campaign.status === 'running'
+              ? `Maturando... ${msgCount} mensagens enviadas nesta sessão`
+              : 'Pausado — clique em Retomar para continuar'}
+          </span>
+          {running && campaign.nextIn > 0 && (
+            <span className="font-mono font-bold shrink-0">Próximo em {campaign.nextIn}s</span>
+          )}
+        </div>
+      )}
+
+      <div className="flex gap-2">
+        {campaign.status === 'idle' && (
+          <button onClick={onStart} disabled={campaign.selectedInstances.length < 2}
+            className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm rounded-lg">
+            <Play size={14} /> Iniciar Maturador
+          </button>
+        )}
+        {campaign.status === 'running' && (
+          <>
+            <button onClick={onPause}
+              className="flex items-center gap-2 px-4 py-2 bg-yellow-600 hover:bg-yellow-500 text-white text-sm rounded-lg">
+              ⏸ Pausar
+            </button>
+            <button onClick={onCancel}
+              className="flex items-center gap-2 px-4 py-2 bg-red-800 hover:bg-red-700 text-white text-sm rounded-lg">
+              <Square size={14} /> Cancelar
+            </button>
+          </>
+        )}
+        {campaign.status === 'paused' && (
+          <>
+            <button onClick={onResume}
+              className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-500 text-white text-sm rounded-lg">
+              <Play size={14} /> Retomar
+            </button>
+            <button onClick={onCancel}
+              className="flex items-center gap-2 px-4 py-2 bg-red-800 hover:bg-red-700 text-white text-sm rounded-lg">
+              <Square size={14} /> Cancelar
+            </button>
+          </>
+        )}
+      </div>
+
+      {/* Atividade desta campanha */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-2">
+            <p className="text-xs font-medium text-gray-400">Atividade</p>
+            {msgCount > 0 && (
+              <span className="text-[10px] bg-green-900/30 text-green-400 px-1.5 py-0.5 rounded-full">
+                {msgCount} enviadas
+              </span>
+            )}
+          </div>
+          <button onClick={onClearLog} className="text-xs text-gray-600 hover:text-gray-400">Limpar</button>
+        </div>
+        <div ref={logRef} className="h-56 bg-gray-900 rounded-xl border border-gray-700 p-3 overflow-y-auto space-y-1">
+          {campaign.log.length === 0 ? (
+            <p className="text-xs text-gray-600 font-mono">Atividade aparecerá aqui quando essa campanha iniciar...</p>
+          ) : campaign.log.map((l, i) => {
+            if (l.kind === 'msg') {
+              return (
+                <div key={i} className="flex gap-2 py-1 border-b border-gray-800/60">
+                  <span className="text-[10px] text-gray-600 font-mono shrink-0 mt-0.5 w-16">{l.ts}</span>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1 text-xs flex-wrap">
+                      <span className="font-mono text-green-400 font-semibold">{getInstanceLabel(l.from || '')}</span>
+                      <span className="text-gray-600">→</span>
+                      <span className="font-mono text-blue-400">{getInstanceLabel(l.to || '')}</span>
+                    </div>
+                    {l.msgType === 'image' && (
+                      <p className="text-[11px] text-purple-300 mt-0.5 flex items-center gap-1">
+                        <ImageIcon size={11} /> Imagem enviada{l.msgText ? ` — "${l.msgText}"` : ''}
+                      </p>
+                    )}
+                    {l.msgType === 'audio' && (
+                      <p className="text-[11px] text-orange-300 mt-0.5 flex items-center gap-1">
+                        <Mic size={11} /> Áudio (nota de voz) enviado
+                      </p>
+                    )}
+                    {(!l.msgType || l.msgType === 'text') && l.msgText && (
+                      <p className="text-[11px] text-gray-300 mt-0.5 truncate">{l.msgText}</p>
+                    )}
+                  </div>
+                </div>
+              )
+            }
+            return (
+              <p key={i} className={`text-xs font-mono flex gap-2 ${
+                l.kind === 'error' ? 'text-red-400' : l.kind === 'warn' ? 'text-yellow-400' : l.kind === 'delay' ? 'text-gray-500' : 'text-gray-400'
+              }`}>
+                <span className="text-gray-600 shrink-0 w-16">{l.ts}</span>
+                <span>{l.kind === 'error' ? '❌' : l.kind === 'warn' ? '⚠️' : l.kind === 'delay' ? '⏱️' : '🟢'} {l.text}</span>
+              </p>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Configuração de uma campanha: modo (Matriz/Entre si) + delay ────────────────
+// Escolhido de cara pela engrenagem, antes de mexer na seleção de números —
+// evita começar uma campanha sem decidir isso primeiro.
+function WuzapiCampaignSettingsModal({
+  campaign, journeySettings, onSave, onClose,
+}: {
+  campaign: CampaignUI
+  journeySettings: MaturadorSettings
+  onSave: (patch: { mode: MaturadorMode; minDelay: number; maxDelay: number }) => void
+  onClose: () => void
+}) {
+  const [mode, setMode] = useState<MaturadorMode>(campaign.mode)
+  const [minDelay, setMinDelay] = useState(campaign.minDelay)
+  const [maxDelay, setMaxDelay] = useState(campaign.maxDelay)
+
+  function save() {
+    if (minDelay < 10 || maxDelay < minDelay) {
+      return alert('O delay máximo precisa ser maior ou igual ao mínimo (mínimo de 10s).')
+    }
+    onSave({ mode, minDelay, maxDelay })
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+      <div className="bg-gray-800 rounded-xl border border-gray-700 p-6 w-full max-w-md space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-white flex items-center gap-2"><Settings size={15} /> Configurar campanha</h2>
+          <button onClick={onClose} className="text-gray-500 hover:text-gray-300"><X size={16} /></button>
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium text-gray-400 mb-2">Modo da jornada</label>
+          <div className="flex gap-2">
+            <button type="button" onClick={() => setMode('pairs')}
+              className={`flex-1 text-left px-3 py-2 rounded-lg text-xs border transition-colors ${
+                mode === 'pairs' ? 'bg-green-900/40 border-green-600 text-green-300' : 'bg-gray-700 border-gray-600 text-gray-400 hover:border-gray-500 hover:text-gray-200'
+              }`}>
+              <span className="font-semibold block">Entre si</span>
+              <span className="text-[10px] opacity-80">Cada número troca mensagens com parceiros fixos que vão crescendo aos poucos.</span>
+            </button>
+            <button type="button" onClick={() => setMode('hub')}
+              className={`flex-1 text-left px-3 py-2 rounded-lg text-xs border transition-colors ${
+                mode === 'hub' ? 'bg-green-900/40 border-green-600 text-green-300' : 'bg-gray-700 border-gray-600 text-gray-400 hover:border-gray-500 hover:text-gray-200'
+              }`}>
+              <span className="font-semibold block">Matriz</span>
+              <span className="text-[10px] opacity-80">Só os números matriz (escolhidos na engrenagem da Jornada de Aquecimento) iniciam conversa com os demais — sem limite pra eles.</span>
+            </button>
+          </div>
+          {mode === 'hub' && !journeySettings.matrixInstances.length && (
+            <p className="text-xs text-yellow-400/80 mt-1.5">⚠️ Nenhum número matriz marcado ainda — ajuste na engrenagem da Jornada de Aquecimento antes de iniciar.</p>
+          )}
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium text-gray-400 mb-2">Delay entre mensagens</label>
+          <div className="flex items-center gap-4">
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">Mínimo</label>
+              <div className="flex items-center gap-1">
+                <input type="number" min={10} value={minDelay} onChange={e => setMinDelay(+e.target.value)}
+                  className="w-20 bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm text-white text-center focus:outline-none focus:border-green-500" />
+                <span className="text-xs text-gray-400">s</span>
+              </div>
+            </div>
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">Máximo</label>
+              <div className="flex items-center gap-1">
+                <input type="number" min={10} value={maxDelay} onChange={e => setMaxDelay(+e.target.value)}
+                  className="w-20 bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm text-white text-center focus:outline-none focus:border-green-500" />
+                <span className="text-xs text-gray-400">s</span>
+              </div>
+            </div>
+          </div>
+          <p className="text-xs text-gray-500 mt-1.5">Vale entre cada mensagem da troca — não só entre rodadas.</p>
+        </div>
+
+        <div className="flex justify-end gap-2 pt-2">
+          <button onClick={onClose} className="px-4 py-2 text-xs text-gray-400 hover:text-white rounded-lg">Cancelar</button>
+          <button onClick={save} className="px-4 py-2 bg-green-600 hover:bg-green-500 text-white text-xs font-medium rounded-lg">Salvar</button>
+        </div>
+      </div>
     </div>
   )
 }
