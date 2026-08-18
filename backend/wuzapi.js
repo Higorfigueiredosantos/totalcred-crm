@@ -247,8 +247,17 @@ async function reconnectDisconnectedWuzapiInstances() {
     const entry = registry[inst.name]
     if (!entry) continue
     try {
+      // Reafirma o proxy configurado antes de reconectar — não dá pra confiar
+      // cegamente que o wuzapi preserva esse estado sozinho num reinício do
+      // próprio container dele; sem isso, uma instância com proxy poderia
+      // voltar reconectando direto (sem proxy) depois de cair, e ninguém
+      // perceberia (a tela continua mostrando "proxy ativado" porque isso vem
+      // do valor configurado, não de uma confirmação de uso real).
+      if (inst.proxyEnabled && inst.proxyUrl) {
+        await setProxy(inst.name, inst.proxyUrl, true)
+      }
       await connectSession(entry.token)
-      console.log(`[Wuzapi] Instância "${inst.name}" estava desconectada — reconexão automática disparada.`)
+      console.log(`[Wuzapi] Instância "${inst.name}" estava desconectada — reconexão automática disparada${inst.proxyEnabled ? ' (proxy reafirmado)' : ''}.`)
     } catch (e) {
       console.error(`[Wuzapi] Falha ao reconectar automaticamente "${inst.name}":`, e.message)
     }
