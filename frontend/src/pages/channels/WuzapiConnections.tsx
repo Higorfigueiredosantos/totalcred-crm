@@ -34,6 +34,8 @@ const WuzapiConnections = forwardRef<WuzapiConnectionsHandle, {}>((_props, ref) 
   const [showAddModal, setShowAddModal] = useState(false)
   const [newName, setNewName] = useState('')
   const [newLabel, setNewLabel] = useState('')
+  const [newProxyUrl, setNewProxyUrl] = useState('')
+  const [newProxyEnabled, setNewProxyEnabled] = useState(false)
   const [adding, setAdding] = useState(false)
 
   const [configName, setConfigName] = useState<string | null>(null)
@@ -62,15 +64,22 @@ const WuzapiConnections = forwardRef<WuzapiConnectionsHandle, {}>((_props, ref) 
   async function addInstance() {
     const name = newName.trim()
     if (!name) return
+    if (newProxyEnabled && !newProxyUrl.trim()) return alert('Informe a URL do proxy ou desative a opção.')
     setAdding(true)
     try {
       await apiFetch('/api/wuzapi/instances', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, label: newLabel.trim() || undefined })
+        body: JSON.stringify({
+          name, label: newLabel.trim() || undefined,
+          proxyUrl: newProxyEnabled ? newProxyUrl.trim() : undefined,
+          proxyEnabled: newProxyEnabled,
+        })
       })
       setShowAddModal(false)
       setNewName('')
       setNewLabel('')
+      setNewProxyUrl('')
+      setNewProxyEnabled(false)
     } finally {
       setAdding(false)
       setTimeout(loadInstances, 500)
@@ -352,6 +361,33 @@ const WuzapiConnections = forwardRef<WuzapiConnectionsHandle, {}>((_props, ref) 
                 className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-orange-500" />
             </div>
 
+            <div className="border-t border-gray-700 pt-4 space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-white flex items-center gap-2">
+                  <Shield size={14} className="text-gray-400" /> Proxy da instância
+                </p>
+                <label className="relative inline-flex items-center cursor-pointer shrink-0 ml-3">
+                  <input type="checkbox" className="sr-only peer" checked={newProxyEnabled}
+                    onChange={e => setNewProxyEnabled(e.target.checked)} />
+                  <div className="w-9 h-5 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-orange-600" />
+                </label>
+              </div>
+              {newProxyEnabled && (
+                <>
+                  <input
+                    value={newProxyUrl}
+                    onChange={e => setNewProxyUrl(e.target.value)}
+                    placeholder="http://usuario:senha@host:porta"
+                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-orange-500 font-mono"
+                  />
+                  <p className="text-[11px] text-gray-500">
+                    Aceita <code className="bg-gray-900 px-1 rounded">http://</code>, <code className="bg-gray-900 px-1 rounded">https://</code> ou <code className="bg-gray-900 px-1 rounded">socks5://</code> — inclua usuário:senha na URL se o proxy exigir autenticação.
+                  </p>
+                </>
+              )}
+              <p className="text-[11px] text-gray-500">Configurando aqui, o QR já nasce atrás do proxy — a instância nunca chega a conectar pelo IP direto do servidor.</p>
+            </div>
+
             <div className="bg-gray-900 rounded-lg p-3 text-xs text-gray-400 space-y-1.5">
               <p className="flex items-center gap-1.5"><AlertCircle size={11} className="text-yellow-400 shrink-0" />
                 Um QR Code aparecerá no card da instância em alguns segundos.</p>
@@ -360,7 +396,7 @@ const WuzapiConnections = forwardRef<WuzapiConnectionsHandle, {}>((_props, ref) 
             </div>
 
             <div className="flex gap-2 justify-end">
-              <button onClick={() => { setShowAddModal(false); setNewName(''); setNewLabel('') }}
+              <button onClick={() => { setShowAddModal(false); setNewName(''); setNewLabel(''); setNewProxyUrl(''); setNewProxyEnabled(false) }}
                 className="px-3 py-1.5 text-sm text-gray-400 hover:text-white">Cancelar</button>
               <button onClick={addInstance} disabled={!newName.trim() || adding}
                 className="flex items-center gap-1.5 px-4 py-1.5 bg-orange-600 hover:bg-orange-500 disabled:opacity-50 text-white text-sm rounded-lg">

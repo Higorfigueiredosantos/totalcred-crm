@@ -106,7 +106,7 @@ async function listInstances() {
   })
 }
 
-async function createInstance(name, label) {
+async function createInstance(name, label, proxyUrl, proxyEnabled) {
   const registry = loadRegistry()
   let entry = registry[name]
 
@@ -136,6 +136,14 @@ async function createInstance(name, label) {
   // mensagens no CRM (o próximo reconectar já funcionava, porque por aí o
   // wuzapi já tinha processado o usuário novo).
   await ensureWuzapiWebhook(entry.token)
+
+  // Se um proxy ja foi escolhido na criacao, aplica ANTES de conectar - o QR
+  // (e o pareamento do dispositivo ao escaneá-lo) ja sai pelo proxy certo
+  // desde o primeiro contato com o WhatsApp, em vez de nascer no IP direto
+  // do servidor e so trocar de proxy depois de ja pareado.
+  if (proxyEnabled && proxyUrl) {
+    await setProxy(name, proxyUrl, true)
+  }
 
   await connectSession(entry.token)
 

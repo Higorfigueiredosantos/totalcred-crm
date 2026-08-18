@@ -1965,10 +1965,10 @@ app.get('/api/wuzapi/instances', async (_req, res) => {
 })
 
 app.post('/api/wuzapi/instances', async (req, res) => {
-  const { name, label } = req.body || {}
+  const { name, label, proxyUrl, proxyEnabled } = req.body || {}
   if (!name) return res.status(400).json({ error: 'name obrigatório' })
   try {
-    res.json(await wuzapi.createInstance(String(name).trim(), label))
+    res.json(await wuzapi.createInstance(String(name).trim(), label, proxyUrl, !!proxyEnabled))
   } catch (e) {
     res.status(502).json({ error: e?.response?.data?.error || e.message || 'Falha ao criar instância' })
   }
