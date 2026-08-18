@@ -2036,7 +2036,13 @@ app.post('/api/wuzapi/send', async (req, res) => {
   const { instanceName, to, payload } = req.body || {}
   if (!instanceName || !to) return res.status(400).json({ error: 'instanceName/to obrigatórios' })
   try {
-    res.json(await wuzapi.sendButtons(instanceName, to, payload || {}))
+    const result = await wuzapi.sendButtons(instanceName, to, payload || {})
+    // Sem isso a mensagem de botão nunca aparece como enviada em Mensagens
+    // (só o disparo de campanha ecoava) — a resposta do lead então chegava
+    // sem nenhum contexto do que foi perguntado, como se a conversa tivesse
+    // começado do nada com só a resposta.
+    wuzapi.broadcastOutboundEcho(instanceName, to, payload || {}, result?.messageId)
+    res.json(result)
   } catch (e) {
     res.status(502).json({ error: e?.response?.data?.error || e.message })
   }

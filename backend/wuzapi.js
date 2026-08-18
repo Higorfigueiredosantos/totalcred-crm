@@ -1450,6 +1450,7 @@ module.exports = {
   sendButtons,
   sendImage,
   sendAudio,
+  broadcastOutboundEcho,
   handleWebhook,
   runCampaign,
   campaignState,
