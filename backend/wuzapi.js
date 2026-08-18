@@ -463,6 +463,17 @@ function extractText(msg) {
   if (msg.documentMessage?.caption) return msg.documentMessage.caption
   if (msg.buttonsResponseMessage?.selectedDisplayText) return msg.buttonsResponseMessage.selectedDisplayText
   if (msg.listResponseMessage?.title) return msg.listResponseMessage.title
+  // Resposta de clique em botão "reply" (id/title simples, sem link) — mesmo
+  // quando a gente manda o botão pelo formato novo (NativeFlowMessage, ver
+  // extractNativeFlowResponse acima), o app do WhatsApp às vezes responde
+  // nesse formato mais antigo/simples em vez de ecoar o mesmo formato de
+  // envio. Confirmado em teste real (log cru da mensagem não reconhecida).
+  const tplReply = msg.templateButtonReplyMessage
+  if (tplReply) {
+    const text = tplReply.selectedDisplayText || tplReply.SelectedDisplayText
+      || tplReply.selectedId || tplReply.SelectedId
+    if (text) return text
+  }
   const nativeFlow = extractNativeFlowResponse(msg)
   if (nativeFlow) return nativeFlow
   return ''
@@ -502,7 +513,7 @@ function handleWebhookMessage(body) {
     // crua pra descobrir rápido no próximo teste real, sem precisar
     // adivinhar de novo.
     if (msg && Object.keys(msg).length > 0) {
-      console.log('[Wuzapi] mensagem sem texto/mídia reconhecidos, chaves:', JSON.stringify(Object.keys(msg)), JSON.stringify(msg).slice(0, 1000))
+      console.log('[Wuzapi] mensagem sem texto/mídia reconhecidos, chaves:', JSON.stringify(Object.keys(msg)), JSON.stringify(msg).slice(0, 3000))
     }
     return
   }
