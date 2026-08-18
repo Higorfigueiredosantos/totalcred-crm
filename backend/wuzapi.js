@@ -782,7 +782,7 @@ async function runCampaign(data) {
 const maturadorPhrases = require('./maturadorPhrases')
 
 const MATURADOR_AUDIO_CHANCE = 0.15
-const MATURADOR_IMAGE_CHANCE = 0.08
+const MATURADOR_IMAGE_CHANCE = 0.15
 
 // ── Configurações da jornada de aquecimento (editáveis pelo usuário, via
 // engrenagem na tela) ───────────────────────────────────────────────────────
@@ -989,6 +989,23 @@ function growMaturadorPartners(participants, targetDegreeByName) {
     partners[b].push(a)
     needMore = participants.filter(p => readyDegree(p) < targetDegreeByName[p])
   }
+
+  // Sobra de número ímpar: o loop acima para assim que resta 1 nome em
+  // needMore (não dá pra formar par sozinho), deixando esse número com ZERO
+  // parceiros — e sem nenhum parceiro ele nunca é escolhido como remetente
+  // nem destinatário (ver runMaturadorPairsTick), ou seja, fica de fora do
+  // maturador. Com 3 participantes e meta de 1 parceiro/dia isso sobra
+  // sempre o mesmo. Garante pelo menos 1 parceiro pra quem ficou zerado,
+  // mesmo estourando a meta do outro lado em 1 — melhor que excluir um
+  // número inteiro da campanha.
+  participants.filter(p => readyDegree(p) === 0).forEach(p => {
+    const candidates = participants.filter(b => b !== p && !partners[p].includes(b))
+    if (!candidates.length) return
+    candidates.sort((x, y) => readyDegree(x) - readyDegree(y))
+    const b = candidates[0]
+    partners[p].push(b)
+    partners[b].push(p)
+  })
 }
 
 // Enquanto a meta do dia já foi batida, só verifica de tempos em tempos se
@@ -1052,19 +1069,6 @@ async function getReadyMaturadorInstances(names) {
     .filter(i => i.status === 'connected' && i.jid)
     .map(i => ({ name: i.name, phone: phoneFromJid(i.jid) }))
     .filter(i => i.phone)
-}
-
-// Dos números prontos (conectados e dentro do pool escolhido ao iniciar),
-// filtra pra quem está marcado em participantInstances — vazio usa todos.
-function selectJourneyParticipants(readyAll) {
-  const selected = maturadorSettings.participantInstances
-  if (!selected || !selected.length) return readyAll
-  // Marcar um número como matriz já garante a participação dele — não faz
-  // sentido exigir que o usuário adicione o mesmo nome nas duas listas
-  // separadas pra ele não ficar de fora quando participantInstances estiver
-  // restringindo a uma lista que ainda não inclui a matriz.
-  const matrix = maturadorSettings.matrixInstances || []
-  return readyAll.filter(r => selected.includes(r.name) || matrix.includes(r.name))
 }
 
 // Registra uma mensagem individual já enviada (bump nas duas jornadas +
@@ -1273,8 +1277,16 @@ async function runMaturadorLoop(campaign, runId) {
   if (!isCurrentMaturadorRun(campaign, runId)) return
 
   try {
-    const readyAll = await getReadyMaturadorInstances(campaign.instanceNames)
-    const ready = selectJourneyParticipants(readyAll)
+    // getReadyMaturadorInstances(campaign.instanceNames) já é a seleção
+    // definitiva e exclusiva dessa campanha (validada contra conflito com
+    // outras campanhas em startMaturador) — não filtra de novo pelo
+    // participantInstances global das configurações: esse filtro era
+    // aplicado a QUALQUER campanha rodando, então uma campanha nova com
+    // canais diferentes da seleção salva na engrenagem (ex.: uma "Matriz"
+    // criada enquanto uma "Entre si" com outros números já estava rodando)
+    // ficava com a lista de prontos sempre vazia e nunca saía do "Aguardando
+    // instâncias conectadas", mesmo com os números dela conectados.
+    const ready = await getReadyMaturadorInstances(campaign.instanceNames)
 
     if (ready.length < 2) {
       _broadcast('wuzapi_maturador', { type: 'waiting', campaignId: campaign.id, message: '⚠️ Aguardando pelo menos 2 instâncias Wuzapi conectadas...' })
