@@ -426,6 +426,20 @@ function preferPhoneJid(primary, alt) {
   return primary || null
 }
 
+// Mensagem mandada de um dispositivo vinculado (WhatsApp Web/Desktop, ou
+// respondendo um botão por lá) costuma vir com um sufixo ":<deviceId>" antes
+// do "@" (ex.: "5511999999999:90@s.whatsapp.net") — sem tirar isso, a mesma
+// pessoa mandando de dispositivos diferentes vira "contatos" diferentes pro
+// CRM (o match de conversa é por JID exato), e a resposta cai numa conversa
+// nova em vez de continuar na conversa já existente com ela. JID de grupo
+// não tem esse sufixo, então tirar isso não afeta grupos.
+function stripDeviceSuffix(jid) {
+  if (typeof jid !== 'string') return jid
+  const at = jid.indexOf('@')
+  if (at === -1) return jid
+  return jid.slice(0, at).split(':')[0] + jid.slice(at)
+}
+
 // Resposta de botão nativo (o formato que o wuzapi usa pra enviar botões) —
 // o proto marca esse campo como "oneof" no Go, então pode vir aninhado de
 // mais de um jeito dependendo de como o encoding/json padrão (não o
@@ -500,9 +514,11 @@ function handleWebhookMessage(body) {
   const isGroup = !!info.IsGroup
   // Em DM, Chat e Sender são o mesmo contato — resolve pro JID de telefone
   // real quando o WhatsApp endereçou por LID. Em grupo, o Chat (grupo em si)
-  // não tem ambiguidade; só o autor (Sender) pode vir como LID.
-  const chat = isGroup ? info.Chat : preferPhoneJid(info.Chat, info.SenderAlt)
-  const author = isGroup ? preferPhoneJid(info.Sender, info.SenderAlt) : chat
+  // não tem ambiguidade; só o autor (Sender) pode vir como LID. Sempre tira o
+  // sufixo de dispositivo (ver stripDeviceSuffix) pra não abrir uma conversa
+  // nova toda vez que a pessoa responde de um dispositivo vinculado diferente.
+  const chat = stripDeviceSuffix(isGroup ? info.Chat : preferPhoneJid(info.Chat, info.SenderAlt))
+  const author = stripDeviceSuffix(isGroup ? preferPhoneJid(info.Sender, info.SenderAlt) : chat)
   if (!chat) return
 
   const text = extractText(msg)
