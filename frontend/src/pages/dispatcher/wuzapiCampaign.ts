@@ -1,4 +1,5 @@
-import type { CsvContact, WuzapiCampaignResult } from '../../types'
+import type { CsvContact, WuzapiCampaignFinalStats, WuzapiCampaignResult } from '../../types'
+export type { WuzapiCampaignFinalStats }
 
 // Os 2 formatos são o mesmo endpoint (/chat/send/buttons) do lado do wuzapi —
 // só muda se tem Image. Cada botão individualmente escolhe se é normal
@@ -14,6 +15,14 @@ export interface WuzapiButton {
 
 export interface WuzapiPayload { text: string; footer?: string; image?: string; buttons: WuzapiButton[] }
 
+export interface WuzapiBatchDelay {
+  enabled: boolean
+  everyMin: number
+  everyMax: number
+  pauseMin: number
+  pauseMax: number
+}
+
 export interface WuzapiCampaignConfig {
   name: string
   payload: WuzapiPayload
@@ -21,6 +30,8 @@ export interface WuzapiCampaignConfig {
   instanceNames: string[]
   delayMin: number
   delayMax: number
+  batchDelay?: WuzapiBatchDelay
+  spinWithAI?: boolean
 }
 
 export interface WuzapiCampaignItem {
@@ -33,6 +44,7 @@ export interface WuzapiCampaignItem {
   stats: { current: number; total: number; success: number; failed: number }
   log: string[]
   results: WuzapiCampaignResult[]
+  finalStats: WuzapiCampaignFinalStats | null
   waiting: number
   paused: boolean
   fromHistory: boolean

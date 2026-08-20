@@ -1,12 +1,12 @@
 import { useState } from 'react'
 import {
   FlaskConical, Upload, X, AlertCircle, Users, Loader2,
-  FileText, Send, Plus, Trash2, RefreshCw, CheckCircle2, Image as ImageIcon, Link2,
+  FileText, Send, Plus, Trash2, RefreshCw, CheckCircle2, Image as ImageIcon, Link2, Zap, Eye,
 } from 'lucide-react'
 import { useWuzapiInstances } from '../../hooks/useWuzapiInstances'
 import type { CsvContact } from '../../types'
 import { parseContacts, parseCsvRaw, buildContacts } from './chipCampaign'
-import type { WuzapiButton, WuzapiCampaignConfig, WuzapiMessageType } from './wuzapiCampaign'
+import type { WuzapiBatchDelay, WuzapiButton, WuzapiCampaignConfig, WuzapiMessageType } from './wuzapiCampaign'
 
 interface Props {
   onClose: () => void
@@ -22,7 +22,18 @@ const MESSAGE_TYPES: { value: WuzapiMessageType; label: string; hint: string }[]
 let uidCounter = 0
 const uid = () => `id_${Date.now()}_${uidCounter++}`
 
+function applyVarsPreview(text: string, contact?: CsvContact) {
+  if (!text.trim()) return ''
+  const c = contact ?? { number: '5511999990001', name: 'João', vars: {} }
+  let msg = text.replace(/\{\{name\}\}/gi, c.name || 'Nome')
+  if (c.vars) for (const [k, v] of Object.entries(c.vars)) msg = msg.replace(new RegExp(`\\{\\{${k}\\}\\}`, 'gi'), v)
+  return msg
+}
+
 // Wizard de campanha via Wuzapi (BETA) — teste de entrega de botões nativos.
+// Destinatários vem antes da mensagem de propósito: a base é que define quais
+// variáveis ({{name}}, {{coluna}}...) existem pra usar no texto, então
+// escrever o template só faz sentido depois de já saber o que tem na planilha.
 // Cada botão escolhe individualmente se é normal (resposta rápida) ou de
 // link (abre uma URL).
 export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSent }: Props) {
@@ -45,6 +56,7 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
   const [contactsTab, setContactsTab] = useState<'manual' | 'csv'>('manual')
   const [contactsText, setContactsText] = useState('')
   const [csvContacts, setCsvContacts] = useState<CsvContact[]>([])
+  const [csvHeaders, setCsvHeaders] = useState<string[]>([])
   const [csvFileName, setCsvFileName] = useState('')
   const [csvRawRows, setCsvRawRows] = useState<Record<string, string>[]>([])
   const [csvAllHeaders, setCsvAllHeaders] = useState<string[]>([])
@@ -54,6 +66,8 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
   const [selectedInstanceNames, setSelectedInstanceNames] = useState<string[]>([])
   const [delayMin, setDelayMin] = useState(5)
   const [delayMax, setDelayMax] = useState(15)
+  const [batchDelay, setBatchDelay] = useState<WuzapiBatchDelay>({ enabled: false, everyMin: 10, everyMax: 20, pauseMin: 90, pauseMax: 240 })
+  const [spinWithAI, setSpinWithAI] = useState(false)
 
   function getActiveContacts(): CsvContact[] {
     return contactsTab === 'csv' ? csvContacts : parseContacts(contactsText)
@@ -71,12 +85,13 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
   }
 
   function applyPhoneColumn(rawRows: Record<string, string>[], allHeaders: string[], phoneCol: string) {
-    const { contacts } = buildContacts(rawRows, allHeaders, phoneCol)
+    const { contacts, extraHeaders } = buildContacts(rawRows, allHeaders, phoneCol)
     const seen = new Set<string>()
     let dups = 0
     contacts.forEach(c => { if (seen.has(c.number)) dups++; else seen.add(c.number) })
     setCsvDups(dups)
     setCsvContacts(contacts)
+    setCsvHeaders(extraHeaders)
   }
 
   function handleCsvUpload(e: React.ChangeEvent<HTMLInputElement>) {
@@ -112,8 +127,9 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
       if (!seen.has(phone)) { seen.add(phone); newRaw.push(row) }
     })
     setCsvRawRows(newRaw)
-    const { contacts } = buildContacts(newRaw, csvAllHeaders, csvPhoneColumn)
+    const { contacts, extraHeaders } = buildContacts(newRaw, csvAllHeaders, csvPhoneColumn)
     setCsvContacts(contacts)
+    setCsvHeaders(extraHeaders)
     setCsvDups(0)
   }
 
@@ -150,6 +166,8 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
   }
 
   const recipientCount = getActiveContacts().length
+  const previewContact = getActiveContacts()[0]
+  const previewText = applyVarsPreview(text, previewContact)
 
   async function handleStart() {
     const contacts = getActiveContacts()
@@ -166,6 +184,8 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
       contacts,
       instanceNames: selectedInstanceNames,
       delayMin, delayMax,
+      batchDelay,
+      spinWithAI,
     })
     setStarting(false)
     if (!result.ok) return alert(result.error || 'Falha ao iniciar campanha.')
@@ -184,7 +204,7 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
         </div>
 
         <div className="flex border-b border-gray-800 px-5">
-          {(['Mensagem', 'Destinatários', 'Instâncias & Revisar'] as const).map((label, i) => (
+          {(['Destinatários', 'Mensagem', 'Instâncias & Revisar'] as const).map((label, i) => (
             <button key={label} onClick={() => setStep(i + 1)}
               className={`px-3 py-2.5 text-xs font-medium border-b-2 transition-colors ${
                 step === i + 1 ? 'border-orange-500 text-white' : 'border-transparent text-gray-500 hover:text-gray-300'
@@ -195,6 +215,7 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
         </div>
 
         <div className="p-5 overflow-y-auto flex-1 space-y-4">
+          {/* ── STEP 1: Destinatários ── */}
           {step === 1 && (
             <>
               <div>
@@ -204,6 +225,69 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-orange-500" />
               </div>
 
+              <div className="flex gap-2 mb-3">
+                <button onClick={() => setContactsTab('manual')}
+                  className={`flex-1 py-2 text-xs rounded-lg font-medium ${contactsTab === 'manual' ? 'bg-orange-600 text-white' : 'bg-gray-800 text-gray-400'}`}>
+                  Manual
+                </button>
+                <button onClick={() => setContactsTab('csv')}
+                  className={`flex-1 py-2 text-xs rounded-lg font-medium ${contactsTab === 'csv' ? 'bg-orange-600 text-white' : 'bg-gray-800 text-gray-400'}`}>
+                  Importar CSV
+                </button>
+              </div>
+
+              {contactsTab === 'manual' ? (
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1.5">Números (um por linha — número,nome)</label>
+                  <textarea value={contactsText} onChange={e => setContactsText(e.target.value)} rows={8}
+                    placeholder={'5535998000000,João\n5535998000001,Maria'}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-orange-500 font-mono resize-none" />
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <label className="flex items-center justify-center gap-2 border-2 border-dashed border-gray-700 rounded-lg py-6 cursor-pointer hover:border-orange-500 transition-colors">
+                    <Upload size={16} className="text-gray-500" />
+                    <span className="text-sm text-gray-400">{csvFileName || 'Selecionar arquivo CSV'}</span>
+                    <input type="file" accept=".csv" className="hidden" onChange={handleCsvUpload} />
+                  </label>
+                  {csvAllHeaders.length > 0 && (
+                    <div>
+                      <label className="block text-xs text-gray-400 mb-1.5">Coluna do telefone</label>
+                      <select value={csvPhoneColumn} onChange={e => handlePhoneColumnChange(e.target.value)}
+                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500">
+                        {csvAllHeaders.map(h => <option key={h} value={h}>{h}</option>)}
+                      </select>
+                    </div>
+                  )}
+                  {csvDups > 0 && (
+                    <div className="flex items-center justify-between bg-yellow-900/20 border border-yellow-800/40 rounded-lg px-3 py-2">
+                      <span className="text-xs text-yellow-300 flex items-center gap-1.5"><AlertCircle size={12} /> {csvDups} duplicado(s)</span>
+                      <button onClick={removeDuplicates} className="text-xs text-yellow-400 hover:text-yellow-200 underline">Remover</button>
+                    </div>
+                  )}
+                  {csvHeaders.length > 0 && (
+                    <div className="bg-indigo-950/40 border border-indigo-800/30 rounded-xl p-3 space-y-2">
+                      <p className="text-[11px] font-medium text-indigo-400">Variáveis disponíveis no template:</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        <code className="text-[11px] bg-gray-800 text-green-300 px-2 py-0.5 rounded">{'{{name}}'}</code>
+                        {csvHeaders.map(h => (
+                          <code key={h} className="text-[11px] bg-gray-800 text-indigo-300 px-2 py-0.5 rounded">{`{{${h}}}`}</code>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="flex items-center gap-1.5 text-xs text-gray-400 bg-gray-800/50 rounded-lg px-3 py-2">
+                <Users size={12} /> {recipientCount} destinatário(s) prontos
+              </div>
+            </>
+          )}
+
+          {/* ── STEP 2: Mensagem ── */}
+          {step === 2 && (
+            <>
               <div>
                 <label className="block text-xs text-gray-400 mb-1.5">Tipo de mensagem</label>
                 <div className="grid grid-cols-2 gap-2">
@@ -240,12 +324,36 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
                 </div>
               )}
 
+              {(csvHeaders.length > 0 || contactsTab === 'csv') && (
+                <div className="bg-indigo-950/40 border border-indigo-800/30 rounded-xl p-3 space-y-2">
+                  <p className="text-[11px] font-medium text-indigo-400">Variáveis disponíveis (da base importada):</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    <code className="text-[11px] bg-gray-800 text-green-300 px-2 py-0.5 rounded">{'{{name}}'}</code>
+                    {csvHeaders.map(h => (
+                      <code key={h} className="text-[11px] bg-gray-800 text-indigo-300 px-2 py-0.5 rounded">{`{{${h}}}`}</code>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div>
                 <label className="block text-xs text-gray-400 mb-1.5">{hasImage ? 'Legenda' : 'Texto da mensagem'}</label>
                 <textarea value={text} onChange={e => setText(e.target.value)} rows={hasImage ? 3 : 5}
-                  placeholder="Digite a mensagem..."
+                  placeholder={"Use {{name}} para nome, {{coluna}} para variáveis do CSV.\nEx: Olá {{name}}, temos uma oferta em {{cidade}}!"}
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-orange-500 resize-none" />
               </div>
+
+              {previewText && (
+                <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 space-y-1.5">
+                  <div className="flex items-center gap-1.5 text-[11px] text-gray-500">
+                    <Eye size={11} /> Preview com {previewContact?.name || 'primeiro contato'}
+                  </div>
+                  <div className="bg-orange-900/20 border border-orange-800/30 rounded-lg px-3 py-2 text-xs text-orange-200 whitespace-pre-wrap leading-relaxed">
+                    {previewText}
+                  </div>
+                </div>
+              )}
+
               <div>
                 <label className="block text-xs text-gray-400 mb-1.5">Rodapé (opcional)</label>
                 <input value={footer} onChange={e => setFooter(e.target.value)}
@@ -299,57 +407,7 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
             </>
           )}
 
-          {step === 2 && (
-            <>
-              <div className="flex gap-2 mb-3">
-                <button onClick={() => setContactsTab('manual')}
-                  className={`flex-1 py-2 text-xs rounded-lg font-medium ${contactsTab === 'manual' ? 'bg-orange-600 text-white' : 'bg-gray-800 text-gray-400'}`}>
-                  Manual
-                </button>
-                <button onClick={() => setContactsTab('csv')}
-                  className={`flex-1 py-2 text-xs rounded-lg font-medium ${contactsTab === 'csv' ? 'bg-orange-600 text-white' : 'bg-gray-800 text-gray-400'}`}>
-                  Importar CSV
-                </button>
-              </div>
-
-              {contactsTab === 'manual' ? (
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1.5">Números (um por linha — número,nome)</label>
-                  <textarea value={contactsText} onChange={e => setContactsText(e.target.value)} rows={8}
-                    placeholder={'5535998000000,João\n5535998000001,Maria'}
-                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-orange-500 font-mono resize-none" />
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  <label className="flex items-center justify-center gap-2 border-2 border-dashed border-gray-700 rounded-lg py-6 cursor-pointer hover:border-orange-500 transition-colors">
-                    <Upload size={16} className="text-gray-500" />
-                    <span className="text-sm text-gray-400">{csvFileName || 'Selecionar arquivo CSV'}</span>
-                    <input type="file" accept=".csv" className="hidden" onChange={handleCsvUpload} />
-                  </label>
-                  {csvAllHeaders.length > 0 && (
-                    <div>
-                      <label className="block text-xs text-gray-400 mb-1.5">Coluna do telefone</label>
-                      <select value={csvPhoneColumn} onChange={e => handlePhoneColumnChange(e.target.value)}
-                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500">
-                        {csvAllHeaders.map(h => <option key={h} value={h}>{h}</option>)}
-                      </select>
-                    </div>
-                  )}
-                  {csvDups > 0 && (
-                    <div className="flex items-center justify-between bg-yellow-900/20 border border-yellow-800/40 rounded-lg px-3 py-2">
-                      <span className="text-xs text-yellow-300 flex items-center gap-1.5"><AlertCircle size={12} /> {csvDups} duplicado(s)</span>
-                      <button onClick={removeDuplicates} className="text-xs text-yellow-400 hover:text-yellow-200 underline">Remover</button>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div className="flex items-center gap-1.5 text-xs text-gray-400 bg-gray-800/50 rounded-lg px-3 py-2">
-                <Users size={12} /> {recipientCount} destinatário(s) prontos
-              </div>
-            </>
-          )}
-
+          {/* ── STEP 3: Instâncias & Revisar ── */}
           {step === 3 && (
             <>
               <div>
@@ -383,9 +441,95 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
                 </div>
               </div>
 
+              <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
+                <label className="flex items-center gap-2 px-3 py-2.5 cursor-pointer select-none">
+                  <input type="checkbox" checked={batchDelay.enabled}
+                    onChange={e => setBatchDelay(s => ({ ...s, enabled: e.target.checked }))}
+                    className="rounded border-gray-600 bg-gray-900 text-orange-500 focus:ring-0" />
+                  <span className="text-xs text-gray-300">☕ Pausa a cada lote de mensagens</span>
+                </label>
+                {batchDelay.enabled && (
+                  <div className="border-t border-gray-700 px-3 pb-3 pt-2 space-y-2">
+                    <div className="flex items-center gap-2 text-xs text-gray-400">
+                      <span className="text-gray-500 w-20 shrink-0">A cada</span>
+                      <input type="number" min={1} value={batchDelay.everyMin}
+                        onChange={e => setBatchDelay(s => ({ ...s, everyMin: +e.target.value }))}
+                        className="w-14 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-center text-white focus:outline-none focus:border-orange-500" />
+                      <span className="text-gray-600">a</span>
+                      <input type="number" min={1} value={batchDelay.everyMax}
+                        onChange={e => setBatchDelay(s => ({ ...s, everyMax: +e.target.value }))}
+                        className="w-14 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-center text-white focus:outline-none focus:border-orange-500" />
+                      <span className="text-gray-500">envios</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs text-gray-400">
+                      <span className="text-gray-500 w-20 shrink-0">Pausar</span>
+                      <input type="number" min={1} value={batchDelay.pauseMin}
+                        onChange={e => setBatchDelay(s => ({ ...s, pauseMin: +e.target.value }))}
+                        className="w-14 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-center text-white focus:outline-none focus:border-orange-500" />
+                      <span className="text-gray-600">a</span>
+                      <input type="number" min={1} value={batchDelay.pauseMax}
+                        onChange={e => setBatchDelay(s => ({ ...s, pauseMax: +e.target.value }))}
+                        className="w-14 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-center text-white focus:outline-none focus:border-orange-500" />
+                      <span className="text-gray-500">seg</span>
+                    </div>
+                    <p className="text-[11px] text-orange-400/70">
+                      Ex: a cada {batchDelay.everyMin}–{batchDelay.everyMax} envios, pausa de {batchDelay.pauseMin}–{batchDelay.pauseMax}s para parecer mais humano.
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer select-none">
+                <input type="checkbox" checked={spinWithAI}
+                  onChange={e => setSpinWithAI(e.target.checked)} className="rounded" />
+                <Zap size={11} className="text-yellow-400" /> Randomizar início da mensagem com IA (GROQ_API_KEY ou OPENAI_API_KEY)
+              </label>
+              {spinWithAI && (
+                <p className="text-[11px] text-gray-500 -mt-2 pl-5">
+                  Muda só as primeiras palavras (cumprimento) a cada envio, pra reduzir a chance de detecção como spam. O resto do texto e as variáveis {'{{...}}'} continuam idênticos.
+                </p>
+              )}
+
               <div className="bg-gray-800/50 rounded-lg p-3 text-xs text-gray-400 space-y-1">
                 <p className="flex items-center gap-1.5"><FileText size={11} /> {recipientCount} destinatário(s)</p>
                 <p className="flex items-center gap-1.5"><CheckCircle2 size={11} /> Mensagem: {MESSAGE_TYPES.find(m => m.value === messageType)?.label} · {activeButtons.length} botão(ões)</p>
+              </div>
+
+              {/* Preview de como a mensagem vai chegar pro cliente */}
+              <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 space-y-2">
+                <div className="flex items-center gap-1.5 text-[11px] text-gray-500">
+                  <Eye size={11} /> Como vai chegar para o cliente {previewContact?.name ? `(ex: ${previewContact.name})` : ''}
+                </div>
+                <div className="max-w-xs mx-auto">
+                  <div className="bg-[#202c33] rounded-xl overflow-hidden shadow-lg">
+                    {hasImage && (
+                      <div className="bg-gray-700 h-28 flex items-center justify-center overflow-hidden">
+                        {imageB64
+                          ? <img src={imageB64} alt="header" className="w-full h-full object-cover" />
+                          : <ImageIcon size={20} className="text-gray-500" />}
+                      </div>
+                    )}
+                    <div className="px-3 py-3">
+                      <p className="text-sm text-gray-100 whitespace-pre-wrap leading-relaxed">
+                        {previewText || <span className="text-gray-500">Escreva a mensagem no passo 2</span>}
+                      </p>
+                    </div>
+                    {footer && (
+                      <div className="px-3 pb-2">
+                        <p className="text-xs text-gray-500">{footer}</p>
+                      </div>
+                    )}
+                    {activeButtons.length > 0 && (
+                      <div className="border-t border-gray-700">
+                        {activeButtons.map((btn, i) => (
+                          <div key={btn.id} className={`px-3 py-2 text-center text-xs text-[#00a884] font-medium flex items-center justify-center gap-1 ${i > 0 ? 'border-t border-gray-700' : ''}`}>
+                            {btn.type === 'url' && <Link2 size={10} />} {btn.text}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
 
               <div className="flex items-center justify-between border-t border-gray-800 pt-3">

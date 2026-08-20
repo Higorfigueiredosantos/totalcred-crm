@@ -2105,6 +2105,38 @@ app.get('/api/wuzapi-campaign/stats', (_req, res) => res.json({
   paused: wuzapi.campaignState.paused,
 }))
 
+// Cruza números que a campanha enviou com quem respondeu (texto ou clique de
+// botão) depois do envio — mesma lógica de /api/chip-campaign/interaction-rate.
+app.post('/api/wuzapi-campaign/interaction-rate', (req, res) => {
+  const { sentContacts } = req.body || {}
+  const contacts = Array.isArray(sentContacts) ? sentContacts : []
+  if (contacts.length === 0) return res.json({ sent: 0, interacted: 0, rate: '0%', interactedNumbers: [] })
+
+  const interactedNumbers = []
+  for (const { number, sentAt } of contacts) {
+    const clean = String(number).replace(/\D/g, '')
+    const short = clean.startsWith('55') ? clean.slice(2) : clean
+
+    const responded = wuzapi.responseStats.responses.some(r => {
+      if (sentAt && r.timestamp && r.timestamp < sentAt) return false
+      const rClean = String(r.from || '').replace(/\D/g, '').replace(/^55/, '')
+      return rClean === clean || rClean === short || rClean.endsWith(short) || short.endsWith(rClean)
+    })
+
+    if (responded) interactedNumbers.push(number)
+  }
+
+  const sent = contacts.length
+  const interacted = interactedNumbers.length
+  res.json({
+    sent,
+    interacted,
+    notInteracted: sent - interacted,
+    rate: sent > 0 ? ((interacted / sent) * 100).toFixed(1) + '%' : '0%',
+    interactedNumbers,
+  })
+})
+
 app.get('/api/wuzapi-campaign/history', (_req, res) => res.json(wuzapi.loadHistory()))
 
 app.delete('/api/wuzapi-campaign/history/:id', (req, res) => {

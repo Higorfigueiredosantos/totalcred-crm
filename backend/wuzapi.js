@@ -503,6 +503,18 @@ function detectMedia(msg) {
   return null
 }
 
+// Todo inbound (texto digitado OU clique em botão — extractText cobre os dois)
+// conta como "interação" pra cruzar com quem recebeu campanha. Espelha
+// responseStats do lado dos chips (whatsapp-web.js) em server.js.
+const responseStats = { responses: [] }
+
+function trackResponse(chat) {
+  const clean = String(chat || '').split('@')[0].replace(/\D/g, '')
+  if (!clean) return
+  responseStats.responses.push({ from: clean, timestamp: Date.now() })
+  if (responseStats.responses.length > 2000) responseStats.responses.shift()
+}
+
 function handleWebhookMessage(body) {
   if (body?.type !== 'Message') return
   const instanceName = body.instanceName
@@ -520,6 +532,8 @@ function handleWebhookMessage(body) {
   const chat = stripDeviceSuffix(isGroup ? info.Chat : preferPhoneJid(info.Chat, info.SenderAlt))
   const author = stripDeviceSuffix(isGroup ? preferPhoneJid(info.Sender, info.SenderAlt) : chat)
   if (!chat) return
+
+  if (!isGroup) trackResponse(chat)
 
   const text = extractText(msg)
   const media = detectMedia(msg)
@@ -621,6 +635,40 @@ function resolvePayload(payload, contact) {
   return payload
 }
 
+// Randomiza só a abertura do template (via Groq/OpenAI) pra reduzir a
+// assinatura de "mensagem idêntica em massa" sem arriscar mudar o conteúdo
+// principal. Roda ANTES de resolvePayload, em cima do template com os
+// {{placeholders}} ainda intactos — a IA nunca vê o valor real das
+// variáveis, só o nome delas, então não tem como confundir/trocar valores.
+async function spinTemplateWithAI(template) {
+  if (typeof template !== 'string' || !template.trim()) return template
+  const apiKey = process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY
+  if (!apiKey) return template
+  const baseURL = process.env.GROQ_API_KEY ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1'
+  const model = process.env.GROQ_API_KEY ? 'llama3-8b-8192' : 'gpt-3.5-turbo'
+  try {
+    const resp = await axios.post(`${baseURL}/chat/completions`, {
+      model, max_tokens: 400, temperature: 0.9,
+      messages: [
+        {
+          role: 'system',
+          content: 'Você varia levemente mensagens de WhatsApp para reduzir a chance de detecção como disparo em massa. '
+            + 'Regras obrigatórias: (1) troque só as primeiras palavras — cumprimento/abertura — por um sinônimo natural; '
+            + '(2) NUNCA altere o restante do texto, nem qualquer trecho entre chaves duplas como {{name}} ou {{coluna}} — copie esses marcadores exatamente iguais; '
+            + '(3) mantenha o mesmo idioma, tom, sentido e tamanho aproximado da mensagem original; '
+            + '(4) não adicione nem remova informação, links ou instruções; '
+            + '(5) responda somente com a mensagem final, sem comentários nem aspas.',
+        },
+        { role: 'user', content: template },
+      ],
+    }, { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 15000 })
+    const out = resp.data?.choices?.[0]?.message?.content?.trim()
+    return out || template
+  } catch (e) {
+    return template
+  }
+}
+
 // Campanha roda inteira no servidor — sem isso, a mensagem enviada nunca
 // aparecia na conversa em Mensagens, então quando a resposta do botão
 // chegava não tinha nenhum contexto do que foi mandado (igual abrir uma
@@ -665,7 +713,7 @@ const CAMPAIGN_BATCH_PAUSE_MIN = 90
 const CAMPAIGN_BATCH_PAUSE_MAX = 240
 
 async function runCampaign(data) {
-  const { name, payload, instanceNames, contacts, delayMin = 5, delayMax = 15 } = data
+  const { name, payload, instanceNames, contacts, delayMin = 5, delayMax = 15, batchDelay, spinWithAI } = data
 
   // Nenhuma dessas instâncias pode estar ocupada num maturador rodando —
   // dobrar o volume de mensagens na mesma sessão só aumenta o risco de
@@ -675,6 +723,13 @@ async function runCampaign(data) {
   if (conflicting.length) {
     throw new Error(`Essas instâncias já estão em uso pelo maturador: ${conflicting.join(', ')}. Pare o maturador nelas antes de disparar a campanha.`)
   }
+
+  // Se o usuário configurou uma pausa de lote própria (mesma caixinha da via
+  // Chips), usa os valores dele; senão cai na proteção padrão (sempre ativa).
+  const bd = batchDelay?.enabled && batchDelay.everyMin > 0 && batchDelay.pauseMin > 0 ? batchDelay : null
+  const batchSize = bd ? Math.floor(Math.random() * (Math.max(bd.everyMax, bd.everyMin) - bd.everyMin + 1)) + bd.everyMin : CAMPAIGN_BATCH_SIZE
+  const batchPauseMin = bd ? bd.pauseMin : CAMPAIGN_BATCH_PAUSE_MIN
+  const batchPauseMax = bd ? Math.max(bd.pauseMax, bd.pauseMin) : CAMPAIGN_BATCH_PAUSE_MAX
 
   campaignState.results = []
   campaignState.paused = false
@@ -707,7 +762,12 @@ async function runCampaign(data) {
     try {
       const instanceName = instanceNames[rrIndex % instanceNames.length]
       rrIndex++
-      const resolved = resolvePayload(payload, contact)
+      // Spin roda em cima do template (placeholders ainda intactos) — só
+      // depois disso os {{vars}} são resolvidos pro contato da vez.
+      const templateForContact = spinWithAI
+        ? { ...payload, text: await spinTemplateWithAI(payload.text) }
+        : payload
+      const resolved = resolvePayload(templateForContact, contact)
       const sent = await sendButtons(instanceName, contact.number, resolved)
       result.status = 'success'
       result.via = instanceName
@@ -739,8 +799,8 @@ async function runCampaign(data) {
     if (i < contacts.length - 1 && !campaignState.stopped) {
       // Pausa longa a cada N envios bem-sucedidos — quebra o padrão de
       // "disparo contínuo" que sozinho o delay curto entre contatos não cobre.
-      if (batchCount >= CAMPAIGN_BATCH_SIZE) {
-        const pause = Math.floor(Math.random() * (CAMPAIGN_BATCH_PAUSE_MAX - CAMPAIGN_BATCH_PAUSE_MIN + 1)) + CAMPAIGN_BATCH_PAUSE_MIN
+      if (batchCount >= batchSize) {
+        const pause = Math.floor(Math.random() * (batchPauseMax - batchPauseMin + 1)) + batchPauseMin
         _broadcast('wuzapi_campaign', { type: 'batch_pause', seconds: pause, batchCount })
         await sleep(pause * 1000)
         batchCount = 0
@@ -1466,6 +1526,7 @@ module.exports = {
   handleWebhook,
   runCampaign,
   campaignState,
+  responseStats,
   loadHistory,
   deleteHistoryRecord,
   startMaturador,

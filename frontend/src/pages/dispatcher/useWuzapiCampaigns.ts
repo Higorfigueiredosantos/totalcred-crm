@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { onWSMessage } from '../../api/websocket'
 import { apiFetch } from '../../hooks/useChips'
-import type { WuzapiCampaignHistoryRecord, WuzapiCampaignResult } from '../../types'
+import type { WuzapiCampaignFinalStats, WuzapiCampaignHistoryRecord, WuzapiCampaignResult } from '../../types'
 import {
   type WuzapiCampaignConfig, type WuzapiCampaignItem,
   saveCampaignName, lookupCampaignName,
@@ -18,6 +18,7 @@ function historyToItem(rec: WuzapiCampaignHistoryRecord): WuzapiCampaignItem {
     stats: { current: rec.total, total: rec.total, success: rec.success, failed: rec.failed },
     log: [],
     results: rec.results ?? [],
+    finalStats: null,
     waiting: 0,
     paused: false,
     fromHistory: true,
@@ -31,6 +32,8 @@ function historyToItem(rec: WuzapiCampaignHistoryRecord): WuzapiCampaignItem {
 export function useWuzapiCampaigns() {
   const [current, setCurrent] = useState<WuzapiCampaignItem | null>(null)
   const [history, setHistory] = useState<WuzapiCampaignHistoryRecord[]>([])
+  const [finalStatsCache, setFinalStatsCache] = useState<Record<string, WuzapiCampaignFinalStats>>({})
+  const [recalculatingId, setRecalculatingId] = useState<string | null>(null)
 
   const loadHistory = () =>
     fetch('/api/wuzapi-campaign/history').then(r => r.json()).then(setHistory).catch(() => {})
@@ -100,6 +103,8 @@ export function useWuzapiCampaigns() {
       contacts: config.contacts,
       delayMin: config.delayMin,
       delayMax: config.delayMax,
+      batchDelay: config.batchDelay,
+      spinWithAI: config.spinWithAI,
     }
     const r = await fetch('/api/wuzapi-campaign/start', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -118,6 +123,7 @@ export function useWuzapiCampaigns() {
       stats: { current: 0, total: d.count, success: 0, failed: 0 },
       log: [`🚀 Campanha iniciada — ${d.count} contatos`],
       results: [],
+      finalStats: null,
       waiting: 0,
       paused: false,
       fromHistory: false,
@@ -153,16 +159,46 @@ export function useWuzapiCampaigns() {
     a.download = fileName; a.click()
   }
 
+  // Cruza quem recebeu a campanha com quem respondeu ou apertou botão depois
+  // do envio — mesma lógica de recalcEngagement da via Chips.
+  async function computeFinalStats(item: WuzapiCampaignItem): Promise<WuzapiCampaignFinalStats> {
+    const sentContacts = item.results.filter(r => r.status === 'success').map(r => ({ number: r.number, sentAt: r.sentAt ?? item.createdAt }))
+    const ir = await fetch('/api/wuzapi-campaign/interaction-rate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sentContacts }),
+    }).then(r => r.json()).catch(() => ({ interacted: 0, rate: '0%', notInteracted: 0 }))
+    return {
+      interacted: ir.interacted ?? 0,
+      interactionRate: ir.rate ?? '0%',
+      notInteracted: ir.notInteracted ?? 0,
+    }
+  }
+
+  async function recalcEngagement(item: WuzapiCampaignItem) {
+    setRecalculatingId(item.id)
+    try {
+      const stats = await computeFinalStats(item)
+      setFinalStatsCache(prev => ({ ...prev, [item.id]: stats }))
+      if (current?.id === item.id) setCurrent(prev => prev ? { ...prev, finalStats: stats } : prev)
+    } finally {
+      setRecalculatingId(null)
+    }
+  }
+
   const items: WuzapiCampaignItem[] = [
-    ...(current ? [current] : []),
+    ...(current ? [{ ...current, finalStats: finalStatsCache[current.id] ?? current.finalStats }] : []),
     ...history
       .filter(rec => !current || Math.abs(rec.startedAt - current.createdAt) > 5000)
-      .map(historyToItem),
+      .map(rec => {
+        const item = historyToItem(rec)
+        return { ...item, finalStats: finalStatsCache[item.id] ?? null }
+      }),
   ].sort((a, b) => b.createdAt - a.createdAt)
 
   return {
     items,
     startCampaign, togglePause, stop, resetSent,
     deleteHistory, exportResultsCSV,
+    recalcEngagement, computeFinalStats, recalculatingId,
   }
 }

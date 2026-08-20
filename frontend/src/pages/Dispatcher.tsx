@@ -2286,7 +2286,9 @@ export default function Dispatcher() {
       {reportWuzapiItem && (
         <WuzapiCampaignReport
           item={reportWuzapiItem}
+          recalculating={wuzapiCampaigns.recalculatingId === reportWuzapiItem.id}
           onClose={() => setWuzapiReportItemId(null)}
+          onRecalc={wuzapiCampaigns.recalcEngagement}
           onExportCSV={item => wuzapiCampaigns.exportResultsCSV(item.results, `${item.name || 'campanha'}.csv`)}
           onDeleteHistory={reportWuzapiItem.fromHistory ? wuzapiCampaigns.deleteHistory : undefined}
           onTogglePause={reportWuzapiItem.status === 'running' ? wuzapiCampaigns.togglePause : undefined}

@@ -331,3 +331,9 @@ export interface WuzapiCampaignHistoryRecord {
     buttons: { id: string; text: string; type?: 'reply' | 'url'; url?: string }[]
   }
 }
+
+export interface WuzapiCampaignFinalStats {
+  interacted: number
+  interactionRate: string
+  notInteracted: number
+}

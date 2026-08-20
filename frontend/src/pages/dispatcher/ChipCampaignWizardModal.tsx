@@ -197,7 +197,7 @@ export default function ChipCampaignWizardModal({ onClose, onStart }: Props) {
         </div>
 
         <div className="flex p-3 gap-1 border-b border-gray-800">
-          {['Mensagem', 'Destinatários', 'Chips & Revisar'].map((label, i) => (
+          {['Destinatários', 'Mensagem', 'Chips & Revisar'].map((label, i) => (
             <button key={i} onClick={() => setStep(i + 1)}
               className={`flex-1 py-1.5 text-xs rounded-lg font-medium ${step === i + 1 ? 'bg-green-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-white'}`}>
               {i + 1}. {label}
@@ -207,15 +207,20 @@ export default function ChipCampaignWizardModal({ onClose, onStart }: Props) {
 
         <div className="flex-1 overflow-y-auto p-5">
 
-          {/* ── STEP 1: Mensagem ── */}
-          {step === 1 && (
+          {/* ── STEP 2: Mensagem ── */}
+          {step === 2 && (
             <div className="space-y-4">
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">Nome da Campanha *</label>
-                <input value={name} onChange={e => setName(e.target.value)}
-                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-green-500"
-                  placeholder="Ex: Promoção Junho 2026" />
-              </div>
+              {csvHeaders.length > 0 && (
+                <div className="bg-indigo-950/40 border border-indigo-800/30 rounded-xl p-3 space-y-2">
+                  <p className="text-[11px] font-medium text-indigo-400">Variáveis disponíveis (da base importada no passo anterior):</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    <code className="text-[11px] bg-gray-800 text-green-300 px-2 py-0.5 rounded">{'{{name}}'}</code>
+                    {csvHeaders.map(h => (
+                      <code key={h} className="text-[11px] bg-gray-800 text-indigo-300 px-2 py-0.5 rounded">{`{{${h}}}`}</code>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <div>
                 <label className="block text-xs font-medium text-gray-400 mb-1.5">Template da mensagem *</label>
@@ -282,9 +287,16 @@ export default function ChipCampaignWizardModal({ onClose, onStart }: Props) {
             </div>
           )}
 
-          {/* ── STEP 2: Destinatários ── */}
-          {step === 2 && (
+          {/* ── STEP 1: Destinatários ── */}
+          {step === 1 && (
             <div className="space-y-3">
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">Nome da Campanha *</label>
+                <input value={name} onChange={e => setName(e.target.value)}
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-green-500"
+                  placeholder="Ex: Promoção Junho 2026" />
+              </div>
+
               <div className="flex gap-1 bg-gray-800 rounded-lg p-1 w-fit">
                 {(['manual', 'csv'] as const).map(tab => (
                   <button key={tab} type="button" onClick={() => setContactsTab(tab)}
@@ -546,6 +558,26 @@ export default function ChipCampaignWizardModal({ onClose, onStart }: Props) {
                     <strong className="text-white">{recipientCount}</strong> destinatários · Delay:{' '}
                     <strong className="text-white">{settings.delayMin}s</strong> a <strong className="text-white">{settings.delayMax}s</strong>
                   </span>
+                </div>
+              )}
+
+              {previewMessage && (
+                <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 space-y-2">
+                  <div className="flex items-center gap-1.5 text-[11px] text-gray-500">
+                    <Eye size={11} /> Como vai chegar para o cliente {getActiveContacts()[0]?.name ? `(ex: ${getActiveContacts()[0].name})` : ''}
+                  </div>
+                  <div className="max-w-xs mx-auto">
+                    <div className="bg-[#202c33] rounded-xl overflow-hidden shadow-lg">
+                      {imageB64 && (
+                        <div className="bg-gray-700 h-28 flex items-center justify-center overflow-hidden">
+                          <img src={imageB64} alt="" className="w-full h-full object-cover" />
+                        </div>
+                      )}
+                      <div className="px-3 py-3">
+                        <p className="text-sm text-gray-100 whitespace-pre-wrap leading-relaxed">{previewMessage}</p>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               )}
 

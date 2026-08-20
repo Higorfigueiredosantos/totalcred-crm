@@ -1,12 +1,15 @@
+import { useEffect } from 'react'
 import {
-  X, BarChart2, CheckCircle, XCircle, Clock,
+  X, RefreshCw, BarChart2, CheckCircle, XCircle, Clock,
   Pause, Play, Square, Trash2, Download,
 } from 'lucide-react'
 import type { WuzapiCampaignItem } from './wuzapiCampaign'
 
 interface Props {
   item: WuzapiCampaignItem
+  recalculating?: boolean
   onClose: () => void
+  onRecalc?: (item: WuzapiCampaignItem) => void
   onExportCSV: (item: WuzapiCampaignItem) => void
   onDeleteHistory?: (id: string) => void
   onTogglePause?: () => void
@@ -17,20 +20,29 @@ interface Props {
 // Entregues/Lidos, já que não há confirmação de entrega vinda do whatsmeow
 // configurada nesse teste).
 export default function WuzapiCampaignReport({
-  item, onClose, onExportCSV, onDeleteHistory, onTogglePause, onStop,
+  item, recalculating, onClose, onRecalc, onExportCSV, onDeleteHistory, onTogglePause, onStop,
 }: Props) {
+  // Calcula a interação assim que o relatório abre, se ainda não tiver métricas
+  useEffect(() => {
+    if (!item.finalStats && item.results.length > 0 && onRecalc) onRecalc(item)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item.id])
+
   const total = item.stats.total || item.results.length || 1
   const success = item.results.filter(r => r.status === 'success').length
   const failed = item.results.filter(r => r.status === 'failed').length
+  const interacted = item.finalStats?.interacted ?? 0
 
   const funnel = [
     { label: 'Total',        value: total,                       pct: 100,                                                       color: 'bg-purple-500', icon: '👥' },
     { label: 'Processados',  value: item.stats.current || total, pct: Math.round(((item.stats.current || total) / total) * 100), color: 'bg-purple-400', icon: '📤' },
     { label: 'Enviados',     value: success,                     pct: Math.round((success / total) * 100),                       color: 'bg-blue-500',   icon: '✈️' },
+    { label: 'Interagiram',  value: interacted,                  pct: Math.round((interacted / total) * 100),                    color: 'bg-orange-400', icon: '💬' },
     { label: 'Falhas',       value: failed,                      pct: Math.round((failed / total) * 100),                        color: 'bg-red-500',    icon: '❌' },
   ]
 
   const successRate = total > 1 ? Math.round((success / (item.stats.current || total)) * 100) : (success > 0 ? 100 : 0)
+  const interactionRatePct = item.finalStats ? parseFloat(item.finalStats.interactionRate) || 0 : 0
   const allSkipped = item.status === 'done' && item.results.length === 0 && item.stats.total > 0 && success === 0 && failed === 0
 
   return (
@@ -55,6 +67,13 @@ export default function WuzapiCampaignReport({
             {item.status === 'running' && onStop && (
               <button onClick={onStop} className="flex items-center gap-1.5 px-3 py-1.5 bg-red-800 hover:bg-red-700 text-xs text-white rounded-lg">
                 <Square size={12} /> Parar
+              </button>
+            )}
+            {onRecalc && (
+              <button onClick={() => onRecalc(item)} disabled={recalculating}
+                className="flex items-center gap-2 px-3 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-xs text-white rounded-lg disabled:opacity-50">
+                <RefreshCw size={12} className={recalculating ? 'animate-spin' : ''} />
+                Atualizar Métricas
               </button>
             )}
             <button onClick={onClose} className="text-gray-400 hover:text-white p-1"><X size={18} /></button>
@@ -141,6 +160,16 @@ export default function WuzapiCampaignReport({
 
             {/* Side stats */}
             <div className="p-5 space-y-5">
+              <div className="text-center">
+                <p className={`text-4xl font-bold ${interactionRatePct >= 10 ? 'text-green-400' : 'text-amber-400'}`}>
+                  {item.finalStats?.interactionRate ?? '—'}
+                </p>
+                <p className="text-sm text-gray-300 mt-1">Taxa de Interação</p>
+                <p className="text-xs text-gray-500">{interacted} de {success} responderam ou apertaram o botão</p>
+              </div>
+
+              <div className="h-px bg-gray-800" />
+
               <div className="text-center">
                 <p className={`text-4xl font-bold ${successRate >= 80 ? 'text-green-400' : successRate >= 40 ? 'text-amber-400' : 'text-red-400'}`}>
                   {successRate}%
