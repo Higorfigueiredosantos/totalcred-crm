@@ -641,18 +641,24 @@ class TickMonitor {
 
 class AntiBanDelayCalculator {
   constructor() {
+    this.messagesSentInHour = 0
+    this.hourStart = Date.now()
     this.consecutiveFails = 0
   }
-  // O delay agora respeita exatamente o mínimo/máximo configurado pelo
-  // usuário — antes multiplicava por até 5x (risco crítico) e mais até 3x
-  // em cima disso (volume alto), então um "5-30s" configurado podia virar
-  // "75-450s" na prática sem nenhum aviso. Proteção contra risco alto
-  // continua existindo, só que de outros jeitos que não mentem sobre o
-  // tempo configurado: getCooldown() (abaixo) já pausa depois de falhas
-  // seguidas, e o circuit breaker (ver runChipCampaign) para a campanha de
-  // vez quando o risco fica crítico, em vez de só esticar o delay escondido.
+  reset() {
+    if (Date.now() - this.hourStart > 3600000) { this.messagesSentInHour = 0; this.hourStart = Date.now() }
+  }
   getDelay(riskLevel, baseMin = 3, baseMax = 8) {
-    const min = Math.min(baseMin, baseMax), max = Math.max(baseMin, baseMax)
+    this.reset()
+    this.messagesSentInHour++
+    let m = 1
+    if (riskLevel === 'CRITICO') m = 5
+    else if (riskLevel === 'ALTO') m = 3
+    else if (riskLevel === 'MEDIO') m = 1.8
+    if (this.messagesSentInHour > 80) m *= 3
+    else if (this.messagesSentInHour > 50) m *= 2
+    else if (this.messagesSentInHour > 30) m *= 1.5
+    const min = Math.round(baseMin * m), max = Math.round(baseMax * m)
     return Math.floor(Math.random() * (max - min + 1)) + min
   }
   recordFail() { this.consecutiveFails++ }
@@ -673,7 +679,6 @@ const chipCampaignState = {
   paused: false,
   stopped: false,
   currentCampaign: null,
-  startedAt: null,
   sentNumbers: new Set(),
   tickMonitor: new TickMonitor(),
   delayCalc: new AntiBanDelayCalculator(),
@@ -681,27 +686,6 @@ const chipCampaignState = {
 }
 
 const maturadorState = { running: false, timer: null, chipIds: [], minDelay: 60, maxDelay: 300, mediaEnabled: true, msgCount: 0 }
-
-// Chips ocupados agora por outro processo (maturador OU campanha) — usado
-// pra impedir que os dois disputem a mesma sessão do whatsapp-web.js ao
-// mesmo tempo. Sem essa checagem, um chip que já estava aquecendo no
-// maturador (ou já estava numa campanha) podia ser escalado de novo pro
-// outro processo: dobra a carga no mesmo Chrome/Puppeteer por trás dele,
-// e é um gatilho bem plausível pra queda no meio de um disparo — o mesmo
-// tipo de bug já corrigido pro Wuzapi (ver getBusyInstanceNames em
-// backend/wuzapi.js), que usa a mesma proteção nos dois sentidos.
-function getBusyChipIds() {
-  const busy = new Set()
-  const allIds = Object.keys(chipSessions)
-  if (maturadorState.running) {
-    (maturadorState.chipIds.length ? maturadorState.chipIds : allIds).forEach(id => busy.add(id))
-  }
-  if (chipCampaignState.currentCampaign) {
-    const selected = chipCampaignState.currentCampaign.settings?.selectedChipIds
-    ;(Array.isArray(selected) && selected.length ? selected : allIds).forEach(id => busy.add(id))
-  }
-  return busy
-}
 
 // ── Chip registry (persist chip IDs across restarts) ──────────────────────────
 
@@ -1113,38 +1097,6 @@ async function initChip(chipId) {
       const status = ackStatusMap[String(ack)]
       console.log(`[Chip ${chipId}] message_ack ack=${ack} status=${status} id=${msgId}`)
       if (status && msgId) broadcast('chip_ack', { msgId, status })
-
-      // Atualiza o ack guardado no resultado da campanha (se essa mensagem
-      // foi enviada por uma) — sem isso o "Ack" no relatório ficava
-      // congelado no valor capturado na hora do envio (quase sempre 0/
-      // pendente, ver comentário acima em runChipCampaign) e nunca refletia
-      // a confirmação real de entrega/leitura que chega minutos depois.
-      //
-      // ack === -1 é um caso especial: o WhatsApp está dizendo que o envio
-      // FALHOU DE VERDADE (visto na prática: client.sendMessage() resolve
-      // sem erro, mas segundos depois chega esse -1 — a mensagem nunca saiu
-      // de fato, mesmo o código tendo marcado "sucesso" na hora). Como -1 é
-      // menor que qualquer valor de progresso normal (0,1,2,3), a checagem
-      // "só atualiza se for maior" abaixo descartava esse aviso de falha
-      // sem querer — por isso esse caso vem antes e sempre corrige, virando
-      // o resultado de "sucesso" pra "falha" de verdade (recalculando os
-      // contadores do funil a partir dos resultados, não só o ack).
-      if (msgId) {
-        const campaignResult = chipCampaignState.results.find(r => r.messageId === msgId)
-        if (campaignResult) {
-          if (ack === -1 && campaignResult.status !== 'failed') {
-            campaignResult.ack = -1
-            campaignResult.status = 'failed'
-            campaignResult.error = 'WhatsApp reportou falha no envio (mensagem não entregue, apesar do envio ter parecido bem-sucedido no momento).'
-            const success = chipCampaignState.results.filter(r => r.status === 'success').length
-            const failedCount = chipCampaignState.results.filter(r => r.status === 'failed').length
-            broadcast('chip_campaign', { type: 'result', contact: campaignResult, success, failed: failedCount })
-          } else if (ack > campaignResult.ack) {
-            campaignResult.ack = ack
-            broadcast('chip_campaign', { type: 'ack_update', number: campaignResult.number, ack })
-          }
-        }
-      }
     })
 
     client.on('message', (msg) => {
@@ -1262,64 +1214,8 @@ function extractMsgId(msg) {
 // idêntico, cada uma com tique de "enviado" próprio — 3 envios reais, não
 // só uma duplicata visual). Melhor deixar o erro aparecer e o usuário
 // decidir se reenvia manualmente.
-//
-// Timeout: sem isso, se a página/puppeteer travar bem no meio do envio
-// (sessão quebrada, frame morto), o await de sendMessage() nunca resolve
-// nem rejeita — a campanha inteira fica parada nesse contato pra sempre, e
-// o log mostra "Enviando..." indefinidamente sem nunca virar sucesso ou
-// falha. Com o timeout, esse contato conta como falha (entra no circuit
-// breaker normal de falhas seguidas) e a campanha segue pro próximo em vez
-// de travar escondida atrás de uma linha de log que nunca se resolve.
-function withTimeout(promise, ms, message) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms)),
-  ])
-}
-
-async function sendChipText(client, chatId, text, timeoutMs = 30000) {
-  return await withTimeout(client.sendMessage(chatId, text), timeoutMs, 'Tempo esgotado aguardando o envio (30s) — a sessão pode estar travada.')
-}
-
-// Resolve o número pro JID de verdade que o WhatsApp usa pra esse contato
-// ANTES de enviar — sem isso, mandar direto pro JID "adivinhado" (@c.us)
-// falha silenciosamente (ack=-1, sem erro nenhum na hora do envio) pra
-// contatos que o WhatsApp já migrou pro endereçamento por LID (visto em
-// teste real, ver client.getNumberId abaixo). Reaproveita a mesma lógica
-// já usada em runChipCampaign — antes só a campanha tinha essa checagem;
-// os endpoints de envio manual (/api/chips/send, /api/send-message, usado
-// pela tela de Mensagens) mandavam pro JID cru sem nunca confirmar com o
-// WhatsApp primeiro.
-//
-// Só roda a checagem quando `to` é um número cru (sem "@") — se já vier um
-// JID pronto (ex.: respondendo uma conversa existente, cujo contato já foi
-// confirmado por uma mensagem recebida de verdade), usa direto, sem gastar
-// uma chamada a mais.
-//
-// client.sendMessage() sozinho NÃO garante que a conversa foi iniciada de
-// verdade com um contato novo (bug/limitação documentada da biblioteca,
-// confirmada olhando o código-fonte: sendMessage chama WWebJS.getChat, que
-// cria o chat internamente, mas isso nem sempre é suficiente pra
-// estabelecer a sessão de verdade com um contato sem histórico — visto na
-// prática: funciona pra quem já tem conversa ativa, falha silenciosamente
-// pra número novo, exatamente como reportado). client.interface.openChatWindow()
-// dispara o MESMO comando interno que o WhatsApp Web usa quando você clica
-// num contato novo e abre a conversa manualmente (WAWebCmd.Cmd.openChatBottom) —
-// roda isso antes de enviar pra replicar o fluxo manual que funciona.
-async function resolveChatId(client, to, timeoutMs = 10000) {
-  if (to.includes('@')) return to
-  const formatted = formatNumber(to)
-  let lookupFailed = false
-  let vid = null
-  try {
-    vid = await withTimeout(client.getNumberId(formatted), timeoutMs, 'timeout getNumberId')
-  } catch (e) {
-    lookupFailed = true
-  }
-  if (!vid && !lookupFailed) throw new Error('Esse número não tem WhatsApp (confirmado antes do envio).')
-  const chatId = vid ? vid._serialized : formatted
-  try { await withTimeout(client.interface.openChatWindow(chatId), timeoutMs, 'timeout openChatWindow') } catch (e) { /* melhor esforço — segue pro envio mesmo assim */ }
-  return chatId
+async function sendChipText(client, chatId, text) {
+  return await client.sendMessage(chatId, text)
 }
 
 // client.sendMessage() às vezes resolve sem devolver o objeto da mensagem
@@ -1364,15 +1260,9 @@ const openingPhrases = [
   'Bom dia! 😊', 'Boa tarde!', 'Boa noite!', 'Oi! 👋', 'Olá! 😊', 'E aí! Tudo na paz?'
 ]
 
-function firstNameOf(name) {
-  const trimmed = String(name || '').trim()
-  return trimmed ? trimmed.split(/\s+/)[0] : ''
-}
-
 // Substitui {{name}}, {{1}}, {{cidade}}, etc. no template
-function applyVars(text, contact, firstNameOnly) {
-  const rawName = typeof contact === 'string' ? contact : (contact?.name || '')
-  const name = firstNameOnly ? firstNameOf(rawName) : rawName
+function applyVars(text, contact) {
+  const name = typeof contact === 'string' ? contact : (contact?.name || '')
   const vars = (typeof contact === 'object' && contact?.vars) ? contact.vars : {}
   let msg = text
   if (name) msg = msg.replace(/\{\{name\}\}/gi, name).replace(/\{name\}/gi, name)
@@ -1383,15 +1273,15 @@ function applyVars(text, contact, firstNameOnly) {
   return msg
 }
 
-function humanizeBasic(text, contact, greetingPool, firstNameOnly) {
+function humanizeBasic(text, contact, greetingPool) {
   if (!text) return 'Olá!'
   const pool = (Array.isArray(greetingPool) && greetingPool.length > 0) ? greetingPool : openingPhrases
-  const msg = applyVars(text, contact, firstNameOnly)
+  const msg = applyVars(text, contact)
   return `${pool[Math.floor(Math.random() * pool.length)]}\n\n${msg}`
 }
 
-async function humanizeWithAI(text, contact, tone = 'amigavel', greetingPool, firstNameOnly) {
-  const resolved = applyVars(text, contact, firstNameOnly)
+async function humanizeWithAI(text, contact, tone = 'amigavel', greetingPool) {
+  const resolved = applyVars(text, contact)
   const name = typeof contact === 'string' ? contact : (contact?.name || '')
   const apiKey = process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY
   if (!apiKey) return humanizeBasic(resolved, '', greetingPool)
@@ -1421,7 +1311,6 @@ async function runChipCampaign(data) {
   chipCampaignState.currentCampaign = data
   let success = 0, failed = 0
   const campaignStartedAt = Date.now()
-  chipCampaignState.startedAt = campaignStartedAt
 
   // Chips selecionados para esta campanha (fallback: todos os chips)
   const allChipIds = Object.keys(chipSessions)
@@ -1445,17 +1334,6 @@ async function runChipCampaign(data) {
     chips: readySelected,
     total: contacts.length,
   })
-
-  // Aquecimento: a primeira mensagem também espera um delay antes de sair,
-  // em vez de disparar instantaneamente assim que a campanha inicia (mesmo
-  // ajuste já aplicado no Wuzapi/SMS depois de descobrir que abrir com um
-  // envio instantâneo é o padrão mais fácil de ser flagrado como automação
-  // e derrubar a sessão no meio do disparo).
-  const warmupMin = settings.delayMin || 3
-  const warmupMax = settings.delayMax || 8
-  const warmupDelay = Math.floor(Math.random() * (Math.max(warmupMax, warmupMin) - warmupMin + 1)) + warmupMin
-  broadcast('chip_campaign', { type: 'waiting', delay: warmupDelay, risk: 'BAIXO', next: 1, nextChip: readySelected[0] || null })
-  await sleep(warmupDelay * 1000)
 
   for (let i = 0; i < contacts.length; i++) {
     if (chipCampaignState.stopped) break
@@ -1493,16 +1371,15 @@ async function runChipCampaign(data) {
       result.via = activeChip.id
 
       let text = settings.useAIHumanize
-        ? await humanizeWithAI(messageTemplate, contact, settings.tone || 'amigavel', settings.greetings, settings.firstNameOnly)
-        : humanizeBasic(messageTemplate, contact, settings.greetings, settings.firstNameOnly)
+        ? await humanizeWithAI(messageTemplate, contact, settings.tone || 'amigavel', settings.greetings)
+        : humanizeBasic(messageTemplate, contact, settings.greetings)
 
-      // Resolve o JID de verdade (LID quando aplicável) E garante que a
-      // conversa foi iniciada de verdade antes de enviar — mesma função
-      // usada pelos endpoints de envio manual agora, ver resolveChatId
-      // acima pro motivo completo (resolve o "número não existe" que ficava
-      // silencioso, e o "conversa nova não inicia" que só client.sendMessage
-      // sozinho não resolve).
-      const formatted = await resolveChatId(activeChip.client, contact.number)
+      // Resolve Brazilian number format
+      let formatted = formatNumber(contact.number)
+      try {
+        const vid = await activeChip.client.getNumberId(formatted)
+        if (vid) formatted = vid._serialized
+      } catch (e) {}
 
       let msg
       if (mediaData?.type === 'image') {
@@ -1511,7 +1388,7 @@ async function runChipCampaign(data) {
         if (MessageMedia) {
           const base64 = mediaData.base64.includes(',') ? mediaData.base64.split(',')[1] : mediaData.base64
           const media = new MessageMedia('image/jpeg', base64, 'imagem.jpg')
-          msg = await withTimeout(activeChip.client.sendMessage(formatted, media, { caption: text }), 30000, 'Tempo esgotado aguardando o envio da imagem (30s) — a sessão pode estar travada.')
+          msg = await activeChip.client.sendMessage(formatted, media, { caption: text })
         } else {
           msg = await sendChipText(activeChip.client, formatted, text)
         }
@@ -1519,20 +1396,9 @@ async function runChipCampaign(data) {
         msg = await sendChipText(activeChip.client, formatted, text)
       }
 
-      // "msg?.ack || 1" tratava ack real igual a 0 (ACK_PENDING — mensagem
-      // ainda NÃO confirmada como enviada de verdade pro servidor do
-      // WhatsApp no instante em que a promise resolveu) como se fosse
-      // "sem informação", caindo no fallback de 1 (Enviado). 0 é falsy em
-      // JS, então "|| 1" mentia bem ali: campanha marcava sucesso/Enviado
-      // pra mensagem que na real nem tinha saído ainda (visto na prática —
-      // reportado como enviado, nada chegou no destinatário). Só usa o
-      // fallback de "assume enviado" quando o próprio objeto da mensagem
-      // vier ausente (caso documentado de sessões com LID, ver
-      // registerPendingAck acima), nunca quando ack é um número real.
       result.status = 'success'
       result.message = text
-      result.ack = (msg && typeof msg.ack === 'number') ? msg.ack : 1
-      result.messageId = extractMsgId(msg)
+      result.ack = msg?.ack || 1
       result.sentAt = Date.now()
       success++
       batchCount++
@@ -1581,11 +1447,9 @@ async function runChipCampaign(data) {
     failed,
     skipped: contacts.length - success - failed,
     results: chipCampaignState.results.map(r => ({ ...r })),
-    text: messageTemplate,
   })
 
   chipCampaignState.currentCampaign = null
-  chipCampaignState.startedAt = null
 }
 
 // ── Maturador ─────────────────────────────────────────────────────────────────
@@ -1985,14 +1849,8 @@ app.post('/api/proxies', (req, res) => {
   if (list.includes(entry)) return res.status(400).json({ error: 'Proxy já existe' })
   list.push(entry)
   saveProxies(list)
-  // Reinicia chips sem proxy para que peguem o rotador — pula chips ocupados
-  // agora num disparo/maturador (ver getBusyChipIds): forçar reconexão no
-  // meio de uma campanha é exatamente o tipo de coisa que faz o chip "cair
-  // do nada" durante o envio. O proxy dele fica pra ser aplicado só depois,
-  // na próxima vez que reconectar.
-  const busyForProxyAdd = getBusyChipIds()
+  // Reinicia chips sem proxy para que peguem o rotador
   Object.entries(chipSessions).forEach(([id, s]) => {
-    if (busyForProxyAdd.has(id)) return
     if (!s.proxy || s.proxy === null) {
       console.log(`[Rotator] Proxy adicionado — reconectando chip ${id} com rotador`)
       if (s.client) try { s.client.destroy() } catch (_) {}
@@ -2011,12 +1869,8 @@ app.delete('/api/proxies/:index', (req, res) => {
   // Limpa histórico do rotador para recalibrar
   rotatorState.history = []
   if (list.length === 0) {
-    // Sem proxies: reconecta chips diretamente — mesma proteção de pular
-    // chips ocupados num disparo/maturador ativo (ver comentário acima em
-    // POST /api/proxies).
-    const busyForProxyDel = getBusyChipIds()
+    // Sem proxies: reconecta chips diretamente
     Object.entries(chipSessions).forEach(([id, s]) => {
-      if (busyForProxyDel.has(id)) return
       if (s.proxy?.startsWith('rotador:')) {
         s.proxy = null
         if (s.client) try { s.client.destroy() } catch (_) {}
@@ -2063,13 +1917,6 @@ app.post('/api/chip-campaign/start', (req, res) => {
   if (readyIds.length === 0) return res.status(400).json({ error: 'Nenhum chip conectado' })
   if (chipCampaignState.currentCampaign) return res.status(400).json({ error: 'Campanha já em andamento' })
   const data = req.body
-  const selectedChipIds = Array.isArray(data.settings?.selectedChipIds) && data.settings.selectedChipIds.length > 0
-    ? data.settings.selectedChipIds : readyIds
-  const busy = getBusyChipIds()
-  const conflicting = selectedChipIds.filter(id => busy.has(id))
-  if (conflicting.length) {
-    return res.status(400).json({ error: `Esses chips já estão em uso pelo maturador: ${conflicting.join(', ')}. Pare o maturador neles antes de disparar a campanha.` })
-  }
   if (!data.force) {
     const h = new Date().getHours()
     if (h >= 20 || h < 8) return res.status(400).json({
@@ -2078,17 +1925,7 @@ app.post('/api/chip-campaign/start', (req, res) => {
     })
   }
   res.json({ ok: true, count: data.contacts?.length || 0 })
-  // Sem esse .catch, um erro inesperado fora do try/catch interno do loop
-  // (ex.: contacts malformado) derrubava a função sem nunca voltar pra
-  // limpar currentCampaign — toda tentativa seguinte de iniciar uma
-  // campanha nova passava a esbarrar em "Campanha já em andamento" pra
-  // sempre, sem nenhuma campanha visível na tela pra explicar o motivo.
-  runChipCampaign(data).catch(e => {
-    console.error('[ChipCampaign] Erro:', e.message)
-    broadcast('chip_campaign', { type: 'stopped', reason: `⚠️ Disparo interrompido por erro: ${e.message}` })
-    chipCampaignState.currentCampaign = null
-    chipCampaignState.startedAt = null
-  })
+  runChipCampaign(data)
 })
 
 app.post('/api/chip-campaign/pause', (_req, res) => {
@@ -2100,23 +1937,6 @@ app.post('/api/chip-campaign/pause', (_req, res) => {
 app.post('/api/chip-campaign/stop', (_req, res) => {
   chipCampaignState.stopped = true
   broadcast('chip_campaign', { type: 'stopped' })
-  res.json({ ok: true })
-})
-
-// "Parar" normal só marca a flag "stopped" e espera o loop da campanha
-// notar isso na próxima iteração — se o loop travou de verdade (preso num
-// await que nunca resolve, ex.: puppeteer/página quebrada no meio do
-// envio), essa flag nunca chega a ser lida e currentCampaign fica preso
-// pra sempre, bloqueando qualquer campanha nova com "já em andamento" sem
-// nenhum jeito de limpar pela tela. Esse endpoint libera o estado na
-// marra, direto — o loop antigo (se algum dia voltar a rodar) só vai achar
-// currentCampaign nulo e não vai mais escrever em cima de uma campanha
-// nova que tenha começado nesse meio tempo.
-app.post('/api/chip-campaign/force-reset', (_req, res) => {
-  chipCampaignState.currentCampaign = null
-  chipCampaignState.startedAt = null
-  chipCampaignState.stopped = true
-  broadcast('chip_campaign', { type: 'stopped', reason: '⚠️ Campanha encerrada manualmente (estava travada).' })
   res.json({ ok: true })
 })
 
@@ -2134,26 +1954,6 @@ app.get('/api/chip-campaign/stats', (_req, res) => res.json({
   tickStats: chipCampaignState.tickMonitor.getSummary(),
   riskLevel: chipCampaignState.tickMonitor.getBanRiskLevel(),
 }))
-
-// Snapshot da campanha em andamento (ou null) — mesma lógica de
-// /api/wuzapi-campaign/current (ver comentário lá): sem isso, um F5 na tela
-// com uma campanha de chips rodando fazia o front perder ela de vista, mas
-// o backend continuava recusando iniciar uma nova achando (corretamente)
-// que já tinha uma em andamento — só que sem nada visível pro usuário
-// pausar ou parar.
-app.get('/api/chip-campaign/current', (_req, res) => {
-  const cs = chipCampaignState
-  if (!cs.currentCampaign) return res.json(null)
-  res.json({
-    startedAt: cs.startedAt,
-    total: cs.currentCampaign.contacts?.length || 0,
-    results: cs.results,
-    paused: cs.paused,
-    chipIds: cs.currentCampaign.settings?.selectedChipIds || [],
-    riskLevel: cs.tickMonitor.getBanRiskLevel(),
-    text: cs.currentCampaign.messageTemplate,
-  })
-})
 
 
 // ── Wuzapi Routes (BETA — teste de entrega de botões via whatsmeow) ───────────
@@ -2608,16 +2408,10 @@ app.get('/api/maturador/status', (_req, res) => {
 app.post('/api/maturador/start', (req, res) => {
   const readyIds = Object.keys(chipSessions).filter(id => chipSessions[id].isReady)
   if (readyIds.length < 2) return res.status(400).json({ error: 'Você precisa de pelo menos 2 chips conectados para o maturador.' })
-  const chipIds = req.body.chipIds || readyIds
-  const busy = getBusyChipIds()
-  const conflicting = chipIds.filter(id => busy.has(id))
-  if (conflicting.length) {
-    return res.status(400).json({ error: `Esses chips já estão em uso por um disparo de campanha em andamento: ${conflicting.join(', ')}.` })
-  }
   const min = Number(req.body.minDelay) || 60
   const max = Number(req.body.maxDelay) || 300
   maturadorState.running = true
-  maturadorState.chipIds = chipIds
+  maturadorState.chipIds = req.body.chipIds || readyIds
   maturadorState.minDelay = min
   maturadorState.maxDelay = max
   maturadorState.mediaEnabled = req.body.mediaEnabled !== false
@@ -3116,7 +2910,7 @@ app.post('/api/send-message', async (req, res) => {
   const session = chipSessions[id]
   if (session?.isReady && session.client) {
     try {
-      const chatId = await resolveChatId(session.client, to)
+      let chatId = to.includes('@') ? to : formatNumber(to)
       const convId = conversationId || getConvId(id, chatId)
       const pendingAck = registerPendingAck(id, chatId)
       const msg = await sendChipText(session.client, chatId, message)
@@ -3163,7 +2957,9 @@ app.post('/api/chips/send', async (req, res) => {
   const session = chipSessions[chipId]
   if (!session?.isReady || !session.client) return res.status(400).json({ error: `Chip "${chipId}" não está conectado` })
   try {
-    const chatId = await resolveChatId(session.client, to)
+    // If 'to' already contains '@' (e.g. '5511@c.us' or '123@lid'), use it directly.
+    // Only reformat if it's a plain phone number without domain.
+    let chatId = to.includes('@') ? to : formatNumber(to)
     const convId = getConvId(chipId, chatId)
     const pendingAck = registerPendingAck(chipId, chatId)
     console.log(`[Send ${reqId}] chamando client.sendMessage...`)
@@ -3190,7 +2986,7 @@ app.post('/api/chips/send-media', upload.single('file'), async (req, res) => {
   const session = chipSessions[chipId]
   if (!session?.isReady || !session.client) return res.status(400).json({ error: `Chip "${chipId}" não está conectado` })
   try {
-    const chatId = await resolveChatId(session.client, to)
+    let chatId = to.includes('@') ? to : formatNumber(to)
     const { MessageMedia } = require('whatsapp-web.js')
     const base64  = req.file.buffer.toString('base64')
     const isAudio = req.file.mimetype.startsWith('audio/')

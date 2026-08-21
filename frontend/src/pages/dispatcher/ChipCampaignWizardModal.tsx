@@ -41,7 +41,6 @@ export default function ChipCampaignWizardModal({ onClose, onStart }: Props) {
   const [settings, setSettings] = useState<ChipCampaignSettings>({
     delayMin: 5, delayMax: 30, useAIHumanize: false, tone: 'amigavel',
     batchDelay: { enabled: false, everyMin: 10, everyMax: 20, pauseMin: 60, pauseMax: 120 },
-    firstNameOnly: false,
   })
 
   useEffect(() => {
@@ -151,14 +150,13 @@ export default function ChipCampaignWizardModal({ onClose, onStart }: Props) {
   const previewMessage = useMemo(() => {
     if (!message.trim()) return ''
     const contacts = getActiveContacts()
-    const c = contacts[0] ?? { number: '5511999990001', name: 'João Silva', vars: {} }
-    const nameValue = (settings.firstNameOnly ? (c.name || '').trim().split(/\s+/)[0] : c.name) || 'Nome'
-    let msg = message.replace(/\{\{name\}\}/gi, nameValue)
+    const c = contacts[0] ?? { number: '5511999990001', name: 'João', vars: {} }
+    let msg = message.replace(/\{\{name\}\}/gi, c.name || 'Nome')
     if (c.vars) for (const [k, v] of Object.entries(c.vars)) msg = msg.replace(new RegExp(`\\{\\{${k}\\}\\}`, 'gi'), v)
     const greeting = selectedGreetings[0] ?? 'Oi, tudo bem?'
     return `${greeting}\n\n${msg}`
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [message, contactsText, csvContacts, contactsTab, selectedGreetings, settings.firstNameOnly])
+  }, [message, contactsText, csvContacts, contactsTab, selectedGreetings])
 
   const recipientCount = getActiveContacts().length
   const readyChips = chips.filter(c => c.isReady)
@@ -230,12 +228,6 @@ export default function ChipCampaignWizardModal({ onClose, onStart }: Props) {
                   placeholder={"Use {{name}} para nome, {{1}} {{2}}... para colunas do CSV.\nEx: Olá {{name}}, temos uma oferta em {{cidade}}!"}
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 resize-none focus:outline-none focus:border-green-500" />
               </div>
-
-              <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer select-none">
-                <input type="checkbox" checked={!!settings.firstNameOnly}
-                  onChange={e => setSettings(s => ({ ...s, firstNameOnly: e.target.checked }))} className="rounded" />
-                Usar apenas o primeiro nome em {'{{name}}'} <span className="text-gray-500">(ex: "João Silva" → "João")</span>
-              </label>
 
               <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
                 <button type="button" onClick={() => setShowGreetingPicker(s => !s)}

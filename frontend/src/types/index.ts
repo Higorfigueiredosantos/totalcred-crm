@@ -250,7 +250,6 @@ export interface ChipCampaignResult {
   error?: string
   via: string
   ack?: number
-  messageId?: string
   sentAt?: number  // ms timestamp of successful dispatch
 }
 
@@ -263,7 +262,6 @@ export interface CampaignHistoryRecord {
   failed: number
   skipped: number
   results: ChipCampaignResult[]
-  text?: string
 }
 
 export interface ChipCampaignSettings {
@@ -281,7 +279,6 @@ export interface ChipCampaignSettings {
     pauseMin: number
     pauseMax: number
   }
-  firstNameOnly?: boolean
 }
 
 export interface CsvContact {

@@ -1994,19 +1994,7 @@ export default function Dispatcher() {
                             className="flex items-center gap-1 px-2 py-1 bg-red-800 hover:bg-red-700 text-xs text-white rounded-lg">
                             <Square size={12} /> Parar
                           </button>
-                          <button onClick={() => { if (confirm('Isso força o encerramento imediato, sem esperar o disparo notar. Use só se "Parar" não estiver funcionando (campanha travada). Continuar?')) chipCampaigns.forceReset() }}
-                            title="Campanha travada? Forçar encerramento"
-                            className="p-1.5 bg-gray-800 hover:bg-gray-700 text-amber-400 rounded-lg border border-gray-700">
-                            <AlertTriangle size={13} />
-                          </button>
                         </>
-                      )}
-                      {item.fromHistory && (
-                        <button onClick={() => chipCampaigns.deleteHistory(item.id)}
-                          className="p-1.5 bg-red-900/40 hover:bg-red-800/60 text-red-400 rounded-lg"
-                          title="Apagar do histórico">
-                          <Trash2 size={13} />
-                        </button>
                       )}
                     </div>
                   </div>

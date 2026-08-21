@@ -23,7 +23,6 @@ function historyToItem(rec: CampaignHistoryRecord): ChipCampaignItem {
     waiting: 0,
     paused: false,
     fromHistory: true,
-    text: rec.text,
   }
 }
 
@@ -42,37 +41,6 @@ export function useChipCampaigns() {
     fetch('/api/chip-campaign/history').then(r => r.json()).then(setHistory).catch(() => {})
 
   useEffect(() => { loadHistory() }, [])
-
-  // Reidrata uma campanha que já estava rodando no backend antes desse
-  // componente montar (ex.: usuário deu F5 no meio de um disparo). Sem
-  // isso, o "current" local ficava null pra sempre (só existe na memória do
-  // React), mas o backend continuava recusando iniciar uma campanha nova —
-  // o usuário via só o erro "já em andamento", sem nada na tela pra
-  // pausar/parar a que já estava rodando de verdade.
-  useEffect(() => {
-    fetch('/api/chip-campaign/current').then(r => r.json()).then(snap => {
-      if (!snap) return
-      const results: ChipCampaignResult[] = snap.results || []
-      const success = results.filter(r => r.status === 'success').length
-      const failed = results.filter(r => r.status === 'failed').length
-      setCurrent({
-        id: `live-${snap.startedAt}`,
-        name: lookupCampaignName(snap.startedAt) ?? 'Campanha via Chips',
-        status: 'running',
-        chipIds: snap.chipIds || [],
-        createdAt: snap.startedAt,
-        stats: { current: results.length, total: snap.total, success, failed },
-        log: ['🔄 Campanha em andamento recuperada após recarregar a página.'],
-        results,
-        finalStats: null,
-        riskLevel: snap.riskLevel || '—',
-        waiting: 0,
-        paused: !!snap.paused,
-        fromHistory: false,
-        text: snap.text,
-      })
-    }).catch(() => {})
-  }, [])
 
   useEffect(() => {
     const offs = [
@@ -118,16 +86,6 @@ export function useChipCampaigns() {
         return { ...prev, results: next, stats: { ...prev.stats, success: p.success, failed: p.failed } }
       })
       addLog(p.contact?.status === 'success' ? `✅ ${p.contact.number}` : `❌ ${p.contact?.number} — ${p.contact?.error}`)
-    }
-    // Confirmação de entrega/leitura chegando minutos depois do envio — só
-    // atualiza o ack guardado, sem logar de novo (evitaria triplicar a
-    // linha do mesmo número a cada confirmação: enviado → entregue → lido).
-    if (p.type === 'ack_update') {
-      setCurrent(prev => {
-        if (!prev) return prev
-        const next = prev.results.map(r => r.number === p.number ? { ...r, ack: p.ack } : r)
-        return { ...prev, results: next }
-      })
     }
     if (p.type === 'started') {
       addLog(`🔀 Chips em rotação: ${(p.chips as string[]).join(', ')} (${p.chips.length} chip${p.chips.length !== 1 ? 's' : ''})`)
@@ -181,7 +139,6 @@ export function useChipCampaigns() {
       waiting: 0,
       paused: false,
       fromHistory: false,
-      text: config.message,
     })
     return { ok: true as const }
   }
@@ -193,15 +150,6 @@ export function useChipCampaigns() {
 
   async function stop() {
     await apiFetch('/api/chip-campaign/stop', { method: 'POST' })
-  }
-
-  // "Parar" normal espera o loop no backend notar a flag "stopped" — se a
-  // campanha travou de verdade (preso num await que nunca resolve), isso
-  // nunca acontece e "já em andamento" trava pra sempre, sem opção de
-  // excluir. Isso libera o estado direto, sem esperar o loop.
-  async function forceReset() {
-    await apiFetch('/api/chip-campaign/force-reset', { method: 'POST' })
-    setCurrent(prev => prev ? { ...prev, status: 'done', paused: false, endedAt: Date.now() } : prev)
   }
 
   async function resetSent() {
@@ -275,7 +223,7 @@ export function useChipCampaigns() {
 
   return {
     items,
-    startCampaign, togglePause, stop, forceReset, resetSent,
+    startCampaign, togglePause, stop, resetSent,
     deleteHistory, exportResultsCSV,
     recalcEngagement, computeFinalStats, recalculatingId,
   }

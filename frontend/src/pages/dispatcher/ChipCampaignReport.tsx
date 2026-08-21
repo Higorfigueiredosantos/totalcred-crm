@@ -82,12 +82,6 @@ export default function ChipCampaignReport({
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-0">
             {/* Funnel */}
             <div className="lg:col-span-2 p-5 border-b lg:border-b-0 lg:border-r border-gray-800">
-              {item.text && (
-                <div className="flex items-start gap-2 bg-gray-800/60 border border-gray-700/60 rounded-lg p-2 mb-4">
-                  <p className="text-[11px] text-gray-300 line-clamp-3 whitespace-pre-wrap">{item.text}</p>
-                </div>
-              )}
-
               <div className="flex items-center gap-2 mb-4">
                 <BarChart2 size={14} className="text-indigo-400" />
                 <p className="text-sm font-medium text-white">Funil de conversão</p>
