@@ -1113,6 +1113,19 @@ async function initChip(chipId) {
       const status = ackStatusMap[String(ack)]
       console.log(`[Chip ${chipId}] message_ack ack=${ack} status=${status} id=${msgId}`)
       if (status && msgId) broadcast('chip_ack', { msgId, status })
+
+      // Atualiza o ack guardado no resultado da campanha (se essa mensagem
+      // foi enviada por uma) — sem isso o "Ack" no relatório ficava
+      // congelado no valor capturado na hora do envio (quase sempre 0/
+      // pendente, ver comentário acima em runChipCampaign) e nunca refletia
+      // a confirmação real de entrega/leitura que chega minutos depois.
+      if (msgId) {
+        const campaignResult = chipCampaignState.results.find(r => r.messageId === msgId)
+        if (campaignResult && ack > campaignResult.ack) {
+          campaignResult.ack = ack
+          broadcast('chip_campaign', { type: 'ack_update', number: campaignResult.number, ack })
+        }
+      }
     })
 
     client.on('message', (msg) => {
@@ -1426,11 +1439,27 @@ async function runChipCampaign(data) {
       // Resolve Brazilian number format — timeout aqui pelo mesmo motivo do
       // envio (withTimeout acima): sem ele, uma chamada travada nessa etapa
       // já prendia a campanha inteira antes mesmo de chegar no envio.
+      //
+      // getNumberId() resolvendo com null (sem lançar erro) significa que o
+      // WhatsApp confirmou que esse número NÃO tem conta — antes isso era
+      // ignorado silenciosamente e o código mandava o sendMessage mesmo
+      // assim pro JID cru "adivinhado" (formatNumber + @c.us), que o
+      // whatsapp-web.js às vezes resolve sem erro mesmo sem entregar nada
+      // de verdade (visto na prática: campanha marcava sucesso, mensagem
+      // nunca chegou). Se a checagem em si falhar por timeout/rede (não
+      // confirma nem nega), segue como antes com o número cru — só quando
+      // o WhatsApp confirma "não existe" é que a gente já marca falha aqui,
+      // sem gastar um envio de verdade num número que não vai receber nada.
       let formatted = formatNumber(contact.number)
+      let numberLookupFailed = false
+      let vid = null
       try {
-        const vid = await withTimeout(activeChip.client.getNumberId(formatted), 10000, 'timeout getNumberId')
-        if (vid) formatted = vid._serialized
-      } catch (e) {}
+        vid = await withTimeout(activeChip.client.getNumberId(formatted), 10000, 'timeout getNumberId')
+      } catch (e) {
+        numberLookupFailed = true
+      }
+      if (vid) formatted = vid._serialized
+      else if (!numberLookupFailed) throw new Error('Esse número não tem WhatsApp (confirmado antes do envio).')
 
       let msg
       if (mediaData?.type === 'image') {
@@ -1447,9 +1476,20 @@ async function runChipCampaign(data) {
         msg = await sendChipText(activeChip.client, formatted, text)
       }
 
+      // "msg?.ack || 1" tratava ack real igual a 0 (ACK_PENDING — mensagem
+      // ainda NÃO confirmada como enviada de verdade pro servidor do
+      // WhatsApp no instante em que a promise resolveu) como se fosse
+      // "sem informação", caindo no fallback de 1 (Enviado). 0 é falsy em
+      // JS, então "|| 1" mentia bem ali: campanha marcava sucesso/Enviado
+      // pra mensagem que na real nem tinha saído ainda (visto na prática —
+      // reportado como enviado, nada chegou no destinatário). Só usa o
+      // fallback de "assume enviado" quando o próprio objeto da mensagem
+      // vier ausente (caso documentado de sessões com LID, ver
+      // registerPendingAck acima), nunca quando ack é um número real.
       result.status = 'success'
       result.message = text
-      result.ack = msg?.ack || 1
+      result.ack = (msg && typeof msg.ack === 'number') ? msg.ack : 1
+      result.messageId = extractMsgId(msg)
       result.sentAt = Date.now()
       success++
       batchCount++

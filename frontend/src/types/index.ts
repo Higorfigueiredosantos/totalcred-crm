@@ -250,6 +250,7 @@ export interface ChipCampaignResult {
   error?: string
   via: string
   ack?: number
+  messageId?: string
   sentAt?: number  // ms timestamp of successful dispatch
 }
 

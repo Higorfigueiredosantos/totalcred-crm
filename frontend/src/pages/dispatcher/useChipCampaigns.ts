@@ -119,6 +119,16 @@ export function useChipCampaigns() {
       })
       addLog(p.contact?.status === 'success' ? `✅ ${p.contact.number}` : `❌ ${p.contact?.number} — ${p.contact?.error}`)
     }
+    // Confirmação de entrega/leitura chegando minutos depois do envio — só
+    // atualiza o ack guardado, sem logar de novo (evitaria triplicar a
+    // linha do mesmo número a cada confirmação: enviado → entregue → lido).
+    if (p.type === 'ack_update') {
+      setCurrent(prev => {
+        if (!prev) return prev
+        const next = prev.results.map(r => r.number === p.number ? { ...r, ack: p.ack } : r)
+        return { ...prev, results: next }
+      })
+    }
     if (p.type === 'started') {
       addLog(`🔀 Chips em rotação: ${(p.chips as string[]).join(', ')} (${p.chips.length} chip${p.chips.length !== 1 ? 's' : ''})`)
     }
