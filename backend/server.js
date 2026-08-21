@@ -1318,12 +1318,7 @@ async function resolveChatId(client, to, timeoutMs = 10000) {
   }
   if (!vid && !lookupFailed) throw new Error('Esse número não tem WhatsApp (confirmado antes do envio).')
   const chatId = vid ? vid._serialized : formatted
-  try {
-    await withTimeout(client.interface.openChatWindow(chatId), timeoutMs, 'timeout openChatWindow')
-    console.log(`[resolveChatId] openChatWindow OK pra ${chatId}`)
-  } catch (e) {
-    console.log(`[resolveChatId] openChatWindow FALHOU pra ${chatId}: ${e.message}`)
-  }
+  try { await withTimeout(client.interface.openChatWindow(chatId), timeoutMs, 'timeout openChatWindow') } catch (e) { /* melhor esforço — segue pro envio mesmo assim */ }
   return chatId
 }
 
