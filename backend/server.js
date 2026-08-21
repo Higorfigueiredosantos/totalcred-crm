@@ -641,24 +641,18 @@ class TickMonitor {
 
 class AntiBanDelayCalculator {
   constructor() {
-    this.messagesSentInHour = 0
-    this.hourStart = Date.now()
     this.consecutiveFails = 0
   }
-  reset() {
-    if (Date.now() - this.hourStart > 3600000) { this.messagesSentInHour = 0; this.hourStart = Date.now() }
-  }
+  // O delay agora respeita exatamente o mínimo/máximo configurado pelo
+  // usuário — antes multiplicava por até 5x (risco crítico) e mais até 3x
+  // em cima disso (volume alto), então um "5-30s" configurado podia virar
+  // "75-450s" na prática sem nenhum aviso. Proteção contra risco alto
+  // continua existindo, só que de outros jeitos que não mentem sobre o
+  // tempo configurado: getCooldown() (abaixo) já pausa depois de falhas
+  // seguidas, e o circuit breaker (ver runChipCampaign) para a campanha de
+  // vez quando o risco fica crítico, em vez de só esticar o delay escondido.
   getDelay(riskLevel, baseMin = 3, baseMax = 8) {
-    this.reset()
-    this.messagesSentInHour++
-    let m = 1
-    if (riskLevel === 'CRITICO') m = 5
-    else if (riskLevel === 'ALTO') m = 3
-    else if (riskLevel === 'MEDIO') m = 1.8
-    if (this.messagesSentInHour > 80) m *= 3
-    else if (this.messagesSentInHour > 50) m *= 2
-    else if (this.messagesSentInHour > 30) m *= 1.5
-    const min = Math.round(baseMin * m), max = Math.round(baseMax * m)
+    const min = Math.min(baseMin, baseMax), max = Math.max(baseMin, baseMax)
     return Math.floor(Math.random() * (max - min + 1)) + min
   }
   recordFail() { this.consecutiveFails++ }
@@ -1236,8 +1230,23 @@ function extractMsgId(msg) {
 // idêntico, cada uma com tique de "enviado" próprio — 3 envios reais, não
 // só uma duplicata visual). Melhor deixar o erro aparecer e o usuário
 // decidir se reenvia manualmente.
-async function sendChipText(client, chatId, text) {
-  return await client.sendMessage(chatId, text)
+//
+// Timeout: sem isso, se a página/puppeteer travar bem no meio do envio
+// (sessão quebrada, frame morto), o await de sendMessage() nunca resolve
+// nem rejeita — a campanha inteira fica parada nesse contato pra sempre, e
+// o log mostra "Enviando..." indefinidamente sem nunca virar sucesso ou
+// falha. Com o timeout, esse contato conta como falha (entra no circuit
+// breaker normal de falhas seguidas) e a campanha segue pro próximo em vez
+// de travar escondida atrás de uma linha de log que nunca se resolve.
+function withTimeout(promise, ms, message) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms)),
+  ])
+}
+
+async function sendChipText(client, chatId, text, timeoutMs = 30000) {
+  return await withTimeout(client.sendMessage(chatId, text), timeoutMs, 'Tempo esgotado aguardando o envio (30s) — a sessão pode estar travada.')
 }
 
 // client.sendMessage() às vezes resolve sem devolver o objeto da mensagem
@@ -1414,10 +1423,12 @@ async function runChipCampaign(data) {
         ? await humanizeWithAI(messageTemplate, contact, settings.tone || 'amigavel', settings.greetings, settings.firstNameOnly)
         : humanizeBasic(messageTemplate, contact, settings.greetings, settings.firstNameOnly)
 
-      // Resolve Brazilian number format
+      // Resolve Brazilian number format — timeout aqui pelo mesmo motivo do
+      // envio (withTimeout acima): sem ele, uma chamada travada nessa etapa
+      // já prendia a campanha inteira antes mesmo de chegar no envio.
       let formatted = formatNumber(contact.number)
       try {
-        const vid = await activeChip.client.getNumberId(formatted)
+        const vid = await withTimeout(activeChip.client.getNumberId(formatted), 10000, 'timeout getNumberId')
         if (vid) formatted = vid._serialized
       } catch (e) {}
 
@@ -1428,7 +1439,7 @@ async function runChipCampaign(data) {
         if (MessageMedia) {
           const base64 = mediaData.base64.includes(',') ? mediaData.base64.split(',')[1] : mediaData.base64
           const media = new MessageMedia('image/jpeg', base64, 'imagem.jpg')
-          msg = await activeChip.client.sendMessage(formatted, media, { caption: text })
+          msg = await withTimeout(activeChip.client.sendMessage(formatted, media, { caption: text }), 30000, 'Tempo esgotado aguardando o envio da imagem (30s) — a sessão pode estar travada.')
         } else {
           msg = await sendChipText(activeChip.client, formatted, text)
         }
