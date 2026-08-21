@@ -1,35 +1,50 @@
+import { useEffect } from 'react'
 import {
   X, BarChart2, CheckCircle, XCircle, Clock,
-  Pause, Play, Square, Trash2, Download,
+  Pause, Play, Square, Trash2, Download, RefreshCw,
 } from 'lucide-react'
 import type { SmsCampaignItem } from './smsCampaign'
 
 interface Props {
   item: SmsCampaignItem
+  recalculating?: boolean
   onClose: () => void
+  onRecalc?: (item: SmsCampaignItem) => void
   onExportCSV: (item: SmsCampaignItem) => void
   onDeleteHistory?: (id: string) => void
   onTogglePause?: () => void
   onStop?: () => void
 }
 
-// Relatório da campanha via SMS (BETA) — sem taxa de interação (não há
-// leitura de mensagens recebidas nesta versão, diferente do Wuzapi/Chips).
+// Relatório da campanha via SMS (BETA). Taxa de interação usa a mesma
+// lógica visual do Wuzapi, mas a detecção em si (varrer a lista de
+// conversas em busca de resposta) é sob demanda — clique em "Atualizar
+// Métricas" — não em tempo real, já que o Google Messages Web não expõe
+// nenhum jeito de "escutar" mensagem recebida como o webhook do Wuzapi.
 export default function SmsCampaignReport({
-  item, onClose, onExportCSV, onDeleteHistory, onTogglePause, onStop,
+  item, recalculating, onClose, onRecalc, onExportCSV, onDeleteHistory, onTogglePause, onStop,
 }: Props) {
+  // Calcula a interação assim que o relatório abre, se ainda não tiver métricas
+  useEffect(() => {
+    if (!item.finalStats && item.results.length > 0 && onRecalc) onRecalc(item)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item.id])
+
   const total = item.stats.total || item.results.length || 1
   const success = item.results.filter(r => r.status === 'success').length
   const failed = item.results.filter(r => r.status === 'failed').length
+  const interacted = item.finalStats?.interacted ?? 0
 
   const funnel = [
     { label: 'Total',       value: total,                       pct: 100,                                                       color: 'bg-purple-500', icon: '👥' },
     { label: 'Processados', value: item.stats.current || total, pct: Math.round(((item.stats.current || total) / total) * 100), color: 'bg-purple-400', icon: '📤' },
     { label: 'Enviados',    value: success,                     pct: Math.round((success / total) * 100),                       color: 'bg-blue-500',   icon: '✈️' },
+    { label: 'Responderam', value: interacted,                  pct: Math.round((interacted / total) * 100),                    color: 'bg-orange-400', icon: '💬' },
     { label: 'Falhas',      value: failed,                      pct: Math.round((failed / total) * 100),                        color: 'bg-red-500',    icon: '❌' },
   ]
 
   const successRate = total > 1 ? Math.round((success / (item.stats.current || total)) * 100) : (success > 0 ? 100 : 0)
+  const interactionRatePct = item.finalStats ? parseFloat(item.finalStats.interactionRate) || 0 : 0
   const allSkipped = item.status === 'done' && item.results.length === 0 && item.stats.total > 0 && success === 0 && failed === 0
 
   return (
@@ -42,7 +57,7 @@ export default function SmsCampaignReport({
               <p className="font-semibold text-white">{item.name}</p>
               <span className="text-xs px-2 py-0.5 bg-blue-900/40 text-blue-300 rounded-full">Relatório · Via SMS (Beta)</span>
             </div>
-            <p className="text-xs text-gray-500 mt-0.5">Sem confirmação de entrega/leitura nesse teste — só envio</p>
+            <p className="text-xs text-gray-500 mt-0.5">Sem confirmação de entrega/leitura — resposta detectada por conversa não lida</p>
           </div>
           <div className="flex items-center gap-2">
             {item.status === 'running' && onTogglePause && (
@@ -54,6 +69,13 @@ export default function SmsCampaignReport({
             {item.status === 'running' && onStop && (
               <button onClick={onStop} className="flex items-center gap-1.5 px-3 py-1.5 bg-red-800 hover:bg-red-700 text-xs text-white rounded-lg">
                 <Square size={12} /> Parar
+              </button>
+            )}
+            {onRecalc && (
+              <button onClick={() => onRecalc(item)} disabled={recalculating}
+                className="flex items-center gap-2 px-3 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-xs text-white rounded-lg disabled:opacity-50">
+                <RefreshCw size={12} className={recalculating ? 'animate-spin' : ''} />
+                Atualizar Métricas
               </button>
             )}
             <button onClick={onClose} className="text-gray-400 hover:text-white p-1"><X size={18} /></button>
@@ -70,6 +92,12 @@ export default function SmsCampaignReport({
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-0">
             {/* Funnel */}
             <div className="lg:col-span-2 p-5 border-b lg:border-b-0 lg:border-r border-gray-800">
+              {item.text && (
+                <div className="flex items-start gap-2 bg-gray-800/60 border border-gray-700/60 rounded-lg p-2 mb-4">
+                  <p className="text-[11px] text-gray-300 line-clamp-3 whitespace-pre-wrap">{item.text}</p>
+                </div>
+              )}
+
               <div className="flex items-center gap-2 mb-4">
                 <BarChart2 size={14} className="text-indigo-400" />
                 <p className="text-sm font-medium text-white">Funil de envio</p>
@@ -140,6 +168,16 @@ export default function SmsCampaignReport({
 
             {/* Side stats */}
             <div className="p-5 space-y-5">
+              <div className="text-center">
+                <p className={`text-4xl font-bold ${interactionRatePct >= 10 ? 'text-green-400' : 'text-amber-400'}`}>
+                  {item.finalStats?.interactionRate ?? '—'}
+                </p>
+                <p className="text-sm text-gray-300 mt-1">Taxa de Interação</p>
+                <p className="text-xs text-gray-500">{interacted} de {success} responderam</p>
+              </div>
+
+              <div className="h-px bg-gray-800" />
+
               <div className="text-center">
                 <p className={`text-4xl font-bold ${successRate >= 80 ? 'text-green-400' : successRate >= 40 ? 'text-amber-400' : 'text-red-400'}`}>
                   {successRate}%

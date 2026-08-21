@@ -108,6 +108,7 @@ export interface ChipCampaignItem {
   waiting: number
   paused: boolean
   fromHistory: boolean
+  text?: string
 }
 
 const NAMES_KEY = 'chip_campaign_names'

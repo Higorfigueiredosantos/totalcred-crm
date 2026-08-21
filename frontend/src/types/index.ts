@@ -262,6 +262,7 @@ export interface CampaignHistoryRecord {
   failed: number
   skipped: number
   results: ChipCampaignResult[]
+  text?: string
 }
 
 export interface ChipCampaignSettings {
@@ -279,6 +280,7 @@ export interface ChipCampaignSettings {
     pauseMin: number
     pauseMax: number
   }
+  firstNameOnly?: boolean
 }
 
 export interface CsvContact {
@@ -372,4 +374,10 @@ export interface SmsCampaignHistoryRecord {
   failed: number
   skipped: number
   results: SmsCampaignResult[]
+}
+
+export interface SmsCampaignFinalStats {
+  interacted: number
+  interactionRate: string
+  notInteracted: number
 }

@@ -23,6 +23,7 @@ function historyToItem(rec: CampaignHistoryRecord): ChipCampaignItem {
     waiting: 0,
     paused: false,
     fromHistory: true,
+    text: rec.text,
   }
 }
 
@@ -68,6 +69,7 @@ export function useChipCampaigns() {
         waiting: 0,
         paused: !!snap.paused,
         fromHistory: false,
+        text: snap.text,
       })
     }).catch(() => {})
   }, [])
@@ -169,6 +171,7 @@ export function useChipCampaigns() {
       waiting: 0,
       paused: false,
       fromHistory: false,
+      text: config.message,
     })
     return { ok: true as const }
   }
@@ -180,6 +183,15 @@ export function useChipCampaigns() {
 
   async function stop() {
     await apiFetch('/api/chip-campaign/stop', { method: 'POST' })
+  }
+
+  // "Parar" normal espera o loop no backend notar a flag "stopped" — se a
+  // campanha travou de verdade (preso num await que nunca resolve), isso
+  // nunca acontece e "já em andamento" trava pra sempre, sem opção de
+  // excluir. Isso libera o estado direto, sem esperar o loop.
+  async function forceReset() {
+    await apiFetch('/api/chip-campaign/force-reset', { method: 'POST' })
+    setCurrent(prev => prev ? { ...prev, status: 'done', paused: false, endedAt: Date.now() } : prev)
   }
 
   async function resetSent() {
@@ -253,7 +265,7 @@ export function useChipCampaigns() {
 
   return {
     items,
-    startCampaign, togglePause, stop, resetSent,
+    startCampaign, togglePause, stop, forceReset, resetSent,
     deleteHistory, exportResultsCSV,
     recalcEngagement, computeFinalStats, recalculatingId,
   }

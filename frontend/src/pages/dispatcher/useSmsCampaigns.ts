@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { onWSMessage } from '../../api/websocket'
 import { apiFetch } from '../../hooks/useChips'
-import type { SmsCampaignHistoryRecord, SmsCampaignResult } from '../../types'
+import type { SmsCampaignFinalStats, SmsCampaignHistoryRecord, SmsCampaignResult } from '../../types'
 import {
   type SmsCampaignConfig, type SmsCampaignItem,
   saveCampaignName, lookupCampaignName,
@@ -18,6 +18,7 @@ function historyToItem(rec: SmsCampaignHistoryRecord): SmsCampaignItem {
     stats: { current: rec.total, total: rec.total, success: rec.success, failed: rec.failed },
     log: [],
     results: rec.results ?? [],
+    finalStats: null,
     waiting: 0,
     paused: false,
     fromHistory: true,
@@ -31,6 +32,8 @@ function historyToItem(rec: SmsCampaignHistoryRecord): SmsCampaignItem {
 export function useSmsCampaigns() {
   const [current, setCurrent] = useState<SmsCampaignItem | null>(null)
   const [history, setHistory] = useState<SmsCampaignHistoryRecord[]>([])
+  const [finalStatsCache, setFinalStatsCache] = useState<Record<string, SmsCampaignFinalStats>>({})
+  const [recalculatingId, setRecalculatingId] = useState<string | null>(null)
 
   const loadHistory = () =>
     fetch('/api/sms-campaign/history').then(r => r.json()).then(setHistory).catch(() => {})
@@ -58,6 +61,7 @@ export function useSmsCampaigns() {
         stats: { current: results.length, total: snap.total, success, failed },
         log: ['🔄 Campanha em andamento recuperada após recarregar a página.'],
         results,
+        finalStats: null,
         waiting: 0,
         paused: !!snap.paused,
         fromHistory: false,
@@ -150,6 +154,7 @@ export function useSmsCampaigns() {
       stats: { current: 0, total: d.count, success: 0, failed: 0 },
       log: [`🚀 Campanha iniciada — ${d.count} contatos`],
       results: [],
+      finalStats: null,
       waiting: 0,
       paused: false,
       fromHistory: false,
@@ -164,6 +169,16 @@ export function useSmsCampaigns() {
 
   async function stop() {
     await apiFetch('/api/sms-campaign/stop', { method: 'POST' })
+  }
+
+  // "Parar" normal espera o loop no backend notar a flag "stopped" — se a
+  // campanha travou de verdade (preso num await que nunca resolve, ex.:
+  // navegação do Puppeteer travada), isso nunca acontece e "já em
+  // andamento" trava pra sempre, sem opção de excluir. Isso libera o
+  // estado direto, sem esperar o loop.
+  async function forceReset() {
+    await apiFetch('/api/sms-campaign/force-reset', { method: 'POST' })
+    setCurrent(prev => prev ? { ...prev, status: 'done', paused: false, endedAt: Date.now() } : prev)
   }
 
   async function resetSent() {
@@ -185,16 +200,48 @@ export function useSmsCampaigns() {
     a.download = fileName; a.click()
   }
 
+  // Cruza quem recebeu a campanha com quem respondeu depois do envio —
+  // mesma lógica do Wuzapi, só que aqui a checagem em si (varrer a lista de
+  // conversas) acontece no backend sob demanda, não em tempo real (ver
+  // /api/sms-campaign/interaction-rate e refreshInbound em backend/sms.js).
+  async function computeFinalStats(item: SmsCampaignItem): Promise<SmsCampaignFinalStats> {
+    const sentContacts = item.results.filter(r => r.status === 'success').map(r => ({ number: r.number, sentAt: r.sentAt ?? item.createdAt }))
+    const ir = await fetch('/api/sms-campaign/interaction-rate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sentContacts, instanceIds: item.instanceIds }),
+    }).then(r => r.json()).catch(() => ({ interacted: 0, rate: '0%', notInteracted: 0 }))
+    return {
+      interacted: ir.interacted ?? 0,
+      interactionRate: ir.rate ?? '0%',
+      notInteracted: ir.notInteracted ?? 0,
+    }
+  }
+
+  async function recalcEngagement(item: SmsCampaignItem) {
+    setRecalculatingId(item.id)
+    try {
+      const stats = await computeFinalStats(item)
+      setFinalStatsCache(prev => ({ ...prev, [item.id]: stats }))
+      if (current?.id === item.id) setCurrent(prev => prev ? { ...prev, finalStats: stats } : prev)
+    } finally {
+      setRecalculatingId(null)
+    }
+  }
+
   const items: SmsCampaignItem[] = [
-    ...(current ? [current] : []),
+    ...(current ? [{ ...current, finalStats: finalStatsCache[current.id] ?? current.finalStats }] : []),
     ...history
       .filter(rec => !current || Math.abs(rec.startedAt - current.createdAt) > 5000)
-      .map(historyToItem),
+      .map(rec => {
+        const item = historyToItem(rec)
+        return { ...item, finalStats: finalStatsCache[item.id] ?? null }
+      }),
   ].sort((a, b) => b.createdAt - a.createdAt)
 
   return {
     items,
-    startCampaign, togglePause, stop, resetSent,
+    startCampaign, togglePause, stop, forceReset, resetSent,
     deleteHistory, exportResultsCSV,
+    recalcEngagement, computeFinalStats, recalculatingId,
   }
 }

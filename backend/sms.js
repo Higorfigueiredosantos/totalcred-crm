@@ -59,6 +59,11 @@ const SELECTORS = {
     '[data-e2e-send-text-button]',
     'button[aria-label*="Send" i]', 'button[aria-label*="Enviar" i]',
   ],
+  // Não confirmados contra a página real (não tenho como logar numa conta
+  // de verdade neste ambiente) — usados só pra detectar resposta de lead
+  // (ver refreshInbound). Best-effort, seguindo a mesma convenção de nomes
+  // "mws-*" já confirmada em conversationsList.
+  conversationListItem: ['mws-conversation-list-item', '[data-e2e-conversation]'],
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
@@ -500,6 +505,77 @@ async function sendSmsText(id, phoneDigits, text) {
   return { ok: true }
 }
 
+// ── Respostas recebidas (taxa de interação) ──────────────────────────────────
+//
+// Google Messages Web não tem webhook nem evento de "mensagem recebida" —
+// diferente do Wuzapi (webhook HTTP) e dos Chips (client.on('message', ...)
+// do whatsapp-web.js). Sem isso, o único jeito é olhar a própria lista de
+// conversas de tempos em tempos (só quando pedido, ver /interaction-rate em
+// server.js — não fica escaneando sozinho em loop, pra não competir com o
+// disparo pela mesma página/sessão).
+//
+// Heurística usada: uma conversa aparece marcada como "não lida" na lista
+// só quando chega mensagem nova e ninguém (nem essa automação, nem o
+// próprio usuário no celular) ainda abriu ela. Como a automação nunca abre
+// a conversa de um contato específico pra ler (só navega pra
+// NEW_CONVERSATION_URL pra enviar), qualquer "não lida" detectada é sinal
+// de resposta de verdade — não precisa de timestamp exato, que a lista não
+// expõe de forma confiável.
+//
+// AVISO: mesma ressalva do resto do módulo — os seletores de
+// conversationListItem não foram confirmados contra a página real (sem
+// telefone pareado pra testar). Se a taxa de interação nunca mudar mesmo
+// com respostas reais chegando, esse é o primeiro lugar pra ajustar.
+const responseStats = { responses: [] }
+
+async function scanConversationsForReplies(page) {
+  await page.goto('https://messages.google.com/web/conversations', { waitUntil: 'networkidle2', timeout: 20000 })
+  await waitForAny(page, SELECTORS.conversationsList, 10000)
+  return page.evaluate((itemSelectors) => {
+    let items = []
+    for (const sel of itemSelectors) {
+      items = Array.from(document.querySelectorAll(sel))
+      if (items.length) break
+    }
+    return items.map(el => ({
+      text: (el.innerText || '').slice(0, 300),
+      unread: el.className.includes('unread') || !!el.querySelector('[class*="unread" i]'),
+    }))
+  }, SELECTORS.conversationListItem)
+}
+
+// Varre as conversas das sessões indicadas em busca de respostas novas —
+// chamado sob demanda (botão "Atualizar Métricas" no relatório), não em
+// background. Atualiza responseStats.responses com o que achar. Pula
+// sessões ocupadas AGORA num disparo em andamento — essa varredura navega
+// a mesma página que o envio usa (ver sendSmsText), então rodar as duas
+// coisas ao mesmo tempo na mesma sessão arrisca atrapalhar um envio real
+// no meio do caminho.
+async function refreshInbound(ids) {
+  const busy = new Set(campaignState.running ? (campaignState.current?.instanceIds || []) : [])
+  for (const id of ids) {
+    if (busy.has(id)) continue
+    const session = smsSessions[id]
+    if (!session || session.status !== 'connected' || !session.page) continue
+    try {
+      const rows = await scanConversationsForReplies(session.page)
+      const now = Date.now()
+      for (const row of rows) {
+        if (!row.unread) continue
+        const m = row.text.match(/\+?\d[\d\s()-]{8,}\d/)
+        if (!m) continue
+        const phone = m[0].replace(/\D/g, '')
+        const existing = responseStats.responses.find(r => r.from === phone)
+        if (existing) existing.timestamp = now
+        else responseStats.responses.push({ from: phone, timestamp: now })
+      }
+    } catch (e) {
+      console.error(`[SMS ${id}] Falha ao verificar respostas:`, e.message)
+    }
+  }
+  if (responseStats.responses.length > 2000) responseStats.responses.splice(0, responseStats.responses.length - 2000)
+}
+
 // ── Campanha ──────────────────────────────────────────────────────────────────
 
 const CAMPAIGN_MAX_CONSECUTIVE_FAILURES = 3
@@ -687,4 +763,6 @@ module.exports = {
   campaignState,
   loadHistory,
   deleteHistoryRecord,
+  responseStats,
+  refreshInbound,
 }

@@ -688,6 +688,27 @@ const chipCampaignState = {
 
 const maturadorState = { running: false, timer: null, chipIds: [], minDelay: 60, maxDelay: 300, mediaEnabled: true, msgCount: 0 }
 
+// Chips ocupados agora por outro processo (maturador OU campanha) — usado
+// pra impedir que os dois disputem a mesma sessão do whatsapp-web.js ao
+// mesmo tempo. Sem essa checagem, um chip que já estava aquecendo no
+// maturador (ou já estava numa campanha) podia ser escalado de novo pro
+// outro processo: dobra a carga no mesmo Chrome/Puppeteer por trás dele,
+// e é um gatilho bem plausível pra queda no meio de um disparo — o mesmo
+// tipo de bug já corrigido pro Wuzapi (ver getBusyInstanceNames em
+// backend/wuzapi.js), que usa a mesma proteção nos dois sentidos.
+function getBusyChipIds() {
+  const busy = new Set()
+  const allIds = Object.keys(chipSessions)
+  if (maturadorState.running) {
+    (maturadorState.chipIds.length ? maturadorState.chipIds : allIds).forEach(id => busy.add(id))
+  }
+  if (chipCampaignState.currentCampaign) {
+    const selected = chipCampaignState.currentCampaign.settings?.selectedChipIds
+    ;(Array.isArray(selected) && selected.length ? selected : allIds).forEach(id => busy.add(id))
+  }
+  return busy
+}
+
 // ── Chip registry (persist chip IDs across restarts) ──────────────────────────
 
 const REGISTRY_FILE = path.join(__dirname, 'chips_registry.json')
@@ -1261,9 +1282,15 @@ const openingPhrases = [
   'Bom dia! 😊', 'Boa tarde!', 'Boa noite!', 'Oi! 👋', 'Olá! 😊', 'E aí! Tudo na paz?'
 ]
 
+function firstNameOf(name) {
+  const trimmed = String(name || '').trim()
+  return trimmed ? trimmed.split(/\s+/)[0] : ''
+}
+
 // Substitui {{name}}, {{1}}, {{cidade}}, etc. no template
-function applyVars(text, contact) {
-  const name = typeof contact === 'string' ? contact : (contact?.name || '')
+function applyVars(text, contact, firstNameOnly) {
+  const rawName = typeof contact === 'string' ? contact : (contact?.name || '')
+  const name = firstNameOnly ? firstNameOf(rawName) : rawName
   const vars = (typeof contact === 'object' && contact?.vars) ? contact.vars : {}
   let msg = text
   if (name) msg = msg.replace(/\{\{name\}\}/gi, name).replace(/\{name\}/gi, name)
@@ -1274,15 +1301,15 @@ function applyVars(text, contact) {
   return msg
 }
 
-function humanizeBasic(text, contact, greetingPool) {
+function humanizeBasic(text, contact, greetingPool, firstNameOnly) {
   if (!text) return 'Olá!'
   const pool = (Array.isArray(greetingPool) && greetingPool.length > 0) ? greetingPool : openingPhrases
-  const msg = applyVars(text, contact)
+  const msg = applyVars(text, contact, firstNameOnly)
   return `${pool[Math.floor(Math.random() * pool.length)]}\n\n${msg}`
 }
 
-async function humanizeWithAI(text, contact, tone = 'amigavel', greetingPool) {
-  const resolved = applyVars(text, contact)
+async function humanizeWithAI(text, contact, tone = 'amigavel', greetingPool, firstNameOnly) {
+  const resolved = applyVars(text, contact, firstNameOnly)
   const name = typeof contact === 'string' ? contact : (contact?.name || '')
   const apiKey = process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY
   if (!apiKey) return humanizeBasic(resolved, '', greetingPool)
@@ -1337,6 +1364,17 @@ async function runChipCampaign(data) {
     total: contacts.length,
   })
 
+  // Aquecimento: a primeira mensagem também espera um delay antes de sair,
+  // em vez de disparar instantaneamente assim que a campanha inicia (mesmo
+  // ajuste já aplicado no Wuzapi/SMS depois de descobrir que abrir com um
+  // envio instantâneo é o padrão mais fácil de ser flagrado como automação
+  // e derrubar a sessão no meio do disparo).
+  const warmupMin = settings.delayMin || 3
+  const warmupMax = settings.delayMax || 8
+  const warmupDelay = Math.floor(Math.random() * (Math.max(warmupMax, warmupMin) - warmupMin + 1)) + warmupMin
+  broadcast('chip_campaign', { type: 'waiting', delay: warmupDelay, risk: 'BAIXO', next: 1, nextChip: readySelected[0] || null })
+  await sleep(warmupDelay * 1000)
+
   for (let i = 0; i < contacts.length; i++) {
     if (chipCampaignState.stopped) break
     while (chipCampaignState.paused) await sleep(500)
@@ -1373,8 +1411,8 @@ async function runChipCampaign(data) {
       result.via = activeChip.id
 
       let text = settings.useAIHumanize
-        ? await humanizeWithAI(messageTemplate, contact, settings.tone || 'amigavel', settings.greetings)
-        : humanizeBasic(messageTemplate, contact, settings.greetings)
+        ? await humanizeWithAI(messageTemplate, contact, settings.tone || 'amigavel', settings.greetings, settings.firstNameOnly)
+        : humanizeBasic(messageTemplate, contact, settings.greetings, settings.firstNameOnly)
 
       // Resolve Brazilian number format
       let formatted = formatNumber(contact.number)
@@ -1449,6 +1487,7 @@ async function runChipCampaign(data) {
     failed,
     skipped: contacts.length - success - failed,
     results: chipCampaignState.results.map(r => ({ ...r })),
+    text: messageTemplate,
   })
 
   chipCampaignState.currentCampaign = null
@@ -1852,8 +1891,14 @@ app.post('/api/proxies', (req, res) => {
   if (list.includes(entry)) return res.status(400).json({ error: 'Proxy já existe' })
   list.push(entry)
   saveProxies(list)
-  // Reinicia chips sem proxy para que peguem o rotador
+  // Reinicia chips sem proxy para que peguem o rotador — pula chips ocupados
+  // agora num disparo/maturador (ver getBusyChipIds): forçar reconexão no
+  // meio de uma campanha é exatamente o tipo de coisa que faz o chip "cair
+  // do nada" durante o envio. O proxy dele fica pra ser aplicado só depois,
+  // na próxima vez que reconectar.
+  const busyForProxyAdd = getBusyChipIds()
   Object.entries(chipSessions).forEach(([id, s]) => {
+    if (busyForProxyAdd.has(id)) return
     if (!s.proxy || s.proxy === null) {
       console.log(`[Rotator] Proxy adicionado — reconectando chip ${id} com rotador`)
       if (s.client) try { s.client.destroy() } catch (_) {}
@@ -1872,8 +1917,12 @@ app.delete('/api/proxies/:index', (req, res) => {
   // Limpa histórico do rotador para recalibrar
   rotatorState.history = []
   if (list.length === 0) {
-    // Sem proxies: reconecta chips diretamente
+    // Sem proxies: reconecta chips diretamente — mesma proteção de pular
+    // chips ocupados num disparo/maturador ativo (ver comentário acima em
+    // POST /api/proxies).
+    const busyForProxyDel = getBusyChipIds()
     Object.entries(chipSessions).forEach(([id, s]) => {
+      if (busyForProxyDel.has(id)) return
       if (s.proxy?.startsWith('rotador:')) {
         s.proxy = null
         if (s.client) try { s.client.destroy() } catch (_) {}
@@ -1920,6 +1969,13 @@ app.post('/api/chip-campaign/start', (req, res) => {
   if (readyIds.length === 0) return res.status(400).json({ error: 'Nenhum chip conectado' })
   if (chipCampaignState.currentCampaign) return res.status(400).json({ error: 'Campanha já em andamento' })
   const data = req.body
+  const selectedChipIds = Array.isArray(data.settings?.selectedChipIds) && data.settings.selectedChipIds.length > 0
+    ? data.settings.selectedChipIds : readyIds
+  const busy = getBusyChipIds()
+  const conflicting = selectedChipIds.filter(id => busy.has(id))
+  if (conflicting.length) {
+    return res.status(400).json({ error: `Esses chips já estão em uso pelo maturador: ${conflicting.join(', ')}. Pare o maturador neles antes de disparar a campanha.` })
+  }
   if (!data.force) {
     const h = new Date().getHours()
     if (h >= 20 || h < 8) return res.status(400).json({
@@ -1950,6 +2006,23 @@ app.post('/api/chip-campaign/pause', (_req, res) => {
 app.post('/api/chip-campaign/stop', (_req, res) => {
   chipCampaignState.stopped = true
   broadcast('chip_campaign', { type: 'stopped' })
+  res.json({ ok: true })
+})
+
+// "Parar" normal só marca a flag "stopped" e espera o loop da campanha
+// notar isso na próxima iteração — se o loop travou de verdade (preso num
+// await que nunca resolve, ex.: puppeteer/página quebrada no meio do
+// envio), essa flag nunca chega a ser lida e currentCampaign fica preso
+// pra sempre, bloqueando qualquer campanha nova com "já em andamento" sem
+// nenhum jeito de limpar pela tela. Esse endpoint libera o estado na
+// marra, direto — o loop antigo (se algum dia voltar a rodar) só vai achar
+// currentCampaign nulo e não vai mais escrever em cima de uma campanha
+// nova que tenha começado nesse meio tempo.
+app.post('/api/chip-campaign/force-reset', (_req, res) => {
+  chipCampaignState.currentCampaign = null
+  chipCampaignState.startedAt = null
+  chipCampaignState.stopped = true
+  broadcast('chip_campaign', { type: 'stopped', reason: '⚠️ Campanha encerrada manualmente (estava travada).' })
   res.json({ ok: true })
 })
 
@@ -1984,6 +2057,7 @@ app.get('/api/chip-campaign/current', (_req, res) => {
     paused: cs.paused,
     chipIds: cs.currentCampaign.settings?.selectedChipIds || [],
     riskLevel: cs.tickMonitor.getBanRiskLevel(),
+    text: cs.currentCampaign.messageTemplate,
   })
 })
 
@@ -2123,6 +2197,18 @@ app.post('/api/wuzapi-campaign/pause', (_req, res) => {
 app.post('/api/wuzapi-campaign/stop', (_req, res) => {
   wuzapi.campaignState.stopped = true
   broadcast('wuzapi_campaign', { type: 'stopped' })
+  res.json({ ok: true })
+})
+
+// Libera o estado na marra quando "Parar" normal não resolve (loop preso
+// num await que nunca retorna) — mesma lógica de
+// /api/chip-campaign/force-reset, ver comentário lá.
+app.post('/api/wuzapi-campaign/force-reset', (_req, res) => {
+  wuzapi.campaignState.current = null
+  wuzapi.campaignState.startedAt = null
+  wuzapi.campaignState.running = false
+  wuzapi.campaignState.stopped = true
+  broadcast('wuzapi_campaign', { type: 'circuit_break', reason: '⚠️ Campanha encerrada manualmente (estava travada).' })
   res.json({ ok: true })
 })
 
@@ -2278,6 +2364,18 @@ app.post('/api/sms-campaign/stop', (_req, res) => {
   res.json({ ok: true })
 })
 
+// Libera o estado na marra quando "Parar" normal não resolve (loop preso
+// num await que nunca retorna, ex.: navegação do Puppeteer travada) — mesma
+// lógica de /api/chip-campaign/force-reset, ver comentário lá.
+app.post('/api/sms-campaign/force-reset', (_req, res) => {
+  sms.campaignState.current = null
+  sms.campaignState.startedAt = null
+  sms.campaignState.running = false
+  sms.campaignState.stopped = true
+  broadcast('sms_campaign', { type: 'circuit_break', reason: '⚠️ Campanha encerrada manualmente (estava travada).' })
+  res.json({ ok: true })
+})
+
 app.post('/api/sms-campaign/reset-sent', (_req, res) => {
   const count = sms.campaignState.sentNumbers.size
   sms.campaignState.sentNumbers.clear()
@@ -2308,6 +2406,48 @@ app.get('/api/sms-campaign/current', (_req, res) => {
     total: cs.current.contacts?.length || 0,
     results: cs.results,
     paused: cs.paused,
+  })
+})
+
+// Cruza números que a campanha enviou com quem respondeu — mesma ideia de
+// /api/wuzapi-campaign/interaction-rate, mas aqui precisa varrer a lista de
+// conversas primeiro (Google Messages Web não tem webhook de mensagem
+// recebida, ver refreshInbound em sms.js). Só escaneia as sessões
+// realmente usadas na campanha (`instanceIds`); se não vier nenhuma (ex.:
+// campanha antiga carregada do histórico, que não guarda essa informação),
+// cai pra todas as sessões conectadas no momento.
+app.post('/api/sms-campaign/interaction-rate', async (req, res) => {
+  const { sentContacts, instanceIds } = req.body || {}
+  const contacts = Array.isArray(sentContacts) ? sentContacts : []
+  if (contacts.length === 0) return res.json({ sent: 0, interacted: 0, rate: '0%', interactedNumbers: [] })
+
+  const ids = Array.isArray(instanceIds) && instanceIds.length
+    ? instanceIds
+    : sms.listInstances().filter(i => i.status === 'connected').map(i => i.id)
+  await sms.refreshInbound(ids)
+
+  const interactedNumbers = []
+  for (const { number, sentAt } of contacts) {
+    const clean = String(number).replace(/\D/g, '')
+    const short = clean.startsWith('55') ? clean.slice(2) : clean
+
+    const responded = sms.responseStats.responses.some(r => {
+      if (sentAt && r.timestamp && r.timestamp < sentAt) return false
+      const rClean = String(r.from || '').replace(/\D/g, '').replace(/^55/, '')
+      return rClean === clean || rClean === short || rClean.endsWith(short) || short.endsWith(rClean)
+    })
+
+    if (responded) interactedNumbers.push(number)
+  }
+
+  const sent = contacts.length
+  const interacted = interactedNumbers.length
+  res.json({
+    sent,
+    interacted,
+    notInteracted: sent - interacted,
+    rate: sent > 0 ? ((interacted / sent) * 100).toFixed(1) + '%' : '0%',
+    interactedNumbers,
   })
 })
 
@@ -2374,10 +2514,16 @@ app.get('/api/maturador/status', (_req, res) => {
 app.post('/api/maturador/start', (req, res) => {
   const readyIds = Object.keys(chipSessions).filter(id => chipSessions[id].isReady)
   if (readyIds.length < 2) return res.status(400).json({ error: 'Você precisa de pelo menos 2 chips conectados para o maturador.' })
+  const chipIds = req.body.chipIds || readyIds
+  const busy = getBusyChipIds()
+  const conflicting = chipIds.filter(id => busy.has(id))
+  if (conflicting.length) {
+    return res.status(400).json({ error: `Esses chips já estão em uso por um disparo de campanha em andamento: ${conflicting.join(', ')}.` })
+  }
   const min = Number(req.body.minDelay) || 60
   const max = Number(req.body.maxDelay) || 300
   maturadorState.running = true
-  maturadorState.chipIds = req.body.chipIds || readyIds
+  maturadorState.chipIds = chipIds
   maturadorState.minDelay = min
   maturadorState.maxDelay = max
   maturadorState.mediaEnabled = req.body.mediaEnabled !== false

@@ -1,5 +1,5 @@
-import type { CsvContact, SmsCampaignResult } from '../../types'
-export type { CsvContact }
+import type { CsvContact, SmsCampaignFinalStats, SmsCampaignResult } from '../../types'
+export type { CsvContact, SmsCampaignFinalStats }
 
 export interface SmsBatchDelay {
   enabled: boolean
@@ -31,6 +31,7 @@ export interface SmsCampaignItem {
   stats: { current: number; total: number; success: number; failed: number }
   log: string[]
   results: SmsCampaignResult[]
+  finalStats: SmsCampaignFinalStats | null
   waiting: number
   paused: boolean
   fromHistory: boolean

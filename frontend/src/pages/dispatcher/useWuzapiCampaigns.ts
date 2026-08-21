@@ -171,6 +171,15 @@ export function useWuzapiCampaigns() {
     await apiFetch('/api/wuzapi-campaign/stop', { method: 'POST' })
   }
 
+  // "Parar" normal espera o loop no backend notar a flag "stopped" — se a
+  // campanha travou de verdade (preso num await que nunca resolve), isso
+  // nunca acontece e "já em andamento" trava pra sempre, sem opção de
+  // excluir. Isso libera o estado direto, sem esperar o loop.
+  async function forceReset() {
+    await apiFetch('/api/wuzapi-campaign/force-reset', { method: 'POST' })
+    setCurrent(prev => prev ? { ...prev, status: 'done', paused: false, endedAt: Date.now() } : prev)
+  }
+
   async function resetSent() {
     return apiFetch('/api/wuzapi-campaign/reset-sent', { method: 'POST' }) as Promise<{ ok: boolean; cleared: number }>
   }
@@ -228,7 +237,7 @@ export function useWuzapiCampaigns() {
 
   return {
     items,
-    startCampaign, togglePause, stop, resetSent,
+    startCampaign, togglePause, stop, forceReset, resetSent,
     deleteHistory, exportResultsCSV,
     recalcEngagement, computeFinalStats, recalculatingId,
   }
