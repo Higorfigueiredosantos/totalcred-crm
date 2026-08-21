@@ -1219,6 +1219,44 @@ async function sendChipText(client, chatId, text) {
   return await client.sendMessage(chatId, text)
 }
 
+// Timeout: sem isso, se a página/puppeteer travar bem no meio da checagem do
+// número ou da abertura do chat, o await nunca resolve nem rejeita — a
+// campanha inteira fica parada nesse contato pra sempre.
+function withTimeout(promise, ms, message) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms)),
+  ])
+}
+
+// Resolve o número pro JID de verdade que o WhatsApp usa pra esse contato E
+// garante que a conversa foi iniciada de verdade ANTES de enviar.
+// client.sendMessage() sozinho NÃO garante isso pra um contato sem
+// histórico (bug/limitação documentada da biblioteca, confirmada no
+// código-fonte: sendMessage chama WWebJS.getChat, que cria o chat
+// internamente, mas isso nem sempre é suficiente pra estabelecer a sessão de
+// verdade com um contato novo — visto na prática: funciona pra quem já tem
+// conversa ativa, falha silenciosamente pra número novo).
+// client.interface.openChatWindow() dispara o MESMO comando interno que o
+// WhatsApp Web usa quando você clica num contato novo e abre a conversa
+// manualmente (WAWebCmd.Cmd.openChatBottom) — roda isso antes de enviar pra
+// replicar o fluxo manual que funciona.
+async function resolveChatId(client, to, timeoutMs = 10000) {
+  if (to.includes('@')) return to
+  const formatted = formatNumber(to)
+  let lookupFailed = false
+  let vid = null
+  try {
+    vid = await withTimeout(client.getNumberId(formatted), timeoutMs, 'timeout getNumberId')
+  } catch (e) {
+    lookupFailed = true
+  }
+  if (!vid && !lookupFailed) throw new Error('Esse número não tem WhatsApp (confirmado antes do envio).')
+  const chatId = vid ? vid._serialized : formatted
+  try { await withTimeout(client.interface.openChatWindow(chatId), timeoutMs, 'timeout openChatWindow') } catch (e) { /* melhor esforço — segue pro envio mesmo assim */ }
+  return chatId
+}
+
 // client.sendMessage() às vezes resolve sem devolver o objeto da mensagem
 // (observado em sessões com LID), sem lançar erro — a mensagem é enviada de
 // verdade, só não temos o id na hora. Como fallback, esperamos pelo próprio
@@ -1376,12 +1414,9 @@ async function runChipCampaign(data) {
         ? await humanizeWithAI(messageTemplate, contact, settings.tone || 'amigavel', settings.greetings)
         : humanizeBasic(messageTemplate, contact, settings.greetings)
 
-      // Resolve Brazilian number format
-      let formatted = formatNumber(contact.number)
-      try {
-        const vid = await activeChip.client.getNumberId(formatted)
-        if (vid) formatted = vid._serialized
-      } catch (e) {}
+      // Resolve o JID de verdade (LID quando aplicável) E garante que a
+      // conversa foi iniciada de verdade antes de enviar — ver resolveChatId.
+      const formatted = await resolveChatId(activeChip.client, contact.number)
 
       let msg
       if (mediaData?.type === 'image') {
@@ -2931,7 +2966,7 @@ app.post('/api/send-message', async (req, res) => {
   const session = chipSessions[id]
   if (session?.isReady && session.client) {
     try {
-      let chatId = to.includes('@') ? to : formatNumber(to)
+      const chatId = await resolveChatId(session.client, to)
       const convId = conversationId || getConvId(id, chatId)
       const pendingAck = registerPendingAck(id, chatId)
       const msg = await sendChipText(session.client, chatId, message)
@@ -2978,9 +3013,7 @@ app.post('/api/chips/send', async (req, res) => {
   const session = chipSessions[chipId]
   if (!session?.isReady || !session.client) return res.status(400).json({ error: `Chip "${chipId}" não está conectado` })
   try {
-    // If 'to' already contains '@' (e.g. '5511@c.us' or '123@lid'), use it directly.
-    // Only reformat if it's a plain phone number without domain.
-    let chatId = to.includes('@') ? to : formatNumber(to)
+    const chatId = await resolveChatId(session.client, to)
     const convId = getConvId(chipId, chatId)
     const pendingAck = registerPendingAck(chipId, chatId)
     console.log(`[Send ${reqId}] chamando client.sendMessage...`)
@@ -3007,7 +3040,7 @@ app.post('/api/chips/send-media', upload.single('file'), async (req, res) => {
   const session = chipSessions[chipId]
   if (!session?.isReady || !session.client) return res.status(400).json({ error: `Chip "${chipId}" não está conectado` })
   try {
-    let chatId = to.includes('@') ? to : formatNumber(to)
+    const chatId = await resolveChatId(session.client, to)
     const { MessageMedia } = require('whatsapp-web.js')
     const base64  = req.file.buffer.toString('base64')
     const isAudio = req.file.mimetype.startsWith('audio/')
