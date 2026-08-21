@@ -42,6 +42,33 @@ export function useChipCampaigns() {
 
   useEffect(() => { loadHistory() }, [])
 
+  // Recupera uma campanha em andamento após um F5 na página — sem isso, o
+  // "current" local fica null pra sempre (só existe na memória do React),
+  // mesmo com a campanha continuando de verdade nos bastidores.
+  useEffect(() => {
+    fetch('/api/chip-campaign/current').then(r => r.json()).then(snap => {
+      if (!snap) return
+      const results: ChipCampaignResult[] = snap.results || []
+      const success = results.filter(r => r.status === 'success').length
+      const failed = results.filter(r => r.status === 'failed').length
+      setCurrent({
+        id: `live-${snap.startedAt}`,
+        name: 'Campanha via Chips',
+        status: 'running',
+        chipIds: snap.chipIds || [],
+        createdAt: snap.startedAt,
+        stats: { current: results.length, total: snap.total, success, failed },
+        log: ['🔄 Campanha em andamento recuperada após recarregar a página.'],
+        results,
+        finalStats: null,
+        riskLevel: snap.riskLevel || '—',
+        waiting: 0,
+        paused: !!snap.paused,
+        fromHistory: false,
+      })
+    }).catch(() => {})
+  }, [])
+
   useEffect(() => {
     const offs = [
       onWSMessage('chip_campaign', (p: any) => handleCampaignEvent(p)),

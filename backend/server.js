@@ -679,6 +679,7 @@ const chipCampaignState = {
   paused: false,
   stopped: false,
   currentCampaign: null,
+  startedAt: null,
   sentNumbers: new Set(),
   tickMonitor: new TickMonitor(),
   delayCalc: new AntiBanDelayCalculator(),
@@ -1311,6 +1312,7 @@ async function runChipCampaign(data) {
   chipCampaignState.currentCampaign = data
   let success = 0, failed = 0
   const campaignStartedAt = Date.now()
+  chipCampaignState.startedAt = campaignStartedAt
 
   // Chips selecionados para esta campanha (fallback: todos os chips)
   const allChipIds = Object.keys(chipSessions)
@@ -1450,6 +1452,7 @@ async function runChipCampaign(data) {
   })
 
   chipCampaignState.currentCampaign = null
+  chipCampaignState.startedAt = null
 }
 
 // ── Maturador ─────────────────────────────────────────────────────────────────
@@ -1954,6 +1957,24 @@ app.get('/api/chip-campaign/stats', (_req, res) => res.json({
   tickStats: chipCampaignState.tickMonitor.getSummary(),
   riskLevel: chipCampaignState.tickMonitor.getBanRiskLevel(),
 }))
+
+// Snapshot da campanha em andamento (ou null) — sem isso, dar um F5 na tela
+// do Disparador com uma campanha de chips rodando faz o front "esquecer"
+// dela (o estado "current" só existe na memória do React), mesmo com a
+// campanha continuando de verdade nos bastidores. Isso reidrata o front com
+// o que já está rolando.
+app.get('/api/chip-campaign/current', (_req, res) => {
+  const cs = chipCampaignState
+  if (!cs.currentCampaign) return res.json(null)
+  res.json({
+    startedAt: cs.startedAt,
+    total: cs.currentCampaign.contacts?.length || 0,
+    results: cs.results,
+    paused: cs.paused,
+    chipIds: cs.currentCampaign.settings?.selectedChipIds || [],
+    riskLevel: cs.tickMonitor.getBanRiskLevel(),
+  })
+})
 
 
 // ── Wuzapi Routes (BETA — teste de entrega de botões via whatsmeow) ───────────
