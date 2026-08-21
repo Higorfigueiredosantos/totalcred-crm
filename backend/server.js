@@ -1295,6 +1295,17 @@ async function sendChipText(client, chatId, text, timeoutMs = 30000) {
 // JID pronto (ex.: respondendo uma conversa existente, cujo contato já foi
 // confirmado por uma mensagem recebida de verdade), usa direto, sem gastar
 // uma chamada a mais.
+//
+// client.sendMessage() sozinho NÃO garante que a conversa foi iniciada de
+// verdade com um contato novo (bug/limitação documentada da biblioteca,
+// confirmada olhando o código-fonte: sendMessage chama WWebJS.getChat, que
+// cria o chat internamente, mas isso nem sempre é suficiente pra
+// estabelecer a sessão de verdade com um contato sem histórico — visto na
+// prática: funciona pra quem já tem conversa ativa, falha silenciosamente
+// pra número novo, exatamente como reportado). client.interface.openChatWindow()
+// dispara o MESMO comando interno que o WhatsApp Web usa quando você clica
+// num contato novo e abre a conversa manualmente (WAWebCmd.Cmd.openChatBottom) —
+// roda isso antes de enviar pra replicar o fluxo manual que funciona.
 async function resolveChatId(client, to, timeoutMs = 10000) {
   if (to.includes('@')) return to
   const formatted = formatNumber(to)
@@ -1305,9 +1316,10 @@ async function resolveChatId(client, to, timeoutMs = 10000) {
   } catch (e) {
     lookupFailed = true
   }
-  if (vid) return vid._serialized
-  if (!lookupFailed) throw new Error('Esse número não tem WhatsApp (confirmado antes do envio).')
-  return formatted
+  if (!vid && !lookupFailed) throw new Error('Esse número não tem WhatsApp (confirmado antes do envio).')
+  const chatId = vid ? vid._serialized : formatted
+  try { await withTimeout(client.interface.openChatWindow(chatId), timeoutMs, 'timeout openChatWindow') } catch (e) { /* melhor esforço — segue pro envio mesmo assim */ }
+  return chatId
 }
 
 // client.sendMessage() às vezes resolve sem devolver o objeto da mensagem
@@ -1484,30 +1496,13 @@ async function runChipCampaign(data) {
         ? await humanizeWithAI(messageTemplate, contact, settings.tone || 'amigavel', settings.greetings, settings.firstNameOnly)
         : humanizeBasic(messageTemplate, contact, settings.greetings, settings.firstNameOnly)
 
-      // Resolve Brazilian number format — timeout aqui pelo mesmo motivo do
-      // envio (withTimeout acima): sem ele, uma chamada travada nessa etapa
-      // já prendia a campanha inteira antes mesmo de chegar no envio.
-      //
-      // getNumberId() resolvendo com null (sem lançar erro) significa que o
-      // WhatsApp confirmou que esse número NÃO tem conta — antes isso era
-      // ignorado silenciosamente e o código mandava o sendMessage mesmo
-      // assim pro JID cru "adivinhado" (formatNumber + @c.us), que o
-      // whatsapp-web.js às vezes resolve sem erro mesmo sem entregar nada
-      // de verdade (visto na prática: campanha marcava sucesso, mensagem
-      // nunca chegou). Se a checagem em si falhar por timeout/rede (não
-      // confirma nem nega), segue como antes com o número cru — só quando
-      // o WhatsApp confirma "não existe" é que a gente já marca falha aqui,
-      // sem gastar um envio de verdade num número que não vai receber nada.
-      let formatted = formatNumber(contact.number)
-      let numberLookupFailed = false
-      let vid = null
-      try {
-        vid = await withTimeout(activeChip.client.getNumberId(formatted), 10000, 'timeout getNumberId')
-      } catch (e) {
-        numberLookupFailed = true
-      }
-      if (vid) formatted = vid._serialized
-      else if (!numberLookupFailed) throw new Error('Esse número não tem WhatsApp (confirmado antes do envio).')
+      // Resolve o JID de verdade (LID quando aplicável) E garante que a
+      // conversa foi iniciada de verdade antes de enviar — mesma função
+      // usada pelos endpoints de envio manual agora, ver resolveChatId
+      // acima pro motivo completo (resolve o "número não existe" que ficava
+      // silencioso, e o "conversa nova não inicia" que só client.sendMessage
+      // sozinho não resolve).
+      const formatted = await resolveChatId(activeChip.client, contact.number)
 
       let msg
       if (mediaData?.type === 'image') {
