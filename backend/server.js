@@ -1119,11 +1119,30 @@ async function initChip(chipId) {
       // congelado no valor capturado na hora do envio (quase sempre 0/
       // pendente, ver comentário acima em runChipCampaign) e nunca refletia
       // a confirmação real de entrega/leitura que chega minutos depois.
+      //
+      // ack === -1 é um caso especial: o WhatsApp está dizendo que o envio
+      // FALHOU DE VERDADE (visto na prática: client.sendMessage() resolve
+      // sem erro, mas segundos depois chega esse -1 — a mensagem nunca saiu
+      // de fato, mesmo o código tendo marcado "sucesso" na hora). Como -1 é
+      // menor que qualquer valor de progresso normal (0,1,2,3), a checagem
+      // "só atualiza se for maior" abaixo descartava esse aviso de falha
+      // sem querer — por isso esse caso vem antes e sempre corrige, virando
+      // o resultado de "sucesso" pra "falha" de verdade (recalculando os
+      // contadores do funil a partir dos resultados, não só o ack).
       if (msgId) {
         const campaignResult = chipCampaignState.results.find(r => r.messageId === msgId)
-        if (campaignResult && ack > campaignResult.ack) {
-          campaignResult.ack = ack
-          broadcast('chip_campaign', { type: 'ack_update', number: campaignResult.number, ack })
+        if (campaignResult) {
+          if (ack === -1 && campaignResult.status !== 'failed') {
+            campaignResult.ack = -1
+            campaignResult.status = 'failed'
+            campaignResult.error = 'WhatsApp reportou falha no envio (mensagem não entregue, apesar do envio ter parecido bem-sucedido no momento).'
+            const success = chipCampaignState.results.filter(r => r.status === 'success').length
+            const failedCount = chipCampaignState.results.filter(r => r.status === 'failed').length
+            broadcast('chip_campaign', { type: 'result', contact: campaignResult, success, failed: failedCount })
+          } else if (ack > campaignResult.ack) {
+            campaignResult.ack = ack
+            broadcast('chip_campaign', { type: 'ack_update', number: campaignResult.number, ack })
+          }
         }
       }
     })
@@ -1260,6 +1279,35 @@ function withTimeout(promise, ms, message) {
 
 async function sendChipText(client, chatId, text, timeoutMs = 30000) {
   return await withTimeout(client.sendMessage(chatId, text), timeoutMs, 'Tempo esgotado aguardando o envio (30s) — a sessão pode estar travada.')
+}
+
+// Resolve o número pro JID de verdade que o WhatsApp usa pra esse contato
+// ANTES de enviar — sem isso, mandar direto pro JID "adivinhado" (@c.us)
+// falha silenciosamente (ack=-1, sem erro nenhum na hora do envio) pra
+// contatos que o WhatsApp já migrou pro endereçamento por LID (visto em
+// teste real, ver client.getNumberId abaixo). Reaproveita a mesma lógica
+// já usada em runChipCampaign — antes só a campanha tinha essa checagem;
+// os endpoints de envio manual (/api/chips/send, /api/send-message, usado
+// pela tela de Mensagens) mandavam pro JID cru sem nunca confirmar com o
+// WhatsApp primeiro.
+//
+// Só roda a checagem quando `to` é um número cru (sem "@") — se já vier um
+// JID pronto (ex.: respondendo uma conversa existente, cujo contato já foi
+// confirmado por uma mensagem recebida de verdade), usa direto, sem gastar
+// uma chamada a mais.
+async function resolveChatId(client, to, timeoutMs = 10000) {
+  if (to.includes('@')) return to
+  const formatted = formatNumber(to)
+  let lookupFailed = false
+  let vid = null
+  try {
+    vid = await withTimeout(client.getNumberId(formatted), timeoutMs, 'timeout getNumberId')
+  } catch (e) {
+    lookupFailed = true
+  }
+  if (vid) return vid._serialized
+  if (!lookupFailed) throw new Error('Esse número não tem WhatsApp (confirmado antes do envio).')
+  return formatted
 }
 
 // client.sendMessage() às vezes resolve sem devolver o objeto da mensagem
@@ -3073,7 +3121,7 @@ app.post('/api/send-message', async (req, res) => {
   const session = chipSessions[id]
   if (session?.isReady && session.client) {
     try {
-      let chatId = to.includes('@') ? to : formatNumber(to)
+      const chatId = await resolveChatId(session.client, to)
       const convId = conversationId || getConvId(id, chatId)
       const pendingAck = registerPendingAck(id, chatId)
       const msg = await sendChipText(session.client, chatId, message)
@@ -3120,9 +3168,7 @@ app.post('/api/chips/send', async (req, res) => {
   const session = chipSessions[chipId]
   if (!session?.isReady || !session.client) return res.status(400).json({ error: `Chip "${chipId}" não está conectado` })
   try {
-    // If 'to' already contains '@' (e.g. '5511@c.us' or '123@lid'), use it directly.
-    // Only reformat if it's a plain phone number without domain.
-    let chatId = to.includes('@') ? to : formatNumber(to)
+    const chatId = await resolveChatId(session.client, to)
     const convId = getConvId(chipId, chatId)
     const pendingAck = registerPendingAck(chipId, chatId)
     console.log(`[Send ${reqId}] chamando client.sendMessage...`)
@@ -3149,7 +3195,7 @@ app.post('/api/chips/send-media', upload.single('file'), async (req, res) => {
   const session = chipSessions[chipId]
   if (!session?.isReady || !session.client) return res.status(400).json({ error: `Chip "${chipId}" não está conectado` })
   try {
-    let chatId = to.includes('@') ? to : formatNumber(to)
+    const chatId = await resolveChatId(session.client, to)
     const { MessageMedia } = require('whatsapp-web.js')
     const base64  = req.file.buffer.toString('base64')
     const isAudio = req.file.mimetype.startsWith('audio/')
