@@ -6,10 +6,20 @@ export const ALL_GREETINGS = [
   'Bom dia! 😊', 'Boa tarde!', 'Boa noite!', 'Oi! 👋', 'Olá! 😊', 'E aí! Tudo na paz?'
 ]
 
+// Número sem DDI e com até 11 dígitos (DDD + 8/9 dígitos — tamanho de um
+// número brasileiro sem "55") ganha o "55" na frente, espelhando a mesma
+// regra do envio (formatNumber no backend/server.js e cleanPhone no
+// backend/wuzapi.js) — sem isso a contagem/preview aqui no wizard mostrava
+// um número diferente do que de fato ia ser usado no envio.
+function normalizeBrazilPhone(digits: string): string {
+  if (digits && !digits.startsWith('55') && digits.length <= 11) return '55' + digits
+  return digits
+}
+
 export function parseContacts(text: string): CsvContact[] {
   return text.split('\n').map(l => l.trim()).filter(Boolean).map(l => {
     const [num, ...rest] = l.split(/[,;\t]/)
-    return { number: (num || '').replace(/\D/g, ''), name: rest.join(' ').trim(), vars: {} }
+    return { number: normalizeBrazilPhone((num || '').replace(/\D/g, '')), name: rest.join(' ').trim(), vars: {} }
   }).filter(c => c.number.length >= 8)
 }
 
@@ -52,7 +62,7 @@ export function buildContacts(rawRows: Record<string, string>[], allHeaders: str
     ?? ''
   const extraHeaders = allHeaders.filter(h => h !== phoneCol && h !== nameCol)
   const contacts: CsvContact[] = rawRows.map(row => {
-    const number = (row[phoneCol] ?? '').replace(/\D/g, '')
+    const number = normalizeBrazilPhone((row[phoneCol] ?? '').replace(/\D/g, ''))
     const name = (row[nameCol] ?? '').trim()
     const vars: Record<string, string> = {}
     extraHeaders.forEach((h, i) => {

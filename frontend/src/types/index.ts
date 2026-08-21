@@ -337,3 +337,39 @@ export interface WuzapiCampaignFinalStats {
   interactionRate: string
   notInteracted: number
 }
+
+// ── SMS (BETA) — automação do Google Messages Web ────────────────────────────
+
+export type SmsStatus = 'connecting' | 'connected' | 'disconnected' | 'qr' | 'error'
+
+export interface SmsInstance {
+  id: string
+  label?: string | null
+  status: SmsStatus
+  qr?: string | null
+  number?: string | null
+  errorMsg?: string | null
+}
+
+export interface SmsCampaignResult {
+  index: number
+  number: string
+  name?: string
+  status: 'success' | 'failed' | 'sending'
+  via?: string
+  error?: string
+  sentAt?: number
+}
+
+export interface SmsCampaignHistoryRecord {
+  id: string
+  name: string
+  text: string
+  startedAt: number
+  endedAt: number
+  total: number
+  success: number
+  failed: number
+  skipped: number
+  results: SmsCampaignResult[]
+}

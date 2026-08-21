@@ -32,6 +32,7 @@ export interface WuzapiCampaignConfig {
   delayMax: number
   batchDelay?: WuzapiBatchDelay
   spinWithAI?: boolean
+  firstNameOnly?: boolean
 }
 
 export interface WuzapiCampaignItem {

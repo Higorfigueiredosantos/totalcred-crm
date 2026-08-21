@@ -24,6 +24,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100
 
 const { CallBridge } = require('./callBridge')
 const wuzapi = require('./wuzapi')
+const sms = require('./sms')
 
 const app = express()
 const server = http.createServer(app)
@@ -420,6 +421,7 @@ function broadcast(type, payload) {
 }
 
 wuzapi.init({ broadcast, getConvId })
+sms.init({ broadcast, getConvId })
 
 // ── Webhook storage & fire ────────────────────────────────────────────────────
 const WEBHOOKS_FILE = path.join(__dirname, 'data', 'webhooks.json')
@@ -677,6 +679,7 @@ const chipCampaignState = {
   paused: false,
   stopped: false,
   currentCampaign: null,
+  startedAt: null,
   sentNumbers: new Set(),
   tickMonitor: new TickMonitor(),
   delayCalc: new AntiBanDelayCalculator(),
@@ -1309,6 +1312,7 @@ async function runChipCampaign(data) {
   chipCampaignState.currentCampaign = data
   let success = 0, failed = 0
   const campaignStartedAt = Date.now()
+  chipCampaignState.startedAt = campaignStartedAt
 
   // Chips selecionados para esta campanha (fallback: todos os chips)
   const allChipIds = Object.keys(chipSessions)
@@ -1448,6 +1452,7 @@ async function runChipCampaign(data) {
   })
 
   chipCampaignState.currentCampaign = null
+  chipCampaignState.startedAt = null
 }
 
 // ── Maturador ─────────────────────────────────────────────────────────────────
@@ -1923,7 +1928,17 @@ app.post('/api/chip-campaign/start', (req, res) => {
     })
   }
   res.json({ ok: true, count: data.contacts?.length || 0 })
-  runChipCampaign(data)
+  // Sem esse .catch, um erro inesperado fora do try/catch interno do loop
+  // (ex.: contacts malformado) derrubava a função sem nunca voltar pra
+  // limpar currentCampaign — toda tentativa seguinte de iniciar uma
+  // campanha nova passava a esbarrar em "Campanha já em andamento" pra
+  // sempre, sem nenhuma campanha visível na tela pra explicar o motivo.
+  runChipCampaign(data).catch(e => {
+    console.error('[ChipCampaign] Erro:', e.message)
+    broadcast('chip_campaign', { type: 'stopped', reason: `⚠️ Disparo interrompido por erro: ${e.message}` })
+    chipCampaignState.currentCampaign = null
+    chipCampaignState.startedAt = null
+  })
 })
 
 app.post('/api/chip-campaign/pause', (_req, res) => {
@@ -1952,6 +1967,25 @@ app.get('/api/chip-campaign/stats', (_req, res) => res.json({
   tickStats: chipCampaignState.tickMonitor.getSummary(),
   riskLevel: chipCampaignState.tickMonitor.getBanRiskLevel(),
 }))
+
+// Snapshot da campanha em andamento (ou null) — mesma lógica de
+// /api/wuzapi-campaign/current (ver comentário lá): sem isso, um F5 na tela
+// com uma campanha de chips rodando fazia o front perder ela de vista, mas
+// o backend continuava recusando iniciar uma nova achando (corretamente)
+// que já tinha uma em andamento — só que sem nada visível pro usuário
+// pausar ou parar.
+app.get('/api/chip-campaign/current', (_req, res) => {
+  const cs = chipCampaignState
+  if (!cs.currentCampaign) return res.json(null)
+  res.json({
+    startedAt: cs.startedAt,
+    total: cs.currentCampaign.contacts?.length || 0,
+    results: cs.results,
+    paused: cs.paused,
+    chipIds: cs.currentCampaign.settings?.selectedChipIds || [],
+    riskLevel: cs.tickMonitor.getBanRiskLevel(),
+  })
+})
 
 
 // ── Wuzapi Routes (BETA — teste de entrega de botões via whatsmeow) ───────────
@@ -2105,6 +2139,27 @@ app.get('/api/wuzapi-campaign/stats', (_req, res) => res.json({
   paused: wuzapi.campaignState.paused,
 }))
 
+// Snapshot da campanha em andamento (ou null) — sem isso, dar um F5 na tela
+// do Disparador com uma campanha rodando fazia o front "esquecer" dela (o
+// estado "current" só existe na memória do React), mas o backend continuava
+// recusando iniciar uma nova ("Campanha já em andamento") porque ele
+// continuava rodando de verdade nos bastidores. O usuário via só o erro,
+// sem nenhuma campanha visível na tela pra pausar/parar. Isso reidrata o
+// front com o que já está rolando.
+app.get('/api/wuzapi-campaign/current', (_req, res) => {
+  const cs = wuzapi.campaignState
+  if (!cs.current) return res.json(null)
+  res.json({
+    name: cs.current.name,
+    instanceNames: cs.current.instanceNames || [],
+    payload: cs.current.payload,
+    startedAt: cs.startedAt,
+    total: cs.current.contacts?.length || 0,
+    results: cs.results,
+    paused: cs.paused,
+  })
+})
+
 // Cruza números que a campanha enviou com quem respondeu (texto ou clique de
 // botão) depois do envio — mesma lógica de /api/chip-campaign/interaction-rate.
 app.post('/api/wuzapi-campaign/interaction-rate', (req, res) => {
@@ -2142,6 +2197,125 @@ app.get('/api/wuzapi-campaign/history', (_req, res) => res.json(wuzapi.loadHisto
 app.delete('/api/wuzapi-campaign/history/:id', (req, res) => {
   try {
     wuzapi.deleteHistoryRecord(req.params.id)
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ── SMS Routes (disparo via automação do Google Messages Web) ─────────────────
+
+app.get('/api/sms/instances', (_req, res) => {
+  res.json(sms.listInstances())
+})
+
+app.post('/api/sms/instances', async (req, res) => {
+  const { id, label } = req.body || {}
+  if (!id) return res.status(400).json({ error: 'id obrigatório' })
+  try {
+    res.json(await sms.createInstance(String(id).trim(), label))
+  } catch (e) {
+    res.status(502).json({ error: e.message })
+  }
+})
+
+app.post('/api/sms/instances/:id/disconnect', async (req, res) => {
+  try {
+    res.json(await sms.disconnectInstance(req.params.id))
+  } catch (e) {
+    res.status(502).json({ error: e.message })
+  }
+})
+
+app.post('/api/sms/instances/:id/reconnect', async (req, res) => {
+  try {
+    res.json(await sms.reconnectInstance(req.params.id))
+  } catch (e) {
+    res.status(502).json({ error: e.message })
+  }
+})
+
+app.delete('/api/sms/instances/:id', async (req, res) => {
+  try {
+    res.json(await sms.deleteInstance(req.params.id))
+  } catch (e) {
+    res.status(502).json({ error: e.message })
+  }
+})
+
+app.put('/api/sms/instances/:id/label', (req, res) => {
+  try {
+    res.json(sms.updateLabel(req.params.id, req.body?.label || ''))
+  } catch (e) {
+    res.status(404).json({ error: e.message })
+  }
+})
+
+// ── SMS Campaign Routes ─────────────────────────────────────────────────────────
+
+app.post('/api/sms-campaign/start', (req, res) => {
+  const data = req.body || {}
+  if (sms.campaignState.current) return res.status(400).json({ error: 'Campanha já em andamento' })
+  if (!Array.isArray(data.instanceIds) || data.instanceIds.length === 0) {
+    return res.status(400).json({ error: 'Selecione ao menos uma sessão' })
+  }
+  if (!Array.isArray(data.contacts) || data.contacts.length === 0) {
+    return res.status(400).json({ error: 'Nenhum contato informado' })
+  }
+  res.json({ ok: true, count: data.contacts.length })
+  sms.runCampaign(data)
+})
+
+app.post('/api/sms-campaign/pause', (_req, res) => {
+  sms.campaignState.paused = !sms.campaignState.paused
+  broadcast('sms_campaign', { type: 'paused', paused: sms.campaignState.paused })
+  res.json({ paused: sms.campaignState.paused })
+})
+
+app.post('/api/sms-campaign/stop', (_req, res) => {
+  sms.campaignState.stopped = true
+  broadcast('sms_campaign', { type: 'stopped' })
+  res.json({ ok: true })
+})
+
+app.post('/api/sms-campaign/reset-sent', (_req, res) => {
+  const count = sms.campaignState.sentNumbers.size
+  sms.campaignState.sentNumbers.clear()
+  res.json({ ok: true, cleared: count })
+})
+
+app.get('/api/sms-campaign/results', (_req, res) => res.json(sms.campaignState.results))
+
+app.get('/api/sms-campaign/stats', (_req, res) => res.json({
+  running: sms.campaignState.running,
+  paused: sms.campaignState.paused,
+}))
+
+// Snapshot da campanha em andamento (ou null) — mesma lógica de
+// /api/wuzapi-campaign/current (ver comentário lá): sem isso, um F5 na tela
+// com uma campanha SMS rodando fazia o front perder ela de vista, mas o
+// backend continuava recusando iniciar uma nova achando (corretamente) que
+// já tinha uma em andamento — só que sem nada visível pro usuário pausar
+// ou parar.
+app.get('/api/sms-campaign/current', (_req, res) => {
+  const cs = sms.campaignState
+  if (!cs.current) return res.json(null)
+  res.json({
+    name: cs.current.name,
+    instanceIds: cs.current.instanceIds || [],
+    text: cs.current.text,
+    startedAt: cs.startedAt,
+    total: cs.current.contacts?.length || 0,
+    results: cs.results,
+    paused: cs.paused,
+  })
+})
+
+app.get('/api/sms-campaign/history', (_req, res) => res.json(sms.loadHistory()))
+
+app.delete('/api/sms-campaign/history/:id', (req, res) => {
+  try {
+    sms.deleteHistoryRecord(req.params.id)
     res.json({ ok: true })
   } catch (e) {
     res.status(500).json({ error: e.message })

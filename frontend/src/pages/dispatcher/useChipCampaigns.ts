@@ -42,6 +42,36 @@ export function useChipCampaigns() {
 
   useEffect(() => { loadHistory() }, [])
 
+  // Reidrata uma campanha que já estava rodando no backend antes desse
+  // componente montar (ex.: usuário deu F5 no meio de um disparo). Sem
+  // isso, o "current" local ficava null pra sempre (só existe na memória do
+  // React), mas o backend continuava recusando iniciar uma campanha nova —
+  // o usuário via só o erro "já em andamento", sem nada na tela pra
+  // pausar/parar a que já estava rodando de verdade.
+  useEffect(() => {
+    fetch('/api/chip-campaign/current').then(r => r.json()).then(snap => {
+      if (!snap) return
+      const results: ChipCampaignResult[] = snap.results || []
+      const success = results.filter(r => r.status === 'success').length
+      const failed = results.filter(r => r.status === 'failed').length
+      setCurrent({
+        id: `live-${snap.startedAt}`,
+        name: lookupCampaignName(snap.startedAt) ?? 'Campanha via Chips',
+        status: 'running',
+        chipIds: snap.chipIds || [],
+        createdAt: snap.startedAt,
+        stats: { current: results.length, total: snap.total, success, failed },
+        log: ['🔄 Campanha em andamento recuperada após recarregar a página.'],
+        results,
+        finalStats: null,
+        riskLevel: snap.riskLevel || '—',
+        waiting: 0,
+        paused: !!snap.paused,
+        fromHistory: false,
+      })
+    }).catch(() => {})
+  }, [])
+
   useEffect(() => {
     const offs = [
       onWSMessage('chip_campaign', (p: any) => handleCampaignEvent(p)),

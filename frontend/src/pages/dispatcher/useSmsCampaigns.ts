@@ -1,42 +1,39 @@
 import { useEffect, useState } from 'react'
 import { onWSMessage } from '../../api/websocket'
 import { apiFetch } from '../../hooks/useChips'
-import type { WuzapiCampaignFinalStats, WuzapiCampaignHistoryRecord, WuzapiCampaignResult } from '../../types'
+import type { SmsCampaignHistoryRecord, SmsCampaignResult } from '../../types'
 import {
-  type WuzapiCampaignConfig, type WuzapiCampaignItem,
+  type SmsCampaignConfig, type SmsCampaignItem,
   saveCampaignName, lookupCampaignName,
-} from './wuzapiCampaign'
+} from './smsCampaign'
 
-function historyToItem(rec: WuzapiCampaignHistoryRecord): WuzapiCampaignItem {
+function historyToItem(rec: SmsCampaignHistoryRecord): SmsCampaignItem {
   return {
     id: rec.id,
-    name: lookupCampaignName(rec.startedAt) ?? rec.name ?? 'Campanha Wuzapi',
+    name: lookupCampaignName(rec.startedAt) ?? rec.name ?? 'Campanha SMS',
     status: 'done',
-    instanceNames: [],
+    instanceIds: [],
     createdAt: rec.startedAt,
     endedAt: rec.endedAt,
     stats: { current: rec.total, total: rec.total, success: rec.success, failed: rec.failed },
     log: [],
     results: rec.results ?? [],
-    finalStats: null,
     waiting: 0,
     paused: false,
     fromHistory: true,
-    payload: rec.payload,
+    text: rec.text,
   }
 }
 
-// Estado + ações da campanha via Wuzapi (BETA), no mesmo shape de "lista de
-// itens" usado pelas outras campanhas. Só existe uma campanha Wuzapi ativa
-// por vez.
-export function useWuzapiCampaigns() {
-  const [current, setCurrent] = useState<WuzapiCampaignItem | null>(null)
-  const [history, setHistory] = useState<WuzapiCampaignHistoryRecord[]>([])
-  const [finalStatsCache, setFinalStatsCache] = useState<Record<string, WuzapiCampaignFinalStats>>({})
-  const [recalculatingId, setRecalculatingId] = useState<string | null>(null)
+// Estado + ações da campanha via SMS (BETA), no mesmo shape de "lista de
+// itens" usado pelas outras campanhas. Só existe uma campanha SMS ativa por
+// vez (mesma limitação do lado do backend).
+export function useSmsCampaigns() {
+  const [current, setCurrent] = useState<SmsCampaignItem | null>(null)
+  const [history, setHistory] = useState<SmsCampaignHistoryRecord[]>([])
 
   const loadHistory = () =>
-    fetch('/api/wuzapi-campaign/history').then(r => r.json()).then(setHistory).catch(() => {})
+    fetch('/api/sms-campaign/history').then(r => r.json()).then(setHistory).catch(() => {})
 
   useEffect(() => { loadHistory() }, [])
 
@@ -47,31 +44,30 @@ export function useWuzapiCampaigns() {
   // o usuário via só o erro "já em andamento", sem nada na tela pra
   // pausar/parar a que já estava rodando de verdade.
   useEffect(() => {
-    fetch('/api/wuzapi-campaign/current').then(r => r.json()).then(snap => {
+    fetch('/api/sms-campaign/current').then(r => r.json()).then(snap => {
       if (!snap) return
-      const results: WuzapiCampaignResult[] = snap.results || []
+      const results: SmsCampaignResult[] = snap.results || []
       const success = results.filter(r => r.status === 'success').length
       const failed = results.filter(r => r.status === 'failed').length
       setCurrent({
         id: `live-${snap.startedAt}`,
-        name: snap.name || 'Campanha Wuzapi',
+        name: snap.name || 'Campanha SMS',
         status: 'running',
-        instanceNames: snap.instanceNames || [],
+        instanceIds: snap.instanceIds || [],
         createdAt: snap.startedAt,
         stats: { current: results.length, total: snap.total, success, failed },
         log: ['🔄 Campanha em andamento recuperada após recarregar a página.'],
         results,
-        finalStats: null,
         waiting: 0,
         paused: !!snap.paused,
         fromHistory: false,
-        payload: snap.payload,
+        text: snap.text,
       })
     }).catch(() => {})
   }, [])
 
   useEffect(() => {
-    const off = onWSMessage('wuzapi_campaign', (p: any) => handleCampaignEvent(p))
+    const off = onWSMessage('sms_campaign', (p: any) => handleCampaignEvent(p))
     return () => off()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -107,7 +103,7 @@ export function useWuzapiCampaigns() {
       addLog(p.contact?.status === 'success' ? `✅ ${p.contact.number}` : `❌ ${p.contact?.number} — ${p.contact?.error}`)
     }
     if (p.type === 'started') {
-      addLog(`🔀 Instâncias em rotação: ${(p.instances as string[]).join(', ')}`)
+      addLog(`🔀 Sessões em rotação: ${(p.instances as string[]).join(', ')}`)
     }
     if (p.type === 'skipped') addLog(`⏭️ ${p.number} — já enviado anteriormente`)
     if (p.type === 'waiting') { startWait(p.delay); addLog(`⏱️ Aguardando ${p.delay}s`) }
@@ -125,11 +121,11 @@ export function useWuzapiCampaigns() {
     }
   }
 
-  async function startCampaign(config: WuzapiCampaignConfig) {
+  async function startCampaign(config: SmsCampaignConfig) {
     const body = {
       name: config.name,
-      payload: config.payload,
-      instanceNames: config.instanceNames,
+      text: config.text,
+      instanceIds: config.instanceIds,
       contacts: config.contacts,
       delayMin: config.delayMin,
       delayMax: config.delayMax,
@@ -137,7 +133,7 @@ export function useWuzapiCampaigns() {
       spinWithAI: config.spinWithAI,
       firstNameOnly: config.firstNameOnly,
     }
-    const r = await fetch('/api/wuzapi-campaign/start', {
+    const r = await fetch('/api/sms-campaign/start', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     })
     const d = await r.json()
@@ -149,40 +145,39 @@ export function useWuzapiCampaigns() {
       id: `live-${startedAt}`,
       name: config.name,
       status: 'running',
-      instanceNames: config.instanceNames,
+      instanceIds: config.instanceIds,
       createdAt: startedAt,
       stats: { current: 0, total: d.count, success: 0, failed: 0 },
       log: [`🚀 Campanha iniciada — ${d.count} contatos`],
       results: [],
-      finalStats: null,
       waiting: 0,
       paused: false,
       fromHistory: false,
-      payload: config.payload,
+      text: config.text,
     })
     return { ok: true as const }
   }
 
   async function togglePause() {
-    await apiFetch('/api/wuzapi-campaign/pause', { method: 'POST' })
+    await apiFetch('/api/sms-campaign/pause', { method: 'POST' })
   }
 
   async function stop() {
-    await apiFetch('/api/wuzapi-campaign/stop', { method: 'POST' })
+    await apiFetch('/api/sms-campaign/stop', { method: 'POST' })
   }
 
   async function resetSent() {
-    return apiFetch('/api/wuzapi-campaign/reset-sent', { method: 'POST' }) as Promise<{ ok: boolean; cleared: number }>
+    return apiFetch('/api/sms-campaign/reset-sent', { method: 'POST' }) as Promise<{ ok: boolean; cleared: number }>
   }
 
   async function deleteHistory(id: string) {
     if (!confirm('Remover este registro do histórico?')) return
-    await fetch(`/api/wuzapi-campaign/history/${id}`, { method: 'DELETE' })
+    await fetch(`/api/sms-campaign/history/${id}`, { method: 'DELETE' })
     setHistory(prev => prev.filter(c => c.id !== id))
   }
 
-  function exportResultsCSV(results: WuzapiCampaignResult[], fileName: string) {
-    const csv = ['Número,Nome,Status,Instância,Erro',
+  function exportResultsCSV(results: SmsCampaignResult[], fileName: string) {
+    const csv = ['Número,Nome,Status,Sessão,Erro',
       ...results.map(r => `"${r.number}","${r.name || ''}","${r.status}","${r.via || ''}","${r.error || ''}"`)
     ].join('\n')
     const a = document.createElement('a')
@@ -190,46 +185,16 @@ export function useWuzapiCampaigns() {
     a.download = fileName; a.click()
   }
 
-  // Cruza quem recebeu a campanha com quem respondeu ou apertou botão depois
-  // do envio — mesma lógica de recalcEngagement da via Chips.
-  async function computeFinalStats(item: WuzapiCampaignItem): Promise<WuzapiCampaignFinalStats> {
-    const sentContacts = item.results.filter(r => r.status === 'success').map(r => ({ number: r.number, sentAt: r.sentAt ?? item.createdAt }))
-    const ir = await fetch('/api/wuzapi-campaign/interaction-rate', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sentContacts }),
-    }).then(r => r.json()).catch(() => ({ interacted: 0, rate: '0%', notInteracted: 0 }))
-    return {
-      interacted: ir.interacted ?? 0,
-      interactionRate: ir.rate ?? '0%',
-      notInteracted: ir.notInteracted ?? 0,
-    }
-  }
-
-  async function recalcEngagement(item: WuzapiCampaignItem) {
-    setRecalculatingId(item.id)
-    try {
-      const stats = await computeFinalStats(item)
-      setFinalStatsCache(prev => ({ ...prev, [item.id]: stats }))
-      if (current?.id === item.id) setCurrent(prev => prev ? { ...prev, finalStats: stats } : prev)
-    } finally {
-      setRecalculatingId(null)
-    }
-  }
-
-  const items: WuzapiCampaignItem[] = [
-    ...(current ? [{ ...current, finalStats: finalStatsCache[current.id] ?? current.finalStats }] : []),
+  const items: SmsCampaignItem[] = [
+    ...(current ? [current] : []),
     ...history
       .filter(rec => !current || Math.abs(rec.startedAt - current.createdAt) > 5000)
-      .map(rec => {
-        const item = historyToItem(rec)
-        return { ...item, finalStats: finalStatsCache[item.id] ?? null }
-      }),
+      .map(historyToItem),
   ].sort((a, b) => b.createdAt - a.createdAt)
 
   return {
     items,
     startCampaign, togglePause, stop, resetSent,
     deleteHistory, exportResultsCSV,
-    recalcEngagement, computeFinalStats, recalculatingId,
   }
 }

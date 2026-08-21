@@ -9,6 +9,7 @@ const axios = require('axios')
 const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
+const { applyVars, resolvePayload, normalizeBrazilPhone, randDelaySec, spinOpeningWithAI } = require('./campaignVars')
 
 const WUZAPI_URL = process.env.WUZAPI_URL || 'http://wuzapi:8080'
 const WUZAPI_ADMIN_TOKEN = process.env.WUZAPI_ADMIN_TOKEN || ''
@@ -68,6 +69,15 @@ function saveRegistry(reg) {
 
 // ── Instâncias ──────────────────────────────────────────────────────────────
 
+// Última leitura bem-sucedida de /admin/users — usada como fallback quando
+// essa chamada falha pontualmente (ex.: wuzapi ocupado processando o envio
+// de uma campanha em andamento), pra não mentir que TODAS as instâncias
+// caíram só porque essa checagem específica não respondeu a tempo uma vez.
+// Isso já disparava reconexão automática desnecessária pelo watchdog e
+// mostrava o canal selecionado como "desconectado" na tela no meio de um
+// disparo que continuava funcionando normalmente por trás.
+let _lastKnownInstances = []
+
 async function listInstances() {
   const registry = loadRegistry()
   const names = Object.keys(registry)
@@ -80,11 +90,13 @@ async function listInstances() {
     // formato plano documentado — confirmado testando direto contra o serviço.
     remoteUsers = Array.isArray(data?.data) ? data.data : []
   } catch (e) {
-    // Sem conseguir falar com o wuzapi, ainda mostra as instâncias salvas como desconectadas
-    return names.map(name => ({ name, label: registry[name].label || null, status: 'disconnected', hasQr: false, qr: null }))
+    return names.map(name => {
+      const cached = _lastKnownInstances.find(i => i.name === name)
+      return cached || { name, label: registry[name].label || null, status: 'disconnected', hasQr: false, qr: null }
+    })
   }
 
-  return names.map(name => {
+  const result = names.map(name => {
     const entry = registry[name]
     const remote = remoteUsers.find(u => u.token === entry.token)
     if (!remote) return { name, label: entry.label || null, status: 'disconnected', hasQr: false, qr: null }
@@ -104,6 +116,8 @@ async function listInstances() {
       proxyEnabled: Boolean(remote.proxy_config?.enabled),
     }
   })
+  _lastKnownInstances = result
+  return result
 }
 
 async function createInstance(name, label, proxyUrl, proxyEnabled) {
@@ -250,8 +264,17 @@ async function reconnectDisconnectedWuzapiInstances() {
   let all
   try { all = await listInstances() } catch (e) { return }
   const registry = loadRegistry()
+  // Instâncias em uso agora por um disparo de campanha em andamento nunca
+  // devem ser tocadas aqui — um "disconnected" reportado nesse meio tempo é
+  // bem mais provável de ser uma falha pontual da checagem de status (ver
+  // fallback em listInstances) do que a sessão ter caído de verdade, e forçar
+  // reconexão/reafirmar proxy no meio de um disparo é exatamente o tipo de
+  // interferência que fazia o canal selecionado parecer "desconectar sozinho"
+  // assim que a campanha começava.
+  const dispatching = new Set(campaignState.current?.instanceNames || [])
   for (const inst of all) {
     if (inst.status !== 'disconnected') continue
+    if (dispatching.has(inst.name)) continue
     const entry = registry[inst.name]
     if (!entry) continue
     try {
@@ -330,7 +353,7 @@ async function setProxyAndReconnect(name, proxyUrl, enabled) {
 // ── Envio de botões ───────────────────────────────────────────────────────────
 
 function cleanPhone(number) {
-  return String(number || '').replace(/\D/g, '')
+  return normalizeBrazilPhone(String(number || '').replace(/\D/g, ''))
 }
 
 // Texto simples — usado pra responder pelo Mensagens (equivalente ao envio
@@ -586,6 +609,7 @@ const campaignState = {
   sentNumbers: new Set(),
   results: [],
   current: null,
+  startedAt: null,
 }
 
 function loadHistory() {
@@ -609,64 +633,6 @@ function deleteHistoryRecord(id) {
   const list = loadHistory().filter(c => c.id !== id)
   ensureDataDir()
   fs.writeFileSync(HISTORY_FILE, JSON.stringify(list, null, 2))
-}
-
-function applyVars(text, contact) {
-  if (typeof text !== 'string') return text
-  const name = contact?.name || ''
-  const vars = contact?.vars || {}
-  let msg = text
-  if (name) msg = msg.replace(/\{\{name\}\}/gi, name).replace(/\{name\}/gi, name)
-  for (const [k, v] of Object.entries(vars)) {
-    const escaped = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    msg = msg.replace(new RegExp(`\\{\\{${escaped}\\}\\}`, 'gi'), String(v ?? ''))
-  }
-  return msg
-}
-
-function resolvePayload(payload, contact) {
-  if (typeof payload === 'string') return applyVars(payload, contact)
-  if (Array.isArray(payload)) return payload.map(v => resolvePayload(v, contact))
-  if (payload && typeof payload === 'object') {
-    const out = {}
-    for (const [k, v] of Object.entries(payload)) out[k] = resolvePayload(v, contact)
-    return out
-  }
-  return payload
-}
-
-// Randomiza só a abertura do template (via Groq/OpenAI) pra reduzir a
-// assinatura de "mensagem idêntica em massa" sem arriscar mudar o conteúdo
-// principal. Roda ANTES de resolvePayload, em cima do template com os
-// {{placeholders}} ainda intactos — a IA nunca vê o valor real das
-// variáveis, só o nome delas, então não tem como confundir/trocar valores.
-async function spinTemplateWithAI(template) {
-  if (typeof template !== 'string' || !template.trim()) return template
-  const apiKey = process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY
-  if (!apiKey) return template
-  const baseURL = process.env.GROQ_API_KEY ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1'
-  const model = process.env.GROQ_API_KEY ? 'llama3-8b-8192' : 'gpt-3.5-turbo'
-  try {
-    const resp = await axios.post(`${baseURL}/chat/completions`, {
-      model, max_tokens: 400, temperature: 0.9,
-      messages: [
-        {
-          role: 'system',
-          content: 'Você varia levemente mensagens de WhatsApp para reduzir a chance de detecção como disparo em massa. '
-            + 'Regras obrigatórias: (1) troque só as primeiras palavras — cumprimento/abertura — por um sinônimo natural; '
-            + '(2) NUNCA altere o restante do texto, nem qualquer trecho entre chaves duplas como {{name}} ou {{coluna}} — copie esses marcadores exatamente iguais; '
-            + '(3) mantenha o mesmo idioma, tom, sentido e tamanho aproximado da mensagem original; '
-            + '(4) não adicione nem remova informação, links ou instruções; '
-            + '(5) responda somente com a mensagem final, sem comentários nem aspas.',
-        },
-        { role: 'user', content: template },
-      ],
-    }, { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 15000 })
-    const out = resp.data?.choices?.[0]?.message?.content?.trim()
-    return out || template
-  } catch (e) {
-    return template
-  }
 }
 
 // Campanha roda inteira no servidor — sem isso, a mensagem enviada nunca
@@ -713,122 +679,169 @@ const CAMPAIGN_BATCH_PAUSE_MIN = 90
 const CAMPAIGN_BATCH_PAUSE_MAX = 240
 
 async function runCampaign(data) {
-  const { name, payload, instanceNames, contacts, delayMin = 5, delayMax = 15, batchDelay, spinWithAI } = data
+  const { name, payload, instanceNames, contacts, delayMin = 5, delayMax = 15, batchDelay, spinWithAI, firstNameOnly } = data
 
-  // Nenhuma dessas instâncias pode estar ocupada num maturador rodando —
-  // dobrar o volume de mensagens na mesma sessão só aumenta o risco de
-  // queda/ban, e as duas features brigariam pela mesma conexão.
-  const busy = getBusyInstanceNames()
-  const conflicting = instanceNames.filter(n => busy.has(n))
-  if (conflicting.length) {
-    throw new Error(`Essas instâncias já estão em uso pelo maturador: ${conflicting.join(', ')}. Pare o maturador nelas antes de disparar a campanha.`)
-  }
-
-  // Se o usuário configurou uma pausa de lote própria (mesma caixinha da via
-  // Chips), usa os valores dele; senão cai na proteção padrão (sempre ativa).
-  const bd = batchDelay?.enabled && batchDelay.everyMin > 0 && batchDelay.pauseMin > 0 ? batchDelay : null
-  const batchSize = bd ? Math.floor(Math.random() * (Math.max(bd.everyMax, bd.everyMin) - bd.everyMin + 1)) + bd.everyMin : CAMPAIGN_BATCH_SIZE
-  const batchPauseMin = bd ? bd.pauseMin : CAMPAIGN_BATCH_PAUSE_MIN
-  const batchPauseMax = bd ? Math.max(bd.pauseMax, bd.pauseMin) : CAMPAIGN_BATCH_PAUSE_MAX
-
-  campaignState.results = []
-  campaignState.paused = false
-  campaignState.stopped = false
-  campaignState.running = true
-  campaignState.current = data
-  let success = 0, failed = 0
-  let consecutiveFailures = 0
-  let batchCount = 0
-  const startedAt = Date.now()
-  let rrIndex = 0
-
-  _broadcast('wuzapi_campaign', { type: 'started', instances: instanceNames, total: contacts.length })
-
-  for (let i = 0; i < contacts.length; i++) {
-    if (campaignState.stopped) break
-    while (campaignState.paused) await sleep(500)
-
-    const contact = contacts[i]
-
-    if (campaignState.sentNumbers.has(contact.number)) {
-      _broadcast('wuzapi_campaign', { type: 'skipped', number: contact.number, current: i + 1, total: contacts.length })
-      continue
+  try {
+    // Nenhuma dessas instâncias pode estar ocupada num maturador rodando —
+    // dobrar o volume de mensagens na mesma sessão só aumenta o risco de
+    // queda/ban, e as duas features brigariam pela mesma conexão.
+    const busy = getBusyInstanceNames()
+    const conflicting = instanceNames.filter(n => busy.has(n))
+    if (conflicting.length) {
+      throw new Error(`Essas instâncias já estão em uso pelo maturador: ${conflicting.join(', ')}. Pare o maturador nelas antes de disparar a campanha.`)
     }
 
-    const result = { index: i, number: contact.number, name: contact.name || contact.number, status: 'sending' }
-    campaignState.results.push(result)
-    _broadcast('wuzapi_campaign', { type: 'progress', contact: result, success, failed, total: contacts.length, current: i + 1 })
+    // Confere de verdade, instância por instância (chamada direta a
+    // /session/status, não a listagem em lote de listInstances — essa pode
+    // devolver um status momentaneamente errado por uma falha pontual do
+    // wuzapi), se cada instância escolhida está mesmo logada ANTES de gastar
+    // tentativas de envio nela. Sem isso, uma instância que já tinha caído
+    // antes do disparo só era descoberta depois de 3 falhas seguidas (ver
+    // CAMPAIGN_MAX_CONSECUTIVE_FAILURES) — na prática parecia "a campanha
+    // desconectou o canal assim que iniciei", quando na verdade ele já não
+    // estava conectado e a campanha só expôs isso.
+    const statuses = await Promise.all(
+      instanceNames.map(n => getInstanceStatus(n).catch(() => ({ instance: n, status: 'disconnected' })))
+    )
+    const offline = statuses.filter(s => s.status !== 'connected').map(s => s.instance)
+    if (offline.length) {
+      throw new Error(`Essas instâncias não estão conectadas: ${offline.join(', ')}. Reconecte antes de iniciar o disparo.`)
+    }
 
-    try {
-      const instanceName = instanceNames[rrIndex % instanceNames.length]
-      rrIndex++
-      // Spin roda em cima do template (placeholders ainda intactos) — só
-      // depois disso os {{vars}} são resolvidos pro contato da vez.
-      const templateForContact = spinWithAI
-        ? { ...payload, text: await spinTemplateWithAI(payload.text) }
-        : payload
-      const resolved = resolvePayload(templateForContact, contact)
-      const sent = await sendButtons(instanceName, contact.number, resolved)
-      result.status = 'success'
-      result.via = instanceName
-      result.sentAt = Date.now()
-      if (sent?.messageId) result.messageId = sent.messageId
-      success++
-      batchCount++
-      consecutiveFailures = 0
-      campaignState.sentNumbers.add(contact.number)
-      _broadcast('wuzapi_campaign', { type: 'result', contact: result, success, failed })
-      broadcastOutboundEcho(instanceName, contact.number, resolved, sent?.messageId)
-    } catch (e) {
-      result.status = 'failed'
-      result.error = e?.response?.data?.error || e.message || 'Erro desconhecido'
-      failed++
-      consecutiveFailures++
-      _broadcast('wuzapi_campaign', { type: 'result', contact: result, success, failed })
+    // Se o usuário configurou uma pausa de lote própria (mesma caixinha da via
+    // Chips), usa os valores dele; senão cai na proteção padrão (sempre ativa).
+    const bd = batchDelay?.enabled && batchDelay.everyMin > 0 && batchDelay.pauseMin > 0 ? batchDelay : null
+    const batchSize = bd ? randDelaySec(bd.everyMin, bd.everyMax) : CAMPAIGN_BATCH_SIZE
+    const batchPauseMin = bd ? bd.pauseMin : CAMPAIGN_BATCH_PAUSE_MIN
+    const batchPauseMax = bd ? Math.max(bd.pauseMax, bd.pauseMin) : CAMPAIGN_BATCH_PAUSE_MAX
 
-      if (consecutiveFailures >= CAMPAIGN_MAX_CONSECUTIVE_FAILURES) {
-        campaignState.stopped = true
-        _broadcast('wuzapi_campaign', {
-          type: 'circuit_break',
-          reason: `⚠️ ${consecutiveFailures} envios seguidos falharam — a instância provavelmente caiu (pode pedir novo QR). Campanha parada automaticamente antes de mandar o resto da lista pro vazio.`,
-        })
-        break
+    campaignState.results = []
+    campaignState.paused = false
+    campaignState.stopped = false
+    campaignState.running = true
+    campaignState.current = data
+    const startedAt = Date.now()
+    campaignState.startedAt = startedAt
+    let success = 0, failed = 0
+    let consecutiveFailures = 0
+    let batchCount = 0
+    let rrIndex = 0
+
+    _broadcast('wuzapi_campaign', { type: 'started', instances: instanceNames, total: contacts.length })
+
+    // Aquecimento: o primeiro envio também espera um delay aleatório (mesma
+    // faixa configurada pra entre contatos) em vez de sair na hora que o
+    // usuário clica "Iniciar" — abrir a campanha com uma mensagem instantânea
+    // é o padrão mais fácil de ser flagrado como automação; esperar antes do
+    // primeiro envio dá ao início da campanha a mesma cara "humana" do resto.
+    const warmup = randDelaySec(delayMin, delayMax)
+    _broadcast('wuzapi_campaign', { type: 'waiting', delay: warmup, next: 1 })
+    await sleep(warmup * 1000)
+
+    for (let i = 0; i < contacts.length; i++) {
+      if (campaignState.stopped) break
+      while (campaignState.paused) await sleep(500)
+
+      const contact = contacts[i]
+
+      if (campaignState.sentNumbers.has(contact.number)) {
+        _broadcast('wuzapi_campaign', { type: 'skipped', number: contact.number, current: i + 1, total: contacts.length })
+        continue
+      }
+
+      const result = { index: i, number: contact.number, name: contact.name || contact.number, status: 'sending' }
+      campaignState.results.push(result)
+      _broadcast('wuzapi_campaign', { type: 'progress', contact: result, success, failed, total: contacts.length, current: i + 1 })
+
+      try {
+        const instanceName = instanceNames[rrIndex % instanceNames.length]
+        rrIndex++
+        // Spin roda em cima do template (placeholders ainda intactos) — só
+        // depois disso os {{vars}} são resolvidos pro contato da vez.
+        const templateForContact = spinWithAI
+          ? { ...payload, text: await spinOpeningWithAI(payload.text) }
+          : payload
+        const resolved = resolvePayload(templateForContact, contact, firstNameOnly)
+        const sent = await sendButtons(instanceName, contact.number, resolved)
+        result.status = 'success'
+        result.via = instanceName
+        result.sentAt = Date.now()
+        if (sent?.messageId) result.messageId = sent.messageId
+        success++
+        batchCount++
+        consecutiveFailures = 0
+        campaignState.sentNumbers.add(contact.number)
+        _broadcast('wuzapi_campaign', { type: 'result', contact: result, success, failed })
+        broadcastOutboundEcho(instanceName, contact.number, resolved, sent?.messageId)
+      } catch (e) {
+        result.status = 'failed'
+        result.error = e?.response?.data?.error || e.message || 'Erro desconhecido'
+        failed++
+        consecutiveFailures++
+        _broadcast('wuzapi_campaign', { type: 'result', contact: result, success, failed })
+
+        if (consecutiveFailures >= CAMPAIGN_MAX_CONSECUTIVE_FAILURES) {
+          campaignState.stopped = true
+          _broadcast('wuzapi_campaign', {
+            type: 'circuit_break',
+            // Mostra o erro real da última falha (ex.: número inválido) em vez
+            // de só cravar "a instância caiu" — esse texto genérico escondia
+            // casos como número mal formatado, que não tem nada a ver com a
+            // sessão do wuzapi ter caído de verdade.
+            reason: `⚠️ ${consecutiveFailures} envios seguidos falharam (último erro: "${result.error}") — pode ser a instância que caiu (pede novo QR) ou algo errado nos dados enviados (ex.: número sem DDI). Campanha parada automaticamente antes de mandar o resto da lista pro vazio.`,
+          })
+          break
+        }
+      }
+
+      if (i < contacts.length - 1 && !campaignState.stopped) {
+        // Pausa longa a cada N envios bem-sucedidos — quebra o padrão de
+        // "disparo contínuo" que sozinho o delay curto entre contatos não cobre.
+        if (batchCount >= batchSize) {
+          const pause = Math.floor(Math.random() * (batchPauseMax - batchPauseMin + 1)) + batchPauseMin
+          _broadcast('wuzapi_campaign', { type: 'batch_pause', seconds: pause, batchCount })
+          await sleep(pause * 1000)
+          batchCount = 0
+        }
+        const delay = randDelaySec(delayMin, delayMax)
+        _broadcast('wuzapi_campaign', { type: 'waiting', delay, next: i + 2 })
+        await sleep(delay * 1000)
       }
     }
 
-    if (i < contacts.length - 1 && !campaignState.stopped) {
-      // Pausa longa a cada N envios bem-sucedidos — quebra o padrão de
-      // "disparo contínuo" que sozinho o delay curto entre contatos não cobre.
-      if (batchCount >= batchSize) {
-        const pause = Math.floor(Math.random() * (batchPauseMax - batchPauseMin + 1)) + batchPauseMin
-        _broadcast('wuzapi_campaign', { type: 'batch_pause', seconds: pause, batchCount })
-        await sleep(pause * 1000)
-        batchCount = 0
-      }
-      const delay = Math.floor(Math.random() * (Math.max(delayMax, delayMin) - delayMin + 1)) + delayMin
-      _broadcast('wuzapi_campaign', { type: 'waiting', delay, next: i + 2 })
-      await sleep(delay * 1000)
-    }
+    _broadcast('wuzapi_campaign', { type: 'done', success, failed, total: contacts.length, results: campaignState.results })
+
+    saveHistoryRecord({
+      id: startedAt.toString(),
+      name: name || 'Campanha Wuzapi',
+      messageType: 'buttons',
+      payload,
+      startedAt,
+      endedAt: Date.now(),
+      total: contacts.length,
+      success,
+      failed,
+      skipped: contacts.length - success - failed,
+      results: campaignState.results.map(r => ({ ...r })),
+    })
+
+    campaignState.running = false
+    campaignState.current = null
+    campaignState.startedAt = null
+  } catch (e) {
+    // Falhou antes/durante o setup (instância indisponível, conflito com
+    // maturador, etc.) — sem isso o erro só aparecia no console do servidor:
+    // a rota de start já tinha respondido "ok" pro front antes de chamar essa
+    // função (ver /api/wuzapi-campaign/start em server.js), então sem um
+    // broadcast aqui o usuário via a campanha "sumir" sem nenhuma explicação.
+    _broadcast('wuzapi_campaign', {
+      type: 'circuit_break',
+      reason: `⚠️ Não foi possível iniciar o disparo: ${e.message}`,
+    })
+    campaignState.running = false
+    campaignState.current = null
+    campaignState.startedAt = null
   }
-
-  _broadcast('wuzapi_campaign', { type: 'done', success, failed, total: contacts.length, results: campaignState.results })
-
-  saveHistoryRecord({
-    id: startedAt.toString(),
-    name: name || 'Campanha Wuzapi',
-    messageType: 'buttons',
-    payload,
-    startedAt,
-    endedAt: Date.now(),
-    total: contacts.length,
-    success,
-    failed,
-    skipped: contacts.length - success - failed,
-    results: campaignState.results.map(r => ({ ...r })),
-  })
-
-  campaignState.running = false
-  campaignState.current = null
 }
 
 // ── Maturador (BETA) ──────────────────────────────────────────────────────────

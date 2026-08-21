@@ -9,6 +9,9 @@ frontend/dist/
 # WhatsApp sessions (dados sensíveis)
 backend/.wwa_sessions/
 
+# SMS sessions (Google Messages Web — dados sensíveis)
+backend/.sms_sessions/
+
 # Mídias recebidas (arquivos grandes)
 backend/data/media/
 
