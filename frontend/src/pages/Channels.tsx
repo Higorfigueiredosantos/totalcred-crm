@@ -588,11 +588,30 @@ export default function Channels() {
     } catch (_) {}
   }
 
+  // Sem isso a Meta nunca chama nosso /api/webhook pra esse número — ela só
+  // dispara eventos pros apps explicitamente inscritos na WABA (subscribed_apps),
+  // que é uma configuração separada do webhook do App em si. Token colado de
+  // outro app (ex: gerado num Business Manager diferente) inscreve aquele app,
+  // não o nosso — mensagens continuam não chegando até trocar o token.
+  async function subscribeWebhook(ch: Channel) {
+    if (!ch.wabaId || !ch.accessToken) return
+    try {
+      const res = await fetch(
+        `https://graph.facebook.com/v25.0/${ch.wabaId}/subscribed_apps`,
+        { method: 'POST', headers: { 'Authorization': `Bearer ${ch.accessToken}` } }
+      )
+      const data = await res.json()
+      if (!data.success) console.warn('[Channels] Falha ao inscrever app nos webhooks da WABA:', data)
+    } catch (e) {
+      console.warn('[Channels] Erro ao inscrever app nos webhooks da WABA:', e)
+    }
+  }
+
   function handleSave(ch: Channel) {
     if (channels.find(c => c.id === ch.id)) updateChannel(ch.id, ch)
     else addChannel(ch)
     setModal({ open: false })
-    if (ch.wabaId && ch.accessToken) fetchQuality(ch)
+    if (ch.wabaId && ch.accessToken) { fetchQuality(ch); subscribeWebhook(ch) }
   }
 
   function handleImport(newChannels: Channel[]) {
@@ -613,6 +632,7 @@ export default function Channels() {
       if (data.error) throw new Error(data.error.message)
       updateChannel(ch.id, { status: 'connected', phoneNumber: data.display_phone_number })
       fetchQuality(ch)
+      subscribeWebhook(ch)
     } catch (e: any) {
       updateChannel(ch.id, { status: 'error' })
       alert(`Erro ao verificar: ${e.message}`)
