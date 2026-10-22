@@ -356,36 +356,22 @@ function cleanPhone(number) {
   return normalizeBrazilPhone(String(number || '').replace(/\D/g, ''))
 }
 
-// Número cru deixa o wuzapi decidir entre PN e LID usando o mapeamento que
-// ele já tem em cache — é exatamente esse caminho "ambíguo" que dispara o bug
-// conhecido do whatsmeow (tulir/whatsmeow#1041, sem correção definitiva até
-// hoje) "no LID found for X@s.whatsapp.net from server" pra contatos sem
-// mapeamento ainda cacheado. Forçar o JID completo (@s.whatsapp.net) manda
-// pelo caminho explícito documentado na API do wuzapi, evitando essa resolução
-// automática problemática.
-function toPhoneJid(phone) {
-  return `${phone}@s.whatsapp.net`
-}
-
-// Alguns relatos do mesmo bug (comentários no issue acima, mesmo já "fechado"
-// sem fix) descrevem a falha como uma corrida pontual — a sessão ainda não
-// tinha sincronizado o contato na hora exata do envio. Uma retentativa única,
-// com uma pequena espera, cobre esse caso sem mascarar uma falha persistente
-// (depois da 2ª tentativa, o erro sobe normal pro circuito de segurança da
-// campanha).
-function isNoLidError(e) {
-  const msg = e?.response?.data?.error || e?.message || ''
-  return /no LID found/i.test(msg)
-}
-
-async function postWithLidRetry(client, urlPath, body) {
+// "no LID found for X@s.whatsapp.net from server" não é sobre PN vs LID
+// cacheado — é porque o contato às vezes SÓ existe no WhatsApp como LID (sem
+// JID de telefone nenhum, comum em contas no modo de privacidade mais novo).
+// Forçar "@s.whatsapp.net" nesses casos falha sempre, porque esse endereço
+// nunca existiu pra esse contato. Confirmado contra a API do wuzapi: /user/check
+// pra um número que dava esse erro devolveu IsInWhatsapp:true com
+// JID:"...@lid" — ou seja, o endereço de verdade é o LID, não o telefone.
+// Resolve o JID real antes de mandar em vez de adivinhar o formato.
+async function resolveWhatsappJid(client, phone) {
   try {
-    return await client.post(urlPath, body)
-  } catch (e) {
-    if (!isNoLidError(e)) throw e
-    await sleep(1500)
-    return client.post(urlPath, body)
-  }
+    const { data } = await client.post('/user/check', { Phone: [phone] })
+    const user = (data?.data?.Users || data?.Users || [])[0]
+    if (user?.IsInWhatsapp === false) return { jid: null, notOnWhatsapp: true }
+    if (user?.JID) return { jid: user.JID, notOnWhatsapp: false }
+  } catch (e) { /* endpoint indisponível — cai no fallback de telefone puro */ }
+  return { jid: `${phone}@s.whatsapp.net`, notOnWhatsapp: false }
 }
 
 // Texto simples — usado pra responder pelo Mensagens (equivalente ao envio
@@ -395,9 +381,13 @@ async function sendText(instanceName, to, text) {
   if (!entry) throw new Error('Instância não encontrada')
   const phone = cleanPhone(to)
   if (phone.length < 10) throw new Error('Número inválido')
+  const client = userClient(entry.token)
 
-  const { data } = await postWithLidRetry(userClient(entry.token), '/chat/send/text', {
-    Phone: toPhoneJid(phone),
+  const { jid, notOnWhatsapp } = await resolveWhatsappJid(client, phone)
+  if (notOnWhatsapp) throw new Error('Esse número não tem WhatsApp')
+
+  const { data } = await client.post('/chat/send/text', {
+    Phone: jid,
     Body: text || '',
   })
   if (!data) throw new Error('Falha ao enviar')
@@ -413,6 +403,7 @@ async function sendButtons(instanceName, to, payload = {}) {
   if (!entry) throw new Error('Instância não encontrada')
   const phone = cleanPhone(to)
   if (phone.length < 10) throw new Error('Número inválido')
+  const client = userClient(entry.token)
 
   const buttons = (payload.buttons || []).filter(b => b?.text?.trim()).slice(0, 3).map((b, idx) => {
     if (b.type === 'url' && b.url?.trim()) {
@@ -422,8 +413,11 @@ async function sendButtons(instanceName, to, payload = {}) {
   })
   if (buttons.length === 0) throw new Error('Adicione ao menos um botão')
 
-  const { data } = await postWithLidRetry(userClient(entry.token), '/chat/send/buttons', {
-    Phone: toPhoneJid(phone),
+  const { jid, notOnWhatsapp } = await resolveWhatsappJid(client, phone)
+  if (notOnWhatsapp) throw new Error('Esse número não tem WhatsApp')
+
+  const { data } = await client.post('/chat/send/buttons', {
+    Phone: jid,
     Body: payload.text || '',
     Footer: payload.footer || undefined,
     Image: payload.image || undefined,
@@ -440,9 +434,13 @@ async function sendImage(instanceName, to, imageDataUri, caption) {
   if (!entry) throw new Error('Instância não encontrada')
   const phone = cleanPhone(to)
   if (phone.length < 10) throw new Error('Número inválido')
+  const client = userClient(entry.token)
 
-  const { data } = await postWithLidRetry(userClient(entry.token), '/chat/send/image', {
-    Phone: toPhoneJid(phone),
+  const { jid, notOnWhatsapp } = await resolveWhatsappJid(client, phone)
+  if (notOnWhatsapp) throw new Error('Esse número não tem WhatsApp')
+
+  const { data } = await client.post('/chat/send/image', {
+    Phone: jid,
     Image: imageDataUri,
     Caption: caption || undefined,
   })
@@ -455,9 +453,13 @@ async function sendAudio(instanceName, to, audioDataUri) {
   if (!entry) throw new Error('Instância não encontrada')
   const phone = cleanPhone(to)
   if (phone.length < 10) throw new Error('Número inválido')
+  const client = userClient(entry.token)
 
-  const { data } = await postWithLidRetry(userClient(entry.token), '/chat/send/audio', {
-    Phone: toPhoneJid(phone),
+  const { jid, notOnWhatsapp } = await resolveWhatsappJid(client, phone)
+  if (notOnWhatsapp) throw new Error('Esse número não tem WhatsApp')
+
+  const { data } = await client.post('/chat/send/audio', {
+    Phone: jid,
     Audio: audioDataUri,
   })
   if (!data) throw new Error('Falha ao enviar')
