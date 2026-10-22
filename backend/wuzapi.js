@@ -356,6 +356,38 @@ function cleanPhone(number) {
   return normalizeBrazilPhone(String(number || '').replace(/\D/g, ''))
 }
 
+// Número cru deixa o wuzapi decidir entre PN e LID usando o mapeamento que
+// ele já tem em cache — é exatamente esse caminho "ambíguo" que dispara o bug
+// conhecido do whatsmeow (tulir/whatsmeow#1041, sem correção definitiva até
+// hoje) "no LID found for X@s.whatsapp.net from server" pra contatos sem
+// mapeamento ainda cacheado. Forçar o JID completo (@s.whatsapp.net) manda
+// pelo caminho explícito documentado na API do wuzapi, evitando essa resolução
+// automática problemática.
+function toPhoneJid(phone) {
+  return `${phone}@s.whatsapp.net`
+}
+
+// Alguns relatos do mesmo bug (comentários no issue acima, mesmo já "fechado"
+// sem fix) descrevem a falha como uma corrida pontual — a sessão ainda não
+// tinha sincronizado o contato na hora exata do envio. Uma retentativa única,
+// com uma pequena espera, cobre esse caso sem mascarar uma falha persistente
+// (depois da 2ª tentativa, o erro sobe normal pro circuito de segurança da
+// campanha).
+function isNoLidError(e) {
+  const msg = e?.response?.data?.error || e?.message || ''
+  return /no LID found/i.test(msg)
+}
+
+async function postWithLidRetry(client, urlPath, body) {
+  try {
+    return await client.post(urlPath, body)
+  } catch (e) {
+    if (!isNoLidError(e)) throw e
+    await sleep(1500)
+    return client.post(urlPath, body)
+  }
+}
+
 // Texto simples — usado pra responder pelo Mensagens (equivalente ao envio
 // normal de um chip comum).
 async function sendText(instanceName, to, text) {
@@ -364,8 +396,8 @@ async function sendText(instanceName, to, text) {
   const phone = cleanPhone(to)
   if (phone.length < 10) throw new Error('Número inválido')
 
-  const { data } = await userClient(entry.token).post('/chat/send/text', {
-    Phone: phone,
+  const { data } = await postWithLidRetry(userClient(entry.token), '/chat/send/text', {
+    Phone: toPhoneJid(phone),
     Body: text || '',
   })
   if (!data) throw new Error('Falha ao enviar')
@@ -390,8 +422,8 @@ async function sendButtons(instanceName, to, payload = {}) {
   })
   if (buttons.length === 0) throw new Error('Adicione ao menos um botão')
 
-  const { data } = await userClient(entry.token).post('/chat/send/buttons', {
-    Phone: phone,
+  const { data } = await postWithLidRetry(userClient(entry.token), '/chat/send/buttons', {
+    Phone: toPhoneJid(phone),
     Body: payload.text || '',
     Footer: payload.footer || undefined,
     Image: payload.image || undefined,
@@ -409,8 +441,8 @@ async function sendImage(instanceName, to, imageDataUri, caption) {
   const phone = cleanPhone(to)
   if (phone.length < 10) throw new Error('Número inválido')
 
-  const { data } = await userClient(entry.token).post('/chat/send/image', {
-    Phone: phone,
+  const { data } = await postWithLidRetry(userClient(entry.token), '/chat/send/image', {
+    Phone: toPhoneJid(phone),
     Image: imageDataUri,
     Caption: caption || undefined,
   })
@@ -424,8 +456,8 @@ async function sendAudio(instanceName, to, audioDataUri) {
   const phone = cleanPhone(to)
   if (phone.length < 10) throw new Error('Número inválido')
 
-  const { data } = await userClient(entry.token).post('/chat/send/audio', {
-    Phone: phone,
+  const { data } = await postWithLidRetry(userClient(entry.token), '/chat/send/audio', {
+    Phone: toPhoneJid(phone),
     Audio: audioDataUri,
   })
   if (!data) throw new Error('Falha ao enviar')
