@@ -970,6 +970,62 @@ function findChromePath() {
   return null
 }
 
+// ─── Versão do WhatsApp Web usada pelos Chips ─────────────────────────────
+// Desde 23/11/2026 o web.whatsapp.com passou a servir, pra quem não está
+// logado, uma página "deslogada" enxuta (<html id="whatsapp-web-logged-out">,
+// ~185 KB) que NÃO carrega o app de verdade — window.require('WAWebSocketModel')
+// fica null e o whatsapp-web.js quebra com "Cannot read properties of null
+// (reading 'Socket')" ao iniciar qualquer chip. Em vez de deixar o Chrome
+// carregar a página ao vivo, servimos o HTML do build mais novo que ainda é o
+// app completo (<html id="whatsapp-web">), tirado do registro público
+// wppconnect-team/wa-version (o mesmo que o whatsapp-web.js documenta pra
+// webVersionCache remoto). Quando o WhatsApp voltar a servir o app completo,
+// o build mais novo do registro volta a ser escolhido sozinho.
+// WWEBJS_WEB_VERSION no .env força um build específico.
+const WA_VERSION_REGISTRY = 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main'
+const WA_WEB_VERSION_TTL_MS = 3 * 60 * 60 * 1000
+let _waWebVersionCache = null // { version, at }
+let _waWebVersionPending = null
+
+async function isFullAppBuild(version) {
+  const { data } = await axios.get(`${WA_VERSION_REGISTRY}/html/${version}.html`, { timeout: 20000, responseType: 'text' })
+  const html = String(data || '')
+  const rootId = (html.match(/<html[^>]*\sid="([^"]+)"/) || [])[1]
+  return rootId === 'whatsapp-web' && html.length > 500000
+}
+
+async function resolveWaWebVersion() {
+  if (process.env.WWEBJS_WEB_VERSION) return process.env.WWEBJS_WEB_VERSION
+  if (_waWebVersionCache && Date.now() - _waWebVersionCache.at < WA_WEB_VERSION_TTL_MS) return _waWebVersionCache.version
+  if (_waWebVersionPending) return _waWebVersionPending
+  _waWebVersionPending = (async () => {
+    try {
+      const { data } = await axios.get(`${WA_VERSION_REGISTRY}/versions.json`, { timeout: 20000 })
+      const now = Date.now()
+      const candidates = (data?.versions || [])
+        .filter(v => v?.version && !v.beta && (!v.expire || Date.parse(v.expire) > now))
+        .sort((a, b) => Date.parse(b.released) - Date.parse(a.released))
+        .slice(0, 25)
+      for (const v of candidates) {
+        try {
+          if (await isFullAppBuild(v.version)) {
+            _waWebVersionCache = { version: v.version, at: Date.now() }
+            console.log(`[Chips] WhatsApp Web fixado no build ${v.version} (último app completo do registro)`)
+            return v.version
+          }
+        } catch (_) { /* tenta o próximo */ }
+      }
+      console.warn('[Chips] Nenhum build "app completo" encontrado no registro — usando página ao vivo')
+    } catch (e) {
+      console.warn('[Chips] Falha ao consultar registro de versões do WhatsApp Web:', e.message)
+    } finally {
+      _waWebVersionPending = null
+    }
+    return _waWebVersionCache?.version || null // último bom conhecido, mesmo vencido
+  })()
+  return _waWebVersionPending
+}
+
 async function initChip(chipId) {
   let Client, LocalAuth
   try {
@@ -1037,9 +1093,14 @@ async function initChip(chipId) {
   }
 
   try {
+    const webVersion = await resolveWaWebVersion()
     const client = new Client({
       authStrategy: new LocalAuth({ clientId: chipId, dataPath: path.join(__dirname, '.wwa_sessions') }),
       puppeteer: puppeteerArgs,
+      ...(webVersion ? {
+        webVersion,
+        webVersionCache: { type: 'remote', remotePath: `${WA_VERSION_REGISTRY}/html/{version}.html`, strict: false },
+      } : {}),
     })
 
     chipSessions[chipId].client = client
