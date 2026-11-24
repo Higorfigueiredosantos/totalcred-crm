@@ -61,18 +61,54 @@ function getLLMConfig() {
   if (!apiKey) return null
   return {
     apiKey,
+    isGroq: !!groq,
     baseURL: groq ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1',
-    model: process.env.AI_SPIN_MODEL || (groq ? 'llama-3.3-70b-versatile' : 'gpt-4o-mini'),
+    model: process.env.AI_SPIN_MODEL || (groq ? null : 'gpt-4o-mini'),
   }
+}
+
+// O catálogo do Groq muda (modelos são descontinuados e nem toda chave tem
+// acesso a todos) — em vez de cravar um nome, pergunta pro /models quais a
+// chave enxerga e pega o primeiro da lista de preferência. Cacheado; é
+// refeito se o modelo escolhido sumir.
+const GROQ_PREFERRED = [
+  'openai/gpt-oss-120b', 'llama-3.3-70b-versatile', 'openai/gpt-oss-20b',
+  'qwen/qwen3.8-27b', 'qwen/qwen3-32b', 'llama-3.1-8b-instant',
+]
+const NON_CHAT_RE = /whisper|guard|orpheus|tts|allam|embed/i
+let _groqModelCache = null
+
+async function resolveModel(cfg) {
+  if (cfg.model) return cfg.model
+  if (_groqModelCache) return _groqModelCache
+  const { data } = await axios.get(`${cfg.baseURL}/models`, { headers: { Authorization: `Bearer ${cfg.apiKey}` }, timeout: 15000 })
+  const ids = (data?.data || []).map(m => m.id)
+  _groqModelCache = GROQ_PREFERRED.find(id => ids.includes(id)) || ids.find(id => !NON_CHAT_RE.test(id))
+  if (!_groqModelCache) throw new Error('Nenhum modelo de chat disponível pra essa GROQ_API_KEY')
+  console.log(`[IA] Modelo Groq usado pra variar mensagens: ${_groqModelCache}`)
+  return _groqModelCache
 }
 
 async function callLLM(messages, { temperature = 0.9, maxTokens = 600 } = {}) {
   const cfg = getLLMConfig()
   if (!cfg) throw new Error('Nenhuma GROQ_API_KEY/OPENAI_API_KEY configurada')
-  const resp = await axios.post(`${cfg.baseURL}/chat/completions`, {
-    model: cfg.model, max_tokens: maxTokens, temperature, messages,
-  }, { headers: { Authorization: `Bearer ${cfg.apiKey}`, 'Content-Type': 'application/json' }, timeout: 20000 })
-  return resp.data?.choices?.[0]?.message?.content?.trim() || ''
+  const model = await resolveModel(cfg)
+  // Modelos de raciocínio (gpt-oss/qwen3) gastam tokens "pensando" antes da
+  // resposta — esforço baixo + teto maior pra não cortar a mensagem final.
+  const reasoning = /gpt-oss|qwen3/i.test(model)
+  const body = { model, max_tokens: reasoning ? maxTokens + 1500 : maxTokens, temperature, messages }
+  if (/gpt-oss/i.test(model)) body.reasoning_effort = 'low'
+  if (cfg.isGroq && /qwen3/i.test(model)) body.reasoning_format = 'hidden'
+  try {
+    const resp = await axios.post(`${cfg.baseURL}/chat/completions`, body, {
+      headers: { Authorization: `Bearer ${cfg.apiKey}`, 'Content-Type': 'application/json' }, timeout: 30000,
+    })
+    return resp.data?.choices?.[0]?.message?.content?.trim() || ''
+  } catch (e) {
+    const msg = e?.response?.data?.error?.message || ''
+    if (/does not exist|decommissioned|not have access|model_not_found/i.test(msg)) _groqModelCache = null
+    throw e
+  }
 }
 
 // Randomiza só a abertura do template (via Groq/OpenAI) pra reduzir a
@@ -136,11 +172,11 @@ function canonicalizePlaceholders(original, text) {
 }
 
 function cleanLLMOutput(out) {
-  let s = String(out || '').trim()
+  let s = String(out || '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim()
   s = s.replace(/^<<<\s*/, '').replace(/\s*>>>$/, '').trim()
   s = s.replace(/^(mensagem( reescrita| final)?|vers[aã]o( reescrita)?|resposta)\s*:\s*/i, '').trim()
   if (s.length > 1 && /^["“'].*["”']$/s.test(s)) s = s.slice(1, -1).trim()
-  return s
+  return s.replace(/[ \t]+$/gm, '')
 }
 
 const normForCompare = s => String(s).toLowerCase().replace(/\s+/g, ' ').trim()
@@ -161,6 +197,8 @@ function validateVariant(original, variant) {
   for (const n of strip(original).replace(URL_RE, ' ').match(NUMBER_RE) || []) {
     if (!vNums.includes(n)) return { ok: false, reason: `número/valor alterado (${n})` }
   }
+  const timeGreeting = /\b(bom dia|boa tarde|boa noite)\b/i
+  if (timeGreeting.test(variant) && !timeGreeting.test(original)) return { ok: false, reason: 'cumprimento dependente de horário' }
   const lo = original.length, lv = variant.length
   if (lv < lo * 0.5 || lv > lo * 1.8 + 40) return { ok: false, reason: 'tamanho muito diferente do original' }
   return { ok: true }
@@ -177,7 +215,8 @@ function buildRewriteMessages(template, avoid) {
     '3. Mantenha todos os números, valores, datas, porcentagens e links exatamente iguais ao original.',
     '4. Não adicione informação, promessa ou oferta que não exista no original, e não remova nenhuma informação.',
     '5. Mesmo idioma, tamanho parecido e estrutura de parágrafos parecida. Mantenha emojis só se o original tiver.',
-    '6. Responda SOMENTE com a mensagem final, sem aspas, sem título e sem explicações.',
+    '6. Não use cumprimentos que dependem do horário ("bom dia", "boa tarde", "boa noite") a menos que o original use — a mensagem pode ser enviada a qualquer hora.',
+    '7. Responda SOMENTE com a mensagem final, sem aspas, sem título e sem explicações.',
   ].join('\n')
   let user = `Mensagem original:\n<<<\n${template}\n>>>`
   user += keys.length
