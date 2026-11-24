@@ -1061,6 +1061,15 @@ async function initChip(chipId) {
     console.log(`[Chip ${chipId}] Locks do Chrome removidos`)
   } catch (_) {}
 
+  // Service Worker salvo no perfil é só cache de assets (o login fica no
+  // IndexedDB/Local Storage). Um SW registrado pela página "deslogada" nova
+  // do WhatsApp (ver resolveWaWebVersion) intercepta a navegação pra
+  // web.whatsapp.com e nunca responde — o chip ficava preso até o timeout de
+  // 90s ("Navigating frame was detached"). Apagar força um SW limpo.
+  try {
+    fs.rmSync(path.join(__dirname, '.wwa_sessions', `session-${chipId}`, 'Default', 'Service Worker'), { recursive: true, force: true })
+  } catch (_) {}
+
   const chromePath = findChromePath()
   const puppeteerArgs = {
     headless: true,
