@@ -13,7 +13,9 @@ export interface WuzapiButton {
   url?: string
 }
 
-export interface WuzapiPayload { text: string; footer?: string; image?: string; buttons: WuzapiButton[] }
+// images: várias imagens pra sortear uma por envio. image fica como a 1ª
+// (compatibilidade + thumbnail no histórico, que só guarda image/imageCount).
+export interface WuzapiPayload { text: string; footer?: string; image?: string; images?: string[]; imageCount?: number; buttons: WuzapiButton[] }
 
 export interface WuzapiBatchDelay {
   enabled: boolean

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import {
   FlaskConical, Upload, X, AlertCircle, Users, Loader2,
-  FileText, Send, Plus, Trash2, RefreshCw, CheckCircle2, Image as ImageIcon, Link2, Zap, Eye,
+  FileText, Send, Plus, Trash2, RefreshCw, CheckCircle2, Image as ImageIcon, Link2, Zap, Eye, Shuffle,
 } from 'lucide-react'
 import { useWuzapiInstances } from '../../hooks/useWuzapiInstances'
 import type { CsvContact } from '../../types'
@@ -18,6 +18,8 @@ const MESSAGE_TYPES: { value: WuzapiMessageType; label: string; hint: string }[]
   { value: 'buttons', label: 'Botões', hint: 'Até 3 botões — cada um normal ou de link' },
   { value: 'imageButtons', label: 'Imagem + Botões', hint: 'Imagem com legenda e até 3 botões' },
 ]
+
+const MAX_IMAGES = 10
 
 let uidCounter = 0
 const uid = () => `id_${Date.now()}_${uidCounter++}`
@@ -54,7 +56,7 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
   const [messageType, setMessageType] = useState<WuzapiMessageType>('buttons')
   const [text, setText] = useState('')
   const [footer, setFooter] = useState('')
-  const [imageB64, setImageB64] = useState('')
+  const [images, setImages] = useState<string[]>([])
   const [buttons, setButtons] = useState<WuzapiButton[]>([{ id: 'opt1', text: '', type: 'reply' }])
 
   const hasImage = messageType === 'imageButtons'
@@ -75,16 +77,42 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
   const [batchDelay, setBatchDelay] = useState<WuzapiBatchDelay>({ enabled: false, everyMin: 10, everyMax: 20, pauseMin: 90, pauseMax: 240 })
   const [spinWithAI, setSpinWithAI] = useState(false)
   const [firstNameOnly, setFirstNameOnly] = useState(false)
+  const [spinPreview, setSpinPreview] = useState<{ loading: boolean; variants: string[]; error?: string }>({ loading: false, variants: [] })
 
   function getActiveContacts(): CsvContact[] {
     return contactsTab === 'csv' ? csvContacts : parseContacts(contactsText)
   }
 
-  function handleImage(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0]; if (!file) return
-    const reader = new FileReader()
-    reader.onload = ev => setImageB64(ev.target?.result as string)
-    reader.readAsDataURL(file)
+  // Várias imagens: cada envio sorteia uma (no backend, sem repetir até
+  // passar por todas). Aceita seleção múltipla e ir adicionando aos poucos.
+  function handleImages(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files || []).filter(f => f.type.startsWith('image/'))
+    e.target.value = ''
+    const room = MAX_IMAGES - images.length
+    if (room <= 0) return alert(`Máximo de ${MAX_IMAGES} imagens.`)
+    if (files.length > room) alert(`Só cabem mais ${room} imagem(ns) — o limite é ${MAX_IMAGES}.`)
+    files.slice(0, room).forEach(file => {
+      const reader = new FileReader()
+      reader.onload = ev => {
+        const data = ev.target?.result as string
+        if (data) setImages(prev => prev.length >= MAX_IMAGES || prev.includes(data) ? prev : [...prev, data])
+      }
+      reader.readAsDataURL(file)
+    })
+  }
+
+  async function handleSpinPreview() {
+    if (!text.trim()) return alert('Escreva o texto da mensagem no passo 2 primeiro.')
+    setSpinPreview({ loading: true, variants: [] })
+    try {
+      const r = await fetch('/api/wuzapi-campaign/spin-preview', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, count: 3 }),
+      })
+      const d = await r.json()
+      setSpinPreview({ loading: false, variants: d.variants || [], error: d.error })
+    } catch (e: any) {
+      setSpinPreview({ loading: false, variants: [], error: e?.message || 'Falha ao gerar prévia' })
+    }
   }
 
   function updateButton(id: string, data: Partial<WuzapiButton>) {
@@ -144,7 +172,7 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
 
   function messageValid(): string | null {
     if (!text.trim()) return 'Preencha o texto da mensagem.'
-    if (hasImage && !imageB64) return 'Adicione uma imagem.'
+    if (hasImage && images.length === 0) return 'Adicione ao menos uma imagem.'
     if (activeButtons.length === 0) return 'Adicione ao menos um botão.'
     const badLink = activeButtons.find(b => b.type === 'url' && !b.url?.trim())
     if (badLink) return `Preencha a URL do botão "${badLink.text}".`
@@ -155,7 +183,8 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
     return {
       text,
       footer: footer || undefined,
-      image: hasImage ? imageB64 : undefined,
+      image: hasImage ? images[0] : undefined,
+      images: hasImage ? images : undefined,
       buttons: activeButtons.map(b => b.type === 'url'
         ? { id: b.id, text: b.text, type: 'url' as const, url: b.url!.trim() }
         : { id: b.id, text: b.text, type: 'reply' as const }),
@@ -313,21 +342,41 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
 
               {hasImage && (
                 <div>
-                  <label className="block text-xs text-gray-400 mb-1.5">Imagem</label>
-                  {imageB64 ? (
-                    <div className="relative inline-block">
-                      <img src={imageB64} alt="preview" className="h-32 rounded-lg border border-gray-700" />
-                      <button onClick={() => setImageB64('')}
-                        className="absolute -top-2 -right-2 bg-red-600 hover:bg-red-500 text-white rounded-full p-1">
-                        <X size={12} />
-                      </button>
-                    </div>
-                  ) : (
+                  <label className="block text-xs text-gray-400 mb-1.5">
+                    Imagens <span className="text-gray-500">({images.length}/{MAX_IMAGES})</span>
+                  </label>
+                  {images.length === 0 ? (
                     <label className="flex items-center justify-center gap-2 border-2 border-dashed border-gray-700 rounded-lg py-6 cursor-pointer hover:border-orange-500 transition-colors">
                       <ImageIcon size={16} className="text-gray-500" />
-                      <span className="text-sm text-gray-400">Selecionar imagem</span>
-                      <input type="file" accept="image/*" className="hidden" onChange={handleImage} />
+                      <span className="text-sm text-gray-400">Selecionar uma ou mais imagens</span>
+                      <input type="file" accept="image/*" multiple className="hidden" onChange={handleImages} />
                     </label>
+                  ) : (
+                    <div className="flex flex-wrap gap-2">
+                      {images.map((img, i) => (
+                        <div key={i} className="relative">
+                          <img src={img} alt={`imagem ${i + 1}`} className="h-20 w-20 object-cover rounded-lg border border-gray-700" />
+                          <button onClick={() => setImages(prev => prev.filter((_, j) => j !== i))}
+                            title="Remover imagem"
+                            className="absolute -top-2 -right-2 bg-red-600 hover:bg-red-500 text-white rounded-full p-1">
+                            <X size={10} />
+                          </button>
+                        </div>
+                      ))}
+                      {images.length < MAX_IMAGES && (
+                        <label title="Adicionar mais imagens"
+                          className="h-20 w-20 flex flex-col items-center justify-center gap-1 border-2 border-dashed border-gray-700 rounded-lg cursor-pointer hover:border-orange-500 transition-colors">
+                          <Plus size={16} className="text-gray-500" />
+                          <span className="text-[10px] text-gray-500">Adicionar</span>
+                          <input type="file" accept="image/*" multiple className="hidden" onChange={handleImages} />
+                        </label>
+                      )}
+                    </div>
+                  )}
+                  {images.length > 1 && (
+                    <p className="text-[11px] text-orange-400/80 mt-1.5 flex items-center gap-1">
+                      <Shuffle size={11} /> Cada envio sorteia uma das {images.length} imagens — todas saem na mesma proporção e nunca a mesma duas vezes seguidas.
+                    </p>
                   )}
                 </div>
               )}
@@ -346,7 +395,7 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
 
               <div>
                 <label className="block text-xs text-gray-400 mb-1.5">{hasImage ? 'Legenda' : 'Texto da mensagem'}</label>
-                <textarea value={text} onChange={e => setText(e.target.value)} rows={hasImage ? 3 : 5}
+                <textarea value={text} onChange={e => { setText(e.target.value); setSpinPreview({ loading: false, variants: [] }) }} rows={hasImage ? 3 : 5}
                   placeholder={"Use {{name}} para nome, {{coluna}} para variáveis do CSV.\nEx: Olá {{name}}, temos uma oferta em {{cidade}}!"}
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-orange-500 resize-none" />
               </div>
@@ -496,17 +545,39 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
               <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer select-none">
                 <input type="checkbox" checked={spinWithAI}
                   onChange={e => setSpinWithAI(e.target.checked)} className="rounded" />
-                <Zap size={11} className="text-yellow-400" /> Randomizar início da mensagem com IA (GROQ_API_KEY ou OPENAI_API_KEY)
+                <Zap size={11} className="text-yellow-400" /> Randomizar disparo com IA — mensagem diferente a cada envio (GROQ_API_KEY ou OPENAI_API_KEY)
               </label>
               {spinWithAI && (
-                <p className="text-[11px] text-gray-500 -mt-2 pl-5">
-                  Muda só as primeiras palavras (cumprimento) a cada envio, pra reduzir a chance de detecção como spam. O resto do texto e as variáveis {'{{...}}'} continuam idênticos.
-                </p>
+                <div className="-mt-2 pl-5 space-y-2">
+                  <p className="text-[11px] text-gray-500">
+                    A IA reescreve o texto a cada envio mantendo o mesmo contexto/oferta, e nunca repete uma versão já enviada.
+                    As variáveis {'{{...}}'}, números, valores e links ficam <span className="text-gray-300">sempre idênticos ao original</span> — toda
+                    versão é conferida antes do envio; se a IA mexer em qualquer um deles, a versão é descartada e é gerada outra
+                    (se nenhuma passar, vai o texto original).
+                  </p>
+                  <button onClick={handleSpinPreview} disabled={spinPreview.loading}
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-yellow-300 text-[11px] rounded-lg disabled:opacity-50">
+                    {spinPreview.loading ? <Loader2 size={11} className="animate-spin" /> : <Shuffle size={11} />} Testar variações
+                  </button>
+                  {spinPreview.error && (
+                    <p className="text-[11px] text-red-400 flex items-center gap-1"><AlertCircle size={11} /> {spinPreview.error}</p>
+                  )}
+                  {spinPreview.variants.length > 0 && (
+                    <div className="space-y-1.5">
+                      {spinPreview.variants.map((v, i) => (
+                        <div key={i} className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                          <p className="text-[10px] text-gray-500 mb-0.5">Variação {i + 1} {previewContact?.name ? `(com ${previewContact.name})` : ''}</p>
+                          <p className="text-xs text-gray-200 whitespace-pre-wrap leading-relaxed">{applyVarsPreview(v, previewContact, firstNameOnly)}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               )}
 
               <div className="bg-gray-800/50 rounded-lg p-3 text-xs text-gray-400 space-y-1">
                 <p className="flex items-center gap-1.5"><FileText size={11} /> {recipientCount} destinatário(s)</p>
-                <p className="flex items-center gap-1.5"><CheckCircle2 size={11} /> Mensagem: {MESSAGE_TYPES.find(m => m.value === messageType)?.label} · {activeButtons.length} botão(ões)</p>
+                <p className="flex items-center gap-1.5"><CheckCircle2 size={11} /> Mensagem: {MESSAGE_TYPES.find(m => m.value === messageType)?.label} · {activeButtons.length} botão(ões){hasImage && images.length > 1 ? ` · ${images.length} imagens em rodízio` : ''}{spinWithAI ? ' · texto variado por IA' : ''}</p>
               </div>
 
               {/* Preview de como a mensagem vai chegar pro cliente */}
@@ -517,10 +588,15 @@ export default function WuzapiCampaignWizardModal({ onClose, onStart, onResetSen
                 <div className="max-w-xs mx-auto">
                   <div className="bg-[#202c33] rounded-xl overflow-hidden shadow-lg">
                     {hasImage && (
-                      <div className="bg-gray-700 h-28 flex items-center justify-center overflow-hidden">
-                        {imageB64
-                          ? <img src={imageB64} alt="header" className="w-full h-full object-cover" />
+                      <div className="relative bg-gray-700 h-28 flex items-center justify-center overflow-hidden">
+                        {images[0]
+                          ? <img src={images[0]} alt="header" className="w-full h-full object-cover" />
                           : <ImageIcon size={20} className="text-gray-500" />}
+                        {images.length > 1 && (
+                          <span className="absolute top-1.5 right-1.5 flex items-center gap-1 bg-black/70 text-white text-[10px] px-1.5 py-0.5 rounded">
+                            <Shuffle size={9} /> 1 de {images.length} (sorteada por envio)
+                          </span>
+                        )}
                       </div>
                     )}
                     <div className="px-3 py-3">

@@ -110,6 +110,11 @@ export function useWuzapiCampaigns() {
       addLog(`🔀 Instâncias em rotação: ${(p.instances as string[]).join(', ')}`)
     }
     if (p.type === 'skipped') addLog(`⏭️ ${p.number} — já enviado anteriormente`)
+    if (p.type === 'spin') {
+      addLog(p.ok
+        ? `🤖 ${p.number} — mensagem variada pela IA (variáveis conferidas)`
+        : `⚠️ ${p.number} — IA não gerou variação válida (${p.reason || 'sem motivo'}), enviando texto original`)
+    }
     if (p.type === 'waiting') { startWait(p.delay); addLog(`⏱️ Aguardando ${p.delay}s`) }
     if (p.type === 'batch_pause') { startWait(p.seconds); addLog(`⏸️ Pausa de segurança (${p.seconds}s) após ${p.batchCount} envios seguidos`) }
     if (p.type === 'circuit_break') {
@@ -158,7 +163,7 @@ export function useWuzapiCampaigns() {
       waiting: 0,
       paused: false,
       fromHistory: false,
-      payload: config.payload,
+      payload: { ...config.payload, images: undefined, imageCount: config.payload.images?.length },
     })
     return { ok: true as const }
   }

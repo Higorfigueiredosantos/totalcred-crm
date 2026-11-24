@@ -9,7 +9,7 @@ const axios = require('axios')
 const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
-const { applyVars, resolvePayload, normalizeBrazilPhone, randDelaySec, spinOpeningWithAI } = require('./campaignVars')
+const { applyVars, resolvePayload, normalizeBrazilPhone, randDelaySec, createTemplateSpinner, createShuffleBag } = require('./campaignVars')
 
 const WUZAPI_URL = process.env.WUZAPI_URL || 'http://wuzapi:8080'
 const WUZAPI_ADMIN_TOKEN = process.env.WUZAPI_ADMIN_TOKEN || ''
@@ -712,8 +712,26 @@ const CAMPAIGN_BATCH_SIZE = 25
 const CAMPAIGN_BATCH_PAUSE_MIN = 90
 const CAMPAIGN_BATCH_PAUSE_MAX = 240
 
+// Lista de imagens da campanha: "images" (novo, várias pra sortear) com
+// fallback pro "image" único de campanhas/clientes antigos.
+function campaignImages(payload) {
+  const list = Array.isArray(payload?.images) && payload.images.length ? payload.images : (payload?.image ? [payload.image] : [])
+  return list.filter(s => typeof s === 'string' && s)
+}
+
+// Versão leve do payload pra histórico/snapshot: guarda só a 1ª imagem
+// (thumbnail) + quantidade, em vez de N base64 de vários MB no JSON.
+function summarizePayload(payload) {
+  if (!payload) return payload
+  const images = campaignImages(payload)
+  const { images: _omit, ...rest } = payload
+  return { ...rest, image: images[0], imageCount: images.length || undefined }
+}
+
 async function runCampaign(data) {
   const { name, payload, instanceNames, contacts, delayMin = 5, delayMax = 15, batchDelay, spinWithAI, firstNameOnly } = data
+  const imageBag = createShuffleBag(campaignImages(payload))
+  const spinner = spinWithAI ? createTemplateSpinner(payload?.text || '') : null
 
   try {
     // Nenhuma dessas instâncias pode estar ocupada num maturador rodando —
@@ -791,10 +809,22 @@ async function runCampaign(data) {
         const instanceName = instanceNames[rrIndex % instanceNames.length]
         rrIndex++
         // Spin roda em cima do template (placeholders ainda intactos) — só
-        // depois disso os {{vars}} são resolvidos pro contato da vez.
-        const templateForContact = spinWithAI
-          ? { ...payload, text: await spinOpeningWithAI(payload.text) }
-          : payload
+        // depois disso os {{vars}} são resolvidos pro contato da vez. Cada
+        // versão gerada já foi validada (mesmas variáveis/números/links do
+        // original) e nunca repete uma versão anterior da campanha.
+        let text = payload.text
+        if (spinner) {
+          const spun = await spinner.next()
+          text = spun.text
+          _broadcast('wuzapi_campaign', spun.ok
+            ? { type: 'spin', ok: true, number: contact.number }
+            : { type: 'spin', ok: false, number: contact.number, reason: spun.reason })
+        }
+        // Imagem sorteada por envio (sem repetir até passar por todas). Não
+        // passa a lista inteira pro resolvePayload — ele percorreria todos os
+        // base64 aplicando regex à toa.
+        const { images: _allImages, ...baseTemplate } = payload
+        const templateForContact = { ...baseTemplate, text, image: imageBag.next() }
         const resolved = resolvePayload(templateForContact, contact, firstNameOnly)
         const sent = await sendButtons(instanceName, contact.number, resolved)
         result.status = 'success'
@@ -849,7 +879,8 @@ async function runCampaign(data) {
       id: startedAt.toString(),
       name: name || 'Campanha Wuzapi',
       messageType: 'buttons',
-      payload,
+      payload: summarizePayload(payload),
+      spinWithAI: !!spinWithAI,
       startedAt,
       endedAt: Date.now(),
       total: contacts.length,
@@ -1555,6 +1586,7 @@ function getMaturadorStatus() {
 
 module.exports = {
   init,
+  summarizePayload,
   listInstances,
   createInstance,
   getInstanceStatus,

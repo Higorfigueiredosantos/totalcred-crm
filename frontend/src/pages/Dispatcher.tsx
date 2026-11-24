@@ -2107,7 +2107,15 @@ export default function Dispatcher() {
                   {item.payload && (item.payload.text || item.payload.image) && (
                     <div className="flex items-start gap-2 bg-gray-800/60 border border-gray-700/60 rounded-lg p-2 mb-2">
                       {item.payload.image && (
-                        <img src={item.payload.image} alt="Imagem enviada" className="w-10 h-10 rounded object-cover shrink-0" />
+                        <div className="relative shrink-0">
+                          <img src={item.payload.image} alt="Imagem enviada" className="w-10 h-10 rounded object-cover" />
+                          {(item.payload.imageCount ?? 1) > 1 && (
+                            <span className="absolute -bottom-1 -right-1 bg-orange-600 text-white text-[9px] font-bold rounded-full px-1 leading-4"
+                              title={`${item.payload.imageCount} imagens sorteadas entre os envios`}>
+                              +{item.payload.imageCount! - 1}
+                            </span>
+                          )}
+                        </div>
                       )}
                       <div className="min-w-0 flex-1">
                         {item.payload.text && (

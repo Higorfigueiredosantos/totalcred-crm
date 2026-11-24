@@ -24,6 +24,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100
 
 const { CallBridge } = require('./callBridge')
 const wuzapi = require('./wuzapi')
+const { createTemplateSpinner } = require('./campaignVars')
 const sms = require('./sms')
 
 const app = express()
@@ -2138,6 +2139,23 @@ app.post('/api/wuzapi-campaign/start', (req, res) => {
   wuzapi.runCampaign(data)
 })
 
+// Prévia das variações da IA no wizard — gera algumas versões com o mesmo
+// spinner/validação usados no disparo real, pra conferir antes de iniciar
+// que o contexto e as {{variáveis}} ficam intactos.
+app.post('/api/wuzapi-campaign/spin-preview', async (req, res) => {
+  const text = String(req.body?.text || '')
+  const count = Math.min(Math.max(Number(req.body?.count) || 3, 1), 5)
+  if (!text.trim()) return res.status(400).json({ error: 'Texto vazio' })
+  const spinner = createTemplateSpinner(text)
+  const variants = []
+  for (let i = 0; i < count; i++) {
+    const r = await spinner.next()
+    if (!r.ok) return res.status(variants.length ? 200 : 502).json({ variants, error: r.reason || 'IA não gerou variação válida' })
+    variants.push(r.text)
+  }
+  res.json({ variants })
+})
+
 app.post('/api/wuzapi-campaign/pause', (_req, res) => {
   wuzapi.campaignState.paused = !wuzapi.campaignState.paused
   broadcast('wuzapi_campaign', { type: 'paused', paused: wuzapi.campaignState.paused })
@@ -2188,7 +2206,7 @@ app.get('/api/wuzapi-campaign/current', (_req, res) => {
   res.json({
     name: cs.current.name,
     instanceNames: cs.current.instanceNames || [],
-    payload: cs.current.payload,
+    payload: wuzapi.summarizePayload(cs.current.payload),
     startedAt: cs.startedAt,
     total: cs.current.contacts?.length || 0,
     results: cs.results,

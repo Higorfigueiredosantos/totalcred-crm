@@ -50,6 +50,31 @@ function normalizeBrazilPhone(digits) {
 
 const randDelaySec = (min, max) => Math.floor(Math.random() * (Math.max(max, min) - min + 1)) + min
 
+// Config do LLM usado pra variar mensagens. O modelo antigo do Groq
+// ("llama3-8b-8192") foi descontinuado — com ele toda chamada falhava e o
+// spin devolvia silenciosamente o texto original (ou seja, "randomizar com
+// IA" mandava a mesma mensagem pra todo mundo). AI_SPIN_MODEL permite trocar
+// o modelo sem mexer no código.
+function getLLMConfig() {
+  const groq = process.env.GROQ_API_KEY
+  const apiKey = groq || process.env.OPENAI_API_KEY
+  if (!apiKey) return null
+  return {
+    apiKey,
+    baseURL: groq ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1',
+    model: process.env.AI_SPIN_MODEL || (groq ? 'llama-3.3-70b-versatile' : 'gpt-4o-mini'),
+  }
+}
+
+async function callLLM(messages, { temperature = 0.9, maxTokens = 600 } = {}) {
+  const cfg = getLLMConfig()
+  if (!cfg) throw new Error('Nenhuma GROQ_API_KEY/OPENAI_API_KEY configurada')
+  const resp = await axios.post(`${cfg.baseURL}/chat/completions`, {
+    model: cfg.model, max_tokens: maxTokens, temperature, messages,
+  }, { headers: { Authorization: `Bearer ${cfg.apiKey}`, 'Content-Type': 'application/json' }, timeout: 20000 })
+  return resp.data?.choices?.[0]?.message?.content?.trim() || ''
+}
+
 // Randomiza só a abertura do template (via Groq/OpenAI) pra reduzir a
 // assinatura de "mensagem idêntica em massa" sem arriscar mudar o conteúdo
 // principal. Roda ANTES de resolvePayload/applyVars, em cima do template com
@@ -57,31 +82,176 @@ const randDelaySec = (min, max) => Math.floor(Math.random() * (Math.max(max, min
 // variáveis, só o nome delas, então não tem como confundir/trocar valores.
 async function spinOpeningWithAI(template) {
   if (typeof template !== 'string' || !template.trim()) return template
-  const apiKey = process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY
-  if (!apiKey) return template
-  const baseURL = process.env.GROQ_API_KEY ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1'
-  const model = process.env.GROQ_API_KEY ? 'llama3-8b-8192' : 'gpt-3.5-turbo'
+  if (!getLLMConfig()) return template
   try {
-    const resp = await axios.post(`${baseURL}/chat/completions`, {
-      model, max_tokens: 400, temperature: 0.9,
-      messages: [
-        {
-          role: 'system',
-          content: 'Você varia levemente mensagens para reduzir a chance de detecção como disparo em massa. '
-            + 'Regras obrigatórias: (1) troque só as primeiras palavras — cumprimento/abertura — por um sinônimo natural; '
-            + '(2) NUNCA altere o restante do texto, nem qualquer trecho entre chaves duplas como {{name}} ou {{coluna}} — copie esses marcadores exatamente iguais; '
-            + '(3) mantenha o mesmo idioma, tom, sentido e tamanho aproximado da mensagem original; '
-            + '(4) não adicione nem remova informação, links ou instruções; '
-            + '(5) responda somente com a mensagem final, sem comentários nem aspas.',
-        },
-        { role: 'user', content: template },
-      ],
-    }, { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 15000 })
-    const out = resp.data?.choices?.[0]?.message?.content?.trim()
-    return out || template
+    const out = await callLLM([
+      {
+        role: 'system',
+        content: 'Você varia levemente mensagens para reduzir a chance de detecção como disparo em massa. '
+          + 'Regras obrigatórias: (1) troque só as primeiras palavras — cumprimento/abertura — por um sinônimo natural; '
+          + '(2) NUNCA altere o restante do texto, nem qualquer trecho entre chaves duplas como {{name}} ou {{coluna}} — copie esses marcadores exatamente iguais; '
+          + '(3) mantenha o mesmo idioma, tom, sentido e tamanho aproximado da mensagem original; '
+          + '(4) não adicione nem remova informação, links ou instruções; '
+          + '(5) responda somente com a mensagem final, sem comentários nem aspas.',
+      },
+      { role: 'user', content: template },
+    ], { maxTokens: 400 })
+    const cleaned = cleanLLMOutput(out)
+    return cleaned && validateVariant(template, cleaned).ok ? cleaned : template
   } catch (e) {
     return template
   }
 }
 
-module.exports = { firstNameOf, applyVars, resolvePayload, normalizeBrazilPhone, randDelaySec, spinOpeningWithAI }
+// ─── Variação completa da mensagem (Wuzapi) ───────────────────────────────
+// Diferente do spinOpeningWithAI (que só troca o cumprimento), aqui a IA
+// reescreve a mensagem inteira a cada envio — mesmo contexto/oferta, outras
+// palavras. A garantia de que as variáveis continuam intactas NÃO depende da
+// IA obedecer o prompt: toda versão gerada passa por validateVariant, que
+// confere se os mesmos {{marcadores}} (mesma quantidade de cada), os mesmos
+// números/valores e os mesmos links do original estão lá. Versão que não
+// passa é descartada e pede outra; se nenhuma passar, envia o original.
+
+const PLACEHOLDER_RE = /\{\{\s*([^{}]+?)\s*\}\}/g
+const URL_RE = /\bhttps?:\/\/[^\s<>"')]+/gi
+const NUMBER_RE = /\d+(?:[.,]\d+)*/g
+
+const normKey = s => String(s).trim().toLowerCase()
+
+function placeholdersOf(text) {
+  const out = []
+  String(text).replace(PLACEHOLDER_RE, (_m, k) => { out.push(normKey(k)); return _m })
+  return out.sort()
+}
+
+// Normaliza "{{ Name }}" → "{{name}}" usando a grafia exata do original, pra
+// applyVars (que procura "{{chave}}" sem espaços) sempre achar o marcador.
+function canonicalizePlaceholders(original, text) {
+  const canon = new Map()
+  String(original).replace(PLACEHOLDER_RE, (_m, k) => { canon.set(normKey(k), k.trim()); return _m })
+  return String(text).replace(PLACEHOLDER_RE, (m, k) => {
+    const c = canon.get(normKey(k))
+    return c ? `{{${c}}}` : m
+  })
+}
+
+function cleanLLMOutput(out) {
+  let s = String(out || '').trim()
+  s = s.replace(/^<<<\s*/, '').replace(/\s*>>>$/, '').trim()
+  s = s.replace(/^(mensagem( reescrita| final)?|vers[aã]o( reescrita)?|resposta)\s*:\s*/i, '').trim()
+  if (s.length > 1 && /^["“'].*["”']$/s.test(s)) s = s.slice(1, -1).trim()
+  return s
+}
+
+const normForCompare = s => String(s).toLowerCase().replace(/\s+/g, ' ').trim()
+
+function validateVariant(original, variant) {
+  if (!variant || !variant.trim()) return { ok: false, reason: 'vazia' }
+  const a = placeholdersOf(original), b = placeholdersOf(variant)
+  if (a.length !== b.length || a.some((k, i) => k !== b[i])) {
+    return { ok: false, reason: `variáveis alteradas (esperado ${a.map(k => `{{${k}}}`).join(', ') || 'nenhuma'}, veio ${b.map(k => `{{${k}}}`).join(', ') || 'nenhuma'})` }
+  }
+  // Números/links checados fora dos marcadores, pra "{{coluna2}}" não contar como número.
+  const strip = t => String(t).replace(PLACEHOLDER_RE, ' ')
+  const vStripped = strip(variant)
+  for (const url of strip(original).match(URL_RE) || []) {
+    if (!vStripped.includes(url)) return { ok: false, reason: `link alterado/removido (${url})` }
+  }
+  const vNums = vStripped.match(NUMBER_RE) || []
+  for (const n of strip(original).replace(URL_RE, ' ').match(NUMBER_RE) || []) {
+    if (!vNums.includes(n)) return { ok: false, reason: `número/valor alterado (${n})` }
+  }
+  const lo = original.length, lv = variant.length
+  if (lv < lo * 0.5 || lv > lo * 1.8 + 40) return { ok: false, reason: 'tamanho muito diferente do original' }
+  return { ok: true }
+}
+
+function buildRewriteMessages(template, avoid) {
+  const keys = []
+  String(template).replace(PLACEHOLDER_RE, m => { keys.push(m); return m })
+  const system = [
+    'Você reescreve mensagens de WhatsApp para que cada envio de uma campanha seja diferente, mantendo exatamente o mesmo significado.',
+    'Regras obrigatórias:',
+    '1. Reescreva a mensagem com outras palavras (cumprimento diferente, sinônimos, outra ordem de frases), mas mantenha o MESMO contexto, oferta, intenção, tom e chamada para ação.',
+    '2. Todo marcador entre chaves duplas (ex: {{name}}, {{cidade}}) deve aparecer na resposta EXATAMENTE como está no original, com a mesma grafia e a mesma quantidade de vezes. Nunca traduza, renomeie, remova, invente marcadores novos ou troque o marcador por um valor.',
+    '3. Mantenha todos os números, valores, datas, porcentagens e links exatamente iguais ao original.',
+    '4. Não adicione informação, promessa ou oferta que não exista no original, e não remova nenhuma informação.',
+    '5. Mesmo idioma, tamanho parecido e estrutura de parágrafos parecida. Mantenha emojis só se o original tiver.',
+    '6. Responda SOMENTE com a mensagem final, sem aspas, sem título e sem explicações.',
+  ].join('\n')
+  let user = `Mensagem original:\n<<<\n${template}\n>>>`
+  user += keys.length
+    ? `\n\nMarcadores que DEVEM aparecer na resposta, exatamente assim: ${keys.join(', ')}`
+    : '\n\nA mensagem não tem marcadores {{...}} — não crie nenhum.'
+  if (avoid.length) {
+    user += `\n\nNão repita nenhuma destas versões já enviadas (escreva algo diferente delas):\n${avoid.map(v => `- ${v.slice(0, 300).replace(/\n/g, ' ')}`).join('\n')}`
+  }
+  return [{ role: 'system', content: system }, { role: 'user', content: user }]
+}
+
+// Um spinner por campanha: lembra das versões já usadas pra nunca mandar a
+// mesma duas vezes (nem o próprio original quando a IA está funcionando).
+function createTemplateSpinner(template, { maxAttempts = 3, avoidWindow = 5 } = {}) {
+  const used = new Set([normForCompare(template)])
+  const recent = []
+
+  async function next() {
+    if (typeof template !== 'string' || !template.trim()) return { text: template, ok: false, reason: 'texto vazio' }
+    if (!getLLMConfig()) return { text: template, ok: false, reason: 'nenhuma GROQ_API_KEY/OPENAI_API_KEY configurada no servidor' }
+    let lastReason = ''
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        const raw = await callLLM(buildRewriteMessages(template, recent.slice(-avoidWindow)), {
+          temperature: Math.min(1.2, 0.9 + attempt * 0.15),
+        })
+        const candidate = canonicalizePlaceholders(template, cleanLLMOutput(raw))
+        const v = validateVariant(template, candidate)
+        if (!v.ok) { lastReason = v.reason; continue }
+        const key = normForCompare(candidate)
+        if (used.has(key)) { lastReason = 'versão repetida'; continue }
+        used.add(key)
+        recent.push(candidate)
+        if (recent.length > avoidWindow * 2) recent.shift()
+        return { text: candidate, ok: true }
+      } catch (e) {
+        lastReason = e?.response?.data?.error?.message || e.message || 'erro na IA'
+      }
+    }
+    return { text: template, ok: false, reason: lastReason }
+  }
+
+  return { next }
+}
+
+// Sorteio "sem reposição": embaralha a lista e vai consumindo; quando acaba,
+// embaralha de novo. Assim todas as imagens saem na mesma proporção e nunca
+// repete a mesma imagem duas vezes seguidas (inclusive na virada do ciclo).
+function createShuffleBag(items) {
+  const list = (items || []).filter(Boolean)
+  let bag = []
+  let last
+  function refill() {
+    bag = [...list]
+    for (let i = bag.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [bag[i], bag[j]] = [bag[j], bag[i]]
+    }
+    if (bag.length > 1 && bag[bag.length - 1] === last) {
+      [bag[0], bag[bag.length - 1]] = [bag[bag.length - 1], bag[0]]
+    }
+  }
+  return {
+    size: list.length,
+    next() {
+      if (!list.length) return undefined
+      if (!bag.length) refill()
+      last = bag.pop()
+      return last
+    },
+  }
+}
+
+module.exports = {
+  firstNameOf, applyVars, resolvePayload, normalizeBrazilPhone, randDelaySec,
+  spinOpeningWithAI, createTemplateSpinner, validateVariant, createShuffleBag,
+}
