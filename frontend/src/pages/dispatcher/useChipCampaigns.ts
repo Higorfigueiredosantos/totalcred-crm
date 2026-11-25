@@ -112,7 +112,11 @@ export function useChipCampaigns() {
         if (i >= 0) next[i] = p.contact; else next.push(p.contact)
         return { ...prev, results: next, stats: { ...prev.stats, success: p.success, failed: p.failed } }
       })
-      addLog(p.contact?.status === 'success' ? `✅ ${p.contact.number}` : `❌ ${p.contact?.number} — ${p.contact?.error}`)
+      // Acks de entrega (2/3) também chegam como "result" — só loga mudança de status de verdade.
+      if (p.contact?.status === 'failed') addLog(`❌ ${p.contact?.number} — ${p.contact?.error}`)
+      else if (p.contact?.status === 'success' && (p.contact?.ack ?? 1) <= 1) addLog(`📤 ${p.contact.number} — enviado (aguardando confirmação de entrega)`)
+      else if (p.contact?.status === 'success' && p.contact?.ack === 2) addLog(`✅ ${p.contact.number} — entregue`)
+      else if (p.contact?.status === 'success' && p.contact?.ack === 3) addLog(`👀 ${p.contact.number} — lido`)
     }
     if (p.type === 'started') {
       addLog(`🔀 Chips em rotação: ${(p.chips as string[]).join(', ')} (${p.chips.length} chip${p.chips.length !== 1 ? 's' : ''})`)
@@ -129,6 +133,20 @@ export function useChipCampaigns() {
       addLog(p.ok
         ? `🤖 ${p.number} — mensagem humanizada pela IA (variáveis conferidas)`
         : `⚠️ ${p.number} — IA não gerou variação válida (${p.reason || 'sem motivo'}), enviando mensagem padrão`)
+    }
+    // Confirmação de entrega que chegou depois da campanha já ter terminado.
+    if (p.type === 'ack_update') {
+      setCurrent(prev => {
+        if (!prev) return prev
+        const i = prev.results.findIndex(r => r.number === p.contact?.number)
+        if (i < 0) return prev
+        const results = [...prev.results]; results[i] = p.contact
+        const success = results.filter(r => r.status === 'success').length
+        const failed = results.filter(r => r.status === 'failed').length
+        return { ...prev, results, stats: { ...prev.stats, success, failed } }
+      })
+      if (p.contact?.status === 'failed') addLog(`❌ ${p.contact.number} — ${p.contact.error}`)
+      setTimeout(loadHistory, 4000)
     }
     if (p.type === 'page_reload') addLog(`🔄 ${p.number} — WhatsApp Web do chip ${p.chip} recarregou no envio, aguardando e tentando de novo (${p.attempt}/2)`)
     if (p.type === 'batch_pause') { startWait(p.seconds); addLog(`☕ Pausa de lote (${p.batchCount} enviados) — aguardando ${p.seconds}s`) }

@@ -249,8 +249,9 @@ export interface ChipCampaignResult {
   message?: string
   error?: string
   via: string
-  ack?: number
+  ack?: number     // 1 enviado, 2 entregue, 3 lido, -1 recusado pelo WhatsApp
   sentAt?: number  // ms timestamp of successful dispatch
+  messageId?: string
 }
 
 export interface CampaignHistoryRecord {

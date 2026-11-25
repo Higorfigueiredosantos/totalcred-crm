@@ -691,9 +691,27 @@ const maturadorState = { running: false, timer: null, chipIds: [], minDelay: 60,
 
 // ── Chip registry (persist chip IDs across restarts) ──────────────────────────
 
-const REGISTRY_FILE = path.join(__dirname, 'chips_registry.json')
-const CAMPAIGNS_FILE = path.join(__dirname, 'campaigns_history.json')
-const PROXIES_FILE = path.join(__dirname, 'proxies.json')
+// Esses arquivos ficavam na raiz do app (/app), que NÃO é volume no Docker —
+// cada deploy recriava o container e voltava pra versão do git: histórico de
+// campanhas de chips, lista de chips, proxies e regras do autobot sumiam.
+// Agora ficam em data/ (bind mount persistente). Na primeira vez copia o
+// arquivo antigo, se existir.
+function persistentFile(name) {
+  const target = path.join(__dirname, 'data', name)
+  const legacy = path.join(__dirname, name)
+  try {
+    if (!fs.existsSync(target) && fs.existsSync(legacy)) {
+      fs.mkdirSync(path.dirname(target), { recursive: true })
+      fs.copyFileSync(legacy, target)
+      console.log(`[Data] ${name} migrado para data/`)
+    }
+  } catch (e) { console.error(`[Data] Falha ao migrar ${name}:`, e.message) }
+  return target
+}
+
+const REGISTRY_FILE = persistentFile('chips_registry.json')
+const CAMPAIGNS_FILE = persistentFile('campaigns_history.json')
+const PROXIES_FILE = persistentFile('proxies.json')
 
 // ── Proxy storage ─────────────────────────────────────────────────────────────
 
@@ -902,7 +920,7 @@ function saveCampaign(record) {
 
 // ── Autobot persistence ───────────────────────────────────────────────────────
 
-const AUTOBOT_FILE = path.join(__dirname, 'autobot_rules.json')
+const AUTOBOT_FILE = persistentFile('autobot_rules.json')
 const DEFAULT_AUTOBOT = {
   active: false, rules: [],
   workingHours: { enabled: false, start: '08:00', end: '18:00', days: [1, 2, 3, 4, 5] },
@@ -1156,6 +1174,7 @@ async function initChip(chipId) {
       if (msg.fromMe && msgId) {
         const remote = (typeof msg?.id === 'object' ? msg.id.remote : null) || msg?.to || null
         resolveSendAck(chipId, remote, msgId)
+        applyCampaignAck(msgId, ack)
       }
 
       chipCampaignState.tickMonitor.recordAck(ack)
@@ -1400,8 +1419,13 @@ function greetingsForNow(pool) {
   return ok.length ? ok : openingPhrases.filter(fits)
 }
 
+// Mensagem que já abre com cumprimento ("Oi {{name}}, tudo bem?") não ganha
+// outro na frente — senão saía "E aí! Tudo na paz?\n\nOi Higor, tudo bem?".
+const STARTS_WITH_GREETING = /^[\s\p{Emoji_Presentation}]*(oi+|ol[aá]|e a[ií]|opa|eai|hey|hello|bom dia|boa tarde|boa noite|tudo bem|tudo certo)(?!\p{L})/iu
+
 function humanizeBasic(text, contact, greetingPool) {
   if (!text) return 'Olá!'
+  if (STARTS_WITH_GREETING.test(String(text))) return applyVars(text, contact)
   const pool = greetingsForNow((Array.isArray(greetingPool) && greetingPool.length > 0) ? greetingPool : openingPhrases)
   const msg = applyVars(text, contact)
   return `${pool[Math.floor(Math.random() * pool.length)]}\n\n${msg}`
@@ -1456,6 +1480,81 @@ async function wasSentAfter(client, chatId, text, sinceMs) {
 
 // ── Chip Campaign ─────────────────────────────────────────────────────────────
 
+// Confirmação real de entrega das mensagens de campanha. client.sendMessage()
+// resolver só quer dizer que o WhatsApp Web ACEITOU a mensagem localmente — o
+// servidor do WhatsApp ainda pode recusar segundos depois (ack -1, a bolha
+// fica com "!" vermelho). Antes a campanha marcava "sucesso" na hora e
+// ignorava o ack: aparecia como enviado/entregue sem ter chegado nada, e o
+// relatório nunca saía de ack 1 (coluna Entregues sempre zerada).
+const campaignMsgIndex = new Map() // msgId -> { result, campaignId }
+const savedCampaignAckQueue = new Map() // campaignId -> Map(msgId -> {status,error,ack})
+let savedCampaignAckTimer = null
+
+function trackCampaignMsg(msgId, result, campaignId) {
+  if (!msgId) return
+  campaignMsgIndex.set(msgId, { result, campaignId })
+  if (campaignMsgIndex.size > 20000) campaignMsgIndex.delete(campaignMsgIndex.keys().next().value)
+}
+
+const CAMPAIGN_ACK_FAIL_MSG = 'O WhatsApp recusou a mensagem depois do envio (ack -1) — não chegou no contato.'
+
+function countCampaignResults(results) {
+  let success = 0, failed = 0
+  for (const r of results) { if (r.status === 'success') success++; else if (r.status === 'failed') failed++ }
+  return { success, failed }
+}
+
+function applyCampaignAck(msgId, ack) {
+  const ref = campaignMsgIndex.get(msgId)
+  if (!ref) return
+  const r = ref.result
+  if (ack === -1) {
+    if (r.status === 'failed') return
+    r.status = 'failed'
+    r.ack = -1
+    r.error = CAMPAIGN_ACK_FAIL_MSG
+    // Não chegou — libera o número pra poder reenviar numa próxima campanha
+    // (senão ficava "⏭️ já enviado anteriormente").
+    chipCampaignState.sentNumbers.delete(r.number)
+    console.warn(`[Campanha] ${r.number} via ${r.via}: WhatsApp recusou a mensagem (ack -1) id=${msgId}`)
+  } else if (typeof ack === 'number' && ack > (r.ack || 0) && r.status !== 'failed') {
+    r.ack = ack
+  } else {
+    return
+  }
+
+  const live = chipCampaignState.currentCampaign && chipCampaignState.startedAt === ref.campaignId
+  if (live) {
+    broadcast('chip_campaign', { type: 'result', contact: r, ...countCampaignResults(chipCampaignState.results) })
+    return
+  }
+  // Campanha já terminou e foi salva — atualiza o histórico (em lote, pra não
+  // reescrever o arquivo a cada ack de uma campanha grande).
+  if (!savedCampaignAckQueue.has(ref.campaignId)) savedCampaignAckQueue.set(ref.campaignId, new Map())
+  savedCampaignAckQueue.get(ref.campaignId).set(msgId, { status: r.status, error: r.error, ack: r.ack })
+  broadcast('chip_campaign', { type: 'ack_update', contact: r, campaignId: String(ref.campaignId) })
+  if (!savedCampaignAckTimer) savedCampaignAckTimer = setTimeout(flushSavedCampaignAcks, 3000)
+}
+
+function flushSavedCampaignAcks() {
+  savedCampaignAckTimer = null
+  if (!savedCampaignAckQueue.size) return
+  try {
+    const list = loadCampaigns()
+    for (const [campaignId, updates] of savedCampaignAckQueue) {
+      const rec = list.find(c => c.id === String(campaignId))
+      if (!rec) continue
+      for (const rr of rec.results || []) {
+        const u = rr.messageId && updates.get(rr.messageId)
+        if (u) Object.assign(rr, u)
+      }
+      Object.assign(rec, countCampaignResults(rec.results || []))
+    }
+    savedCampaignAckQueue.clear()
+    fs.writeFileSync(CAMPAIGNS_FILE, JSON.stringify(list, null, 2))
+  } catch (e) { console.error('[Campaigns] Erro ao atualizar acks no histórico:', e.message) }
+}
+
 async function runChipCampaign(data) {
   const { contacts, messageTemplate, settings = {}, mediaData } = data
   chipCampaignState.results = []
@@ -1463,6 +1562,7 @@ async function runChipCampaign(data) {
   chipCampaignState.stopped = false
   chipCampaignState.currentCampaign = data
   let success = 0, failed = 0
+  let lastSendAt = 0
   const campaignStartedAt = Date.now()
   chipCampaignState.startedAt = campaignStartedAt
 
@@ -1505,7 +1605,7 @@ async function runChipCampaign(data) {
 
     const result = { index: i, number: contact.number, name: contact.name || contact.number, status: 'sending', via: '' }
     chipCampaignState.results.push(result)
-    broadcast('chip_campaign', { type: 'progress', contact: result, success, failed, total: contacts.length, current: i + 1 })
+    broadcast('chip_campaign', { type: 'progress', contact: result, ...countCampaignResults(chipCampaignState.results), total: contacts.length, current: i + 1 })
 
     const cooldown = chipCampaignState.delayCalc.getCooldown()
     if (cooldown > 0) {
@@ -1580,17 +1680,20 @@ async function runChipCampaign(data) {
       result.message = text
       result.ack = msg?.ack || 1
       result.sentAt = Date.now()
+      result.messageId = extractMsgId(msg) || undefined
+      trackCampaignMsg(result.messageId, result, campaignStartedAt)
+      lastSendAt = Date.now()
       success++
       batchCount++
       chipCampaignState.sentNumbers.add(contact.number)
       chipCampaignState.delayCalc.recordSuccess()
-      broadcast('chip_campaign', { type: 'result', contact: result, success, failed })
+      broadcast('chip_campaign', { type: 'result', contact: result, ...countCampaignResults(chipCampaignState.results) })
     } catch (e) {
       result.status = 'failed'
       result.error = e.message || 'Erro desconhecido'
       failed++
       chipCampaignState.delayCalc.recordFail()
-      broadcast('chip_campaign', { type: 'result', contact: result, success, failed })
+      broadcast('chip_campaign', { type: 'result', contact: result, ...countCampaignResults(chipCampaignState.results) })
     }
 
     if (i < contacts.length - 1 && !chipCampaignState.stopped) {
@@ -1611,6 +1714,13 @@ async function runChipCampaign(data) {
       await sleep(delay * 1000)
     }
   }
+
+  // A recusa do WhatsApp (ack -1) chega alguns segundos depois do envio —
+  // espera um pouco pela da última mensagem antes de fechar o relatório
+  // (acks que chegarem depois ainda atualizam o histórico salvo).
+  const ackWait = lastSendAt ? 12000 - (Date.now() - lastSendAt) : 0
+  if (ackWait > 0 && !chipCampaignState.stopped) await sleep(ackWait)
+  ;({ success, failed } = countCampaignResults(chipCampaignState.results))
 
   const campaignEndedAt = Date.now()
   broadcast('chip_campaign', {
