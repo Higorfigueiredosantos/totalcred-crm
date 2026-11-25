@@ -950,8 +950,24 @@ function getChipsList() {
     qr: c.qr || null, errorMsg: c.errorMsg || null,
     temperature: c.temperature || 'frio',
     proxy: c.proxy || null,
+    timelockUntil: c.timelockUntil && c.timelockUntil > Date.now() ? c.timelockUntil : null,
   }))
 }
+
+// Checa o bloqueio 463 de cada chip conectado a cada 5 min (e logo após
+// ficar pronto) pra o aviso aparecer em Canais sem precisar tentar enviar.
+async function refreshChipTimelocks() {
+  let changed = false
+  for (const id of Object.keys(chipSessions)) {
+    const s = chipSessions[id]
+    if (!s?.isReady || !s.client) continue
+    const before = s.timelockUntil || null
+    await getChipTimelock(id, { maxAgeMs: 0 })
+    if ((s.timelockUntil || null) !== before) changed = true
+  }
+  if (changed) broadcastChipsStatus()
+}
+setInterval(() => { refreshChipTimelocks().catch(() => {}) }, 5 * 60 * 1000)
 
 function broadcastChipsStatus() {
   broadcast('chips_status', getChipsList())
@@ -1152,6 +1168,7 @@ async function initChip(chipId) {
       broadcastChipsStatus()
       broadcast('chip_ready', { chipId, number: chipSessions[chipId].number })
       console.log(`[Chip ${chipId}] Ready — ${chipSessions[chipId].number}`)
+      setTimeout(() => { refreshChipTimelocks().catch(() => {}) }, 20000)
     })
 
     client.on('disconnected', (reason) => {
@@ -1271,6 +1288,64 @@ function getNextReadyChipFrom(allowedIds, lastUsedId) {
   const nextIdx = (lastIdx + 1) % readyIds.length
   const id = readyIds[nextIdx]
   return { id, client: chipSessions[id].client, proxy: chipSessions[id].proxy || null }
+}
+
+// ── Bloqueio "reach-out timelock" do WhatsApp (erro 463) ──────────────────────
+// O WhatsApp pode bloquear temporariamente uma conta de INICIAR conversas a
+// partir de aparelhos conectados (enforcement_type RESTRICT_ALL_COMPANIONS) —
+// o celular continua funcionando, mas tudo que sai pelo WhatsApp Web (= o
+// CRM) é aceito localmente e recusado pelo servidor segundos depois (ack -1,
+// "Nack error code 463"). Em modo HIDDEN o WhatsApp nem mostra aviso. Visto em
+// 25/11/2026 no chip2, ~5h de bloqueio. O próprio WhatsApp Web guarda o
+// estado (WAWebReachoutTimelockUtils + chave WAReachoutTimelockState em
+// model-storage/user-prefs) — lemos de lá antes de enviar, em vez de queimar a
+// lista de contatos num chip que não consegue entregar nada.
+const chipTimelockCache = new Map() // chipId -> { locked, endsAt, at }
+
+function fmtBrTime(ms) {
+  const d = new Date(ms)
+  const sameDay = d.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }) === new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' })
+  const hm = d.toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' })
+  return sameDay ? hm : `${d.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit' })} ${hm}`
+}
+
+async function getChipTimelock(chipId, { maxAgeMs = 30000 } = {}) {
+  const cached = chipTimelockCache.get(chipId)
+  if (cached && Date.now() - cached.at < maxAgeMs) return cached
+  const client = chipSessions[chipId]?.client
+  let info = { locked: false, endsAt: null, at: Date.now() }
+  try {
+    const r = await withTimeout(client.pupPage.evaluate(async () => {
+      let U; try { U = window.require('WAWebReachoutTimelockUtils') } catch (e) { return null }
+      if (!U) return null
+      const locked = !!U.isUserReachoutTimelocked?.()
+      let endsAt = null, type = null
+      await new Promise(done => {
+        const rq = indexedDB.open('model-storage'); rq.onerror = () => done()
+        rq.onsuccess = () => {
+          const db = rq.result
+          try {
+            const g = db.transaction('user-prefs', 'readonly').objectStore('user-prefs').get(U.REACHOUT_TIMELOCK_IDB_KEY || 'WAReachoutTimelockState')
+            g.onsuccess = () => { const v = g.result?.value; endsAt = v?.time_enforcement_ends || null; type = v?.enforcement_type || null; db.close(); done() }
+            g.onerror = () => { db.close(); done() }
+          } catch (e) { db.close(); done() }
+        }
+      })
+      return { locked, endsAt, type }
+    }), 8000, 'timeout timelock')
+    if (r) {
+      const stillValid = !r.endsAt || r.endsAt > Date.now()
+      info = { locked: r.locked && stillValid, endsAt: r.endsAt, type: r.type, at: Date.now() }
+    }
+  } catch (_) { /* sem como checar — não bloqueia o envio por isso */ }
+  chipTimelockCache.set(chipId, info)
+  if (chipSessions[chipId]) chipSessions[chipId].timelockUntil = info.locked ? info.endsAt : null
+  return info
+}
+
+function timelockMessage(chipId, info) {
+  const until = info?.endsAt ? ` até ${fmtBrTime(info.endsAt)}` : ''
+  return `Chip ${chipId} bloqueado temporariamente pelo WhatsApp pra iniciar conversas${until} (erro 463 — "reach-out timelock"). O celular do chip funciona, mas mensagens enviadas pelo CRM são recusadas.`
 }
 
 // ── Send helpers ──────────────────────────────────────────────────────────────
@@ -1496,7 +1571,7 @@ function trackCampaignMsg(msgId, result, campaignId) {
   if (campaignMsgIndex.size > 20000) campaignMsgIndex.delete(campaignMsgIndex.keys().next().value)
 }
 
-const CAMPAIGN_ACK_FAIL_MSG = 'O WhatsApp recusou a mensagem depois do envio (ack -1) — não chegou no contato.'
+const CAMPAIGN_ACK_FAIL_MSG = 'O WhatsApp recusou a mensagem depois do envio (ack -1) — não chegou no contato. Normalmente é bloqueio temporário do chip pra iniciar conversas (erro 463).'
 
 function countCampaignResults(results) {
   let success = 0, failed = 0
@@ -1516,6 +1591,7 @@ function applyCampaignAck(msgId, ack) {
     // Não chegou — libera o número pra poder reenviar numa próxima campanha
     // (senão ficava "⏭️ já enviado anteriormente").
     chipCampaignState.sentNumbers.delete(r.number)
+    if (r.via) chipTimelockCache.delete(r.via) // força rechecar o bloqueio antes do próximo envio
     console.warn(`[Campanha] ${r.number} via ${r.via}: WhatsApp recusou a mensagem (ack -1) id=${msgId}`)
   } else if (typeof ack === 'number' && ack > (r.ack || 0) && r.status !== 'failed') {
     r.ack = ack
@@ -1583,6 +1659,7 @@ async function runChipCampaign(data) {
 
   // Um spinner por campanha: nunca repete a mesma versão da mensagem.
   const spinner = settings.useAIHumanize ? createTemplateSpinner(messageTemplate || '') : null
+  const lockedAnnounced = new Set()
 
   // Informa quais chips serão usados
   const readySelected = selectedChipIds.filter(id => chipSessions[id]?.isReady && chipSessions[id]?.client)
@@ -1600,6 +1677,31 @@ async function runChipCampaign(data) {
 
     if (chipCampaignState.sentNumbers.has(contact.number)) {
       broadcast('chip_campaign', { type: 'skipped', number: contact.number, current: i + 1, total: contacts.length })
+      continue
+    }
+
+    // Tira da rotação chip bloqueado pelo WhatsApp (erro 463) — se TODOS os
+    // chips prontos estiverem bloqueados, pausa a campanha ANTES de gastar
+    // este contato, em vez de "enviar" pro vazio a lista inteira.
+    const readyNow = selectedChipIds.filter(id => chipSessions[id]?.isReady && chipSessions[id]?.client)
+    const unlockedIds = []
+    for (const id of readyNow) {
+      const tl = await getChipTimelock(id)
+      if (tl.locked) {
+        if (!lockedAnnounced.has(id)) { lockedAnnounced.add(id); broadcast('chip_campaign', { type: 'chip_locked', chip: id, message: timelockMessage(id, tl) }) }
+      } else {
+        unlockedIds.push(id)
+        lockedAnnounced.delete(id)
+      }
+    }
+    if (readyNow.length > 0 && unlockedIds.length === 0) {
+      chipCampaignState.paused = true
+      const soonest = readyNow.map(id => chipTimelockCache.get(id)?.endsAt).filter(Boolean).sort((a, b) => a - b)[0]
+      broadcast('chip_campaign', {
+        type: 'paused',
+        reason: `⛔ Todos os chips da campanha estão bloqueados pelo WhatsApp pra iniciar conversas${soonest ? ` (o primeiro libera às ${fmtBrTime(soonest)})` : ''} — erro 463. Campanha pausada sem gastar contatos; retome depois desse horário.`,
+      })
+      i-- // repete este mesmo contato quando retomar
       continue
     }
 
@@ -1622,7 +1724,7 @@ async function runChipCampaign(data) {
       }
 
       // Rotação estrita: nunca repete o mesmo chip em disparos consecutivos
-      const activeChip = getNextReadyChipFrom(selectedChipIds, lastUsedChipId)
+      const activeChip = getNextReadyChipFrom(readyNow.length ? unlockedIds : selectedChipIds, lastUsedChipId)
       if (!activeChip) throw new Error('Nenhum chip selecionado disponível')
       lastUsedChipId = activeChip.id
       result.via = activeChip.id
@@ -3282,6 +3384,11 @@ app.post('/api/chips/send', async (req, res) => {
   if (!chipId || !to || !message) return res.status(400).json({ error: 'chipId, to e message são obrigatórios' })
   const session = chipSessions[chipId]
   if (!session?.isReady || !session.client) return res.status(400).json({ error: `Chip "${chipId}" não está conectado` })
+  const tl = await getChipTimelock(chipId)
+  if (tl.locked) {
+    console.log(`[Send ${reqId}] bloqueado: timelock até ${tl.endsAt ? new Date(tl.endsAt).toISOString() : '?'}`)
+    return res.status(423).json({ error: timelockMessage(chipId, tl), timelockUntil: tl.endsAt })
+  }
   try {
     const chatId = await resolveChatId(session.client, to)
     const convId = getConvId(chipId, chatId)

@@ -212,6 +212,7 @@ export interface Chip {
   errorMsg?: string | null
   temperature: ChipTemperature
   proxy?: string | null
+  timelockUntil?: number | null  // bloqueio 463 do WhatsApp (ms) — não inicia conversas pelo CRM até lá
 }
 
 export interface AutobotRule {

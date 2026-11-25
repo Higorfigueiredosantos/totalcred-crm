@@ -148,6 +148,7 @@ export function useChipCampaigns() {
       if (p.contact?.status === 'failed') addLog(`❌ ${p.contact.number} — ${p.contact.error}`)
       setTimeout(loadHistory, 4000)
     }
+    if (p.type === 'chip_locked') addLog(`⛔ ${p.message} — tirado da rotação.`)
     if (p.type === 'page_reload') addLog(`🔄 ${p.number} — WhatsApp Web do chip ${p.chip} recarregou no envio, aguardando e tentando de novo (${p.attempt}/2)`)
     if (p.type === 'batch_pause') { startWait(p.seconds); addLog(`☕ Pausa de lote (${p.batchCount} enviados) — aguardando ${p.seconds}s`) }
     if (p.type === 'paused') { setCurrent(prev => prev ? { ...prev, paused: true } : prev); addLog(`⏸️ ${p.reason || 'Pausado'}`) }

@@ -242,6 +242,17 @@ const ChipConnections = forwardRef<ChipConnectionsHandle, Props>(({ removeChipDa
                 </div>
               )}
 
+              {chip.isReady && chip.timelockUntil && chip.timelockUntil > Date.now() && (
+                <div className="flex flex-col gap-0.5 text-orange-300 text-[10px] bg-orange-500/10 border border-orange-500/30 rounded-lg px-2 py-1.5">
+                  <span className="flex items-center gap-1.5 font-medium">
+                    <AlertCircle size={11} /> Bloqueado pelo WhatsApp até {new Date(chip.timelockUntil).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                  <span className="text-orange-200/70 leading-relaxed">
+                    Não consegue iniciar conversas pelo CRM (erro 463). O celular do chip funciona normal; libera sozinho.
+                  </span>
+                </div>
+              )}
+
               {/* Actions */}
               <div className="flex gap-1.5">
                 <button onClick={() => reconnect(chip.id)}
