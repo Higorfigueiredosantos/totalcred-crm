@@ -1383,31 +1383,74 @@ function applyVars(text, contact) {
   return msg
 }
 
+// Tira do sorteio as saudações que não combinam com o horário de Brasília
+// ("Boa noite!" às 9h entrega na hora que é disparo automático). Se o pool
+// escolhido só tiver saudações fora de hora, cai nas neutras.
+function greetingsForNow(pool) {
+  const hour = Number(new Intl.DateTimeFormat('en-US', { hour: 'numeric', hourCycle: 'h23', timeZone: 'America/Sao_Paulo' }).format(new Date()))
+  const period = hour >= 5 && hour < 12 ? 'dia' : hour >= 12 && hour < 18 ? 'tarde' : 'noite'
+  const fits = g => {
+    const s = String(g).toLowerCase()
+    if (/bom dia/.test(s)) return period === 'dia'
+    if (/boa tarde/.test(s)) return period === 'tarde'
+    if (/boa noite/.test(s)) return period === 'noite'
+    return true
+  }
+  const ok = pool.filter(fits)
+  return ok.length ? ok : openingPhrases.filter(fits)
+}
+
 function humanizeBasic(text, contact, greetingPool) {
   if (!text) return 'Olá!'
-  const pool = (Array.isArray(greetingPool) && greetingPool.length > 0) ? greetingPool : openingPhrases
+  const pool = greetingsForNow((Array.isArray(greetingPool) && greetingPool.length > 0) ? greetingPool : openingPhrases)
   const msg = applyVars(text, contact)
   return `${pool[Math.floor(Math.random() * pool.length)]}\n\n${msg}`
 }
 
-async function humanizeWithAI(text, contact, tone = 'amigavel', greetingPool) {
-  const resolved = applyVars(text, contact)
-  const name = typeof contact === 'string' ? contact : (contact?.name || '')
-  const apiKey = process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY
-  if (!apiKey) return humanizeBasic(resolved, '', greetingPool)
-  const baseURL = process.env.GROQ_API_KEY ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1'
-  const model = process.env.GROQ_API_KEY ? 'llama3-8b-8192' : 'gpt-3.5-turbo'
+// Humanização com IA = mesmo motor validado do disparo Wuzapi
+// (createTemplateSpinner em campaignVars.js): a IA reescreve o TEMPLATE com os
+// {{marcadores}} ainda intactos — nunca vê nome/valores reais — e cada versão
+// só é aceita se mantiver as mesmas variáveis, números e links do original
+// (senão é descartada e volta o texto padrão). As variáveis só são
+// resolvidas depois, pro contato da vez. Antes isso chamava um modelo do Groq
+// já descontinuado (toda chamada falhava e caía no humanizeBasic) e mandava a
+// mensagem JÁ resolvida pra IA, que podia mexer em nome/valores.
+async function humanizeWithAI(text, contact, _tone = 'amigavel', greetingPool, spinner) {
+  const s = spinner || createTemplateSpinner(text || '')
+  const r = await s.next()
+  return { text: humanizeBasic(r.text, contact, greetingPool), ok: r.ok, reason: r.reason }
+}
+
+// Erros de "a página do WhatsApp Web recarregou no meio da operação" — comum
+// logo depois de escanear o QR (o WhatsApp recarrega pra sincronizar) e em
+// auto-update. Não é falha do número: vale esperar estabilizar e tentar de novo.
+const TRANSIENT_PAGE_ERR = /Execution context was destroyed|Target closed|frame was detached|Session closed|Cannot find context|detached Frame/i
+
+async function waitChipPageStable(client, timeoutMs = 60000) {
+  const end = Date.now() + timeoutMs
+  let okStreak = 0
+  while (Date.now() < end) {
+    try {
+      const ok = await withTimeout(client.pupPage.evaluate(() =>
+        !!window.WWebJS && window.require?.('WAWebSocketModel')?.Socket?.state === 'CONNECTED'), 5000, 'timeout')
+      okStreak = ok ? okStreak + 1 : 0
+      if (okStreak >= 2) return true
+    } catch (_) { okStreak = 0 }
+    await sleep(2000)
+  }
+  return false
+}
+
+// Se a página recarregou durante o sendMessage, a mensagem pode ter saído
+// mesmo assim — confere no chat antes de reenviar, pra não duplicar.
+async function wasSentAfter(client, chatId, text, sinceMs) {
   try {
-    const resp = await axios.post(`${baseURL}/chat/completions`, {
-      model, max_tokens: 500, temperature: 0.8,
-      messages: [
-        { role: 'system', content: `Reescreva a mensagem de WhatsApp de forma ${tone} e natural. Use o nome ${name || 'cliente'}. Mantenha o conteúdo original.` },
-        { role: 'user', content: resolved }
-      ]
-    }, { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' } })
-    return resp.data.choices[0].message.content.trim() || humanizeBasic(resolved, '', greetingPool)
-  } catch (e) {
-    return humanizeBasic(resolved, '', greetingPool)
+    const chat = await withTimeout(client.getChatById(chatId), 10000, 'timeout getChatById')
+    const msgs = await withTimeout(chat.fetchMessages({ limit: 5 }), 10000, 'timeout fetchMessages')
+    const want = String(text || '').trim()
+    return msgs.some(m => m.fromMe && String(m.body || '').trim() === want && m.timestamp * 1000 >= sinceMs - 5000)
+  } catch (_) {
+    return false
   }
 }
 
@@ -1437,6 +1480,9 @@ async function runChipCampaign(data) {
   let nextBatchAt = batchEnabled
     ? Math.floor(Math.random() * (Math.max(bd.everyMax, bd.everyMin) - bd.everyMin + 1)) + bd.everyMin
     : Infinity
+
+  // Um spinner por campanha: nunca repete a mesma versão da mensagem.
+  const spinner = settings.useAIHumanize ? createTemplateSpinner(messageTemplate || '') : null
 
   // Informa quais chips serão usados
   const readySelected = selectedChipIds.filter(id => chipSessions[id]?.isReady && chipSessions[id]?.client)
@@ -1481,27 +1527,53 @@ async function runChipCampaign(data) {
       lastUsedChipId = activeChip.id
       result.via = activeChip.id
 
-      let text = settings.useAIHumanize
-        ? await humanizeWithAI(messageTemplate, contact, settings.tone || 'amigavel', settings.greetings)
-        : humanizeBasic(messageTemplate, contact, settings.greetings)
-
-      // Resolve o JID de verdade (LID quando aplicável) E garante que a
-      // conversa foi iniciada de verdade antes de enviar — ver resolveChatId.
-      const formatted = await resolveChatId(activeChip.client, contact.number)
-
-      let msg
-      if (mediaData?.type === 'image') {
-        let MessageMedia
-        try { ({ MessageMedia } = require('whatsapp-web.js')) } catch (e) {}
-        if (MessageMedia) {
-          const base64 = mediaData.base64.includes(',') ? mediaData.base64.split(',')[1] : mediaData.base64
-          const media = new MessageMedia('image/jpeg', base64, 'imagem.jpg')
-          msg = await activeChip.client.sendMessage(formatted, media, { caption: text })
-        } else {
-          msg = await sendChipText(activeChip.client, formatted, text)
-        }
+      let text
+      if (spinner) {
+        const h = await humanizeWithAI(messageTemplate, contact, settings.tone || 'amigavel', settings.greetings, spinner)
+        text = h.text
+        broadcast('chip_campaign', h.ok
+          ? { type: 'spin', ok: true, number: contact.number }
+          : { type: 'spin', ok: false, number: contact.number, reason: h.reason })
       } else {
-        msg = await sendChipText(activeChip.client, formatted, text)
+        text = humanizeBasic(messageTemplate, contact, settings.greetings)
+      }
+
+      const client = activeChip.client
+      async function doSend(chatId) {
+        if (mediaData?.type === 'image') {
+          let MessageMedia
+          try { ({ MessageMedia } = require('whatsapp-web.js')) } catch (e) {}
+          if (MessageMedia) {
+            const base64 = mediaData.base64.includes(',') ? mediaData.base64.split(',')[1] : mediaData.base64
+            const media = new MessageMedia('image/jpeg', base64, 'imagem.jpg')
+            return client.sendMessage(chatId, media, { caption: text })
+          }
+        }
+        return sendChipText(client, chatId, text)
+      }
+
+      // Até 3 tentativas SÓ pra erro de página recarregando (ver
+      // TRANSIENT_PAGE_ERR) — antes disso, um reload do WhatsApp Web logo
+      // após escanear o QR derrubava o envio com "Execution context was
+      // destroyed". Antes de reenviar confere se a mensagem já saiu.
+      let msg
+      let formatted = null
+      let sendStartedAt = null
+      for (let attempt = 1; ; attempt++) {
+        try {
+          // Resolve o JID de verdade (LID quando aplicável) E garante que a
+          // conversa foi iniciada de verdade antes de enviar — ver resolveChatId.
+          formatted = await resolveChatId(client, contact.number)
+          sendStartedAt = Date.now()
+          msg = await doSend(formatted)
+          break
+        } catch (err) {
+          if (!TRANSIENT_PAGE_ERR.test(err?.message || '') || attempt >= 3) throw err
+          broadcast('chip_campaign', { type: 'page_reload', number: contact.number, chip: activeChip.id, attempt })
+          const stable = await waitChipPageStable(client)
+          if (!stable) throw new Error(`O WhatsApp Web do chip recarregou e não voltou a tempo (${err.message})`)
+          if (formatted && sendStartedAt && await wasSentAfter(client, formatted, text, sendStartedAt)) { msg = null; break }
+        }
       }
 
       result.status = 'success'
@@ -2212,7 +2284,7 @@ app.post('/api/wuzapi-campaign/start', (req, res) => {
 // Prévia das variações da IA no wizard — gera algumas versões com o mesmo
 // spinner/validação usados no disparo real, pra conferir antes de iniciar
 // que o contexto e as {{variáveis}} ficam intactos.
-app.post('/api/wuzapi-campaign/spin-preview', async (req, res) => {
+app.post(['/api/wuzapi-campaign/spin-preview', '/api/ai/spin-preview'], async (req, res) => {
   const text = String(req.body?.text || '')
   const count = Math.min(Math.max(Number(req.body?.count) || 3, 1), 5)
   if (!text.trim()) return res.status(400).json({ error: 'Texto vazio' })
@@ -3325,7 +3397,7 @@ app.post('/api/ai/humanize', async (req, res) => {
   const contact = { name: name || '', vars: vars || {} }
   try {
     const result = await humanizeWithAI(message, contact, tone || 'amigavel', greetings)
-    res.json({ humanized: result, original: message })
+    res.json({ humanized: result.text, original: message, aiOk: result.ok, reason: result.reason })
   } catch (e) {
     res.json({ humanized: humanizeBasic(message, contact, greetings), original: message })
   }

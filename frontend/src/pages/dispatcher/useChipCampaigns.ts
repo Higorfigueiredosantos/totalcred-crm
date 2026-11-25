@@ -125,6 +125,12 @@ export function useChipCampaigns() {
     }
     if (p.type === 'skipped') addLog(`⏭️ ${p.number} — já enviado anteriormente`)
     if (p.type === 'cooldown') addLog(`🛑 Cooldown ${p.seconds}s`)
+    if (p.type === 'spin') {
+      addLog(p.ok
+        ? `🤖 ${p.number} — mensagem humanizada pela IA (variáveis conferidas)`
+        : `⚠️ ${p.number} — IA não gerou variação válida (${p.reason || 'sem motivo'}), enviando mensagem padrão`)
+    }
+    if (p.type === 'page_reload') addLog(`🔄 ${p.number} — WhatsApp Web do chip ${p.chip} recarregou no envio, aguardando e tentando de novo (${p.attempt}/2)`)
     if (p.type === 'batch_pause') { startWait(p.seconds); addLog(`☕ Pausa de lote (${p.batchCount} enviados) — aguardando ${p.seconds}s`) }
     if (p.type === 'paused') { setCurrent(prev => prev ? { ...prev, paused: true } : prev); addLog(`⏸️ ${p.reason || 'Pausado'}`) }
     if (p.type === 'stopped') { setCurrent(prev => prev ? { ...prev, status: 'done', paused: false, endedAt: Date.now() } : prev); addLog('🛑 Interrompido.') }

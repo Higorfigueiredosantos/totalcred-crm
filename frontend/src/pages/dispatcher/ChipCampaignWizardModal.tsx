@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect } from 'react'
 import {
   Smartphone, Upload, X, ChevronDown, ChevronUp, AlertCircle, Users, Loader2,
-  Eye, FileText, MessageSquare, Globe, Zap, Send,
+  Eye, FileText, MessageSquare, Globe, Zap, Send, Shuffle,
 } from 'lucide-react'
 import { onWSMessage } from '../../api/websocket'
 import { useChips } from '../../hooks/useChips'
@@ -39,9 +39,31 @@ export default function ChipCampaignWizardModal({ onClose, onStart }: Props) {
 
   const [selectedChipIds, setSelectedChipIds] = useState<string[]>([])
   const [settings, setSettings] = useState<ChipCampaignSettings>({
-    delayMin: 5, delayMax: 30, useAIHumanize: false, tone: 'amigavel',
+    delayMin: 5, delayMax: 30, useAIHumanize: true, tone: 'amigavel',
     batchDelay: { enabled: false, everyMin: 10, everyMax: 20, pauseMin: 60, pauseMax: 120 },
   })
+  const [spinPreview, setSpinPreview] = useState<{ loading: boolean; variants: string[]; error?: string }>({ loading: false, variants: [] })
+
+  async function handleSpinPreview() {
+    if (!message.trim()) return alert('Escreva a mensagem primeiro.')
+    setSpinPreview({ loading: true, variants: [] })
+    try {
+      const r = await fetch('/api/ai/spin-preview', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: message, count: 3 }),
+      })
+      const d = await r.json()
+      setSpinPreview({ loading: false, variants: d.variants || [], error: d.error })
+    } catch (e: any) {
+      setSpinPreview({ loading: false, variants: [], error: e?.message || 'Falha ao gerar prévia' })
+    }
+  }
+
+  function fillVars(text: string) {
+    const c = getActiveContacts()[0] ?? { number: '5511999990001', name: 'João', vars: {} }
+    let msg = text.replace(/\{\{name\}\}/gi, c.name || 'Nome')
+    if (c.vars) for (const [k, v] of Object.entries(c.vars)) msg = msg.replace(new RegExp(`\\{\\{${k}\\}\\}`, 'gi'), v)
+    return msg
+  }
 
   useEffect(() => {
     const offs = [
@@ -224,7 +246,7 @@ export default function ChipCampaignWizardModal({ onClose, onStart }: Props) {
 
               <div>
                 <label className="block text-xs font-medium text-gray-400 mb-1.5">Template da mensagem *</label>
-                <textarea value={message} onChange={e => setMessage(e.target.value)} rows={5}
+                <textarea value={message} onChange={e => { setMessage(e.target.value); setSpinPreview({ loading: false, variants: [] }) }} rows={5}
                   placeholder={"Use {{name}} para nome, {{1}} {{2}}... para colunas do CSV.\nEx: Olá {{name}}, temos uma oferta em {{cidade}}!"}
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 resize-none focus:outline-none focus:border-green-500" />
               </div>
@@ -548,8 +570,31 @@ export default function ChipCampaignWizardModal({ onClose, onStart }: Props) {
               <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer select-none">
                 <input type="checkbox" checked={settings.useAIHumanize}
                   onChange={e => setSettings(s => ({ ...s, useAIHumanize: e.target.checked }))} className="rounded" />
-                <Zap size={11} className="text-yellow-400" /> Humanizar com IA (GROQ_API_KEY ou OPENAI_API_KEY)
+                <Zap size={11} className="text-yellow-400" /> Humanizar com IA — mensagem diferente a cada envio
               </label>
+              {settings.useAIHumanize && (
+                <div className="-mt-2 pl-5 space-y-2">
+                  <p className="text-[11px] text-gray-500">
+                    A IA reescreve a mensagem a cada envio mantendo o mesmo contexto/oferta, e nunca repete uma versão já enviada.
+                    As variáveis {'{{...}}'}, números, valores e links ficam <span className="text-gray-300">sempre idênticos à mensagem padrão</span> —
+                    toda versão é conferida antes do envio; se a IA mexer em qualquer um deles, é descartada (se nenhuma passar, vai a mensagem padrão).
+                    A saudação escolhida continua na frente, respeitando o horário (não manda "Boa noite" de manhã).
+                  </p>
+                  <button onClick={handleSpinPreview} disabled={spinPreview.loading}
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-yellow-300 text-[11px] rounded-lg disabled:opacity-50">
+                    {spinPreview.loading ? <Loader2 size={11} className="animate-spin" /> : <Shuffle size={11} />} Testar variações
+                  </button>
+                  {spinPreview.error && (
+                    <p className="text-[11px] text-red-400 flex items-center gap-1"><AlertCircle size={11} /> {spinPreview.error}</p>
+                  )}
+                  {spinPreview.variants.map((v, i) => (
+                    <div key={i} className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                      <p className="text-[10px] text-gray-500 mb-0.5">Variação {i + 1}</p>
+                      <p className="text-xs text-gray-200 whitespace-pre-wrap leading-relaxed">{fillVars(v)}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
 
               {recipientCount > 0 && (
                 <div className="bg-gray-800 rounded-lg p-3 text-xs text-gray-400 flex gap-2">
