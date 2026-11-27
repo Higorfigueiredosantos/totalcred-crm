@@ -2952,20 +2952,13 @@ app.post('/api/tools/groups/members', async (req, res) => {
       const GM = C.GroupMetadata || C.WAWebGroupMetadataCollection
       const read = () => C.Chat.get(gid)?.groupMetadata || GM?.get?.(gid)
       let meta = read()
-      // Grupo ainda sem participantes carregados → busca no servidor (mesma
-      // consulta que o WhatsApp Web faz ao abrir o grupo).
-      if (!meta?.participants?.length) {
-        try {
-          await Promise.race([
-            window.require('WAWebGroupQueryJob').queryAndUpdateGroupMetadataById({ id: wid }),
-            new Promise(r => setTimeout(r, 40000)),
-          ])
-        } catch (e) {}
-        meta = read()
-      }
-      let parts = meta?.participants ? (meta.participants.getModelsArray ? meta.participants.getModelsArray() : Array.from(meta.participants)) : []
-      // Ainda vazio → usa a resposta do queryAllGroups (traz participantes +
-      // phoneNumber de todos os grupos), a mesma que a lista guardou.
+      const toParts = m => m?.participants ? (m.participants.getModelsArray ? m.participants.getModelsArray() : Array.from(m.participants)) : []
+      let parts = toParts(meta)
+      // Grupo sem participantes na memória do WhatsApp Web (comum logo após
+      // conectar) → 1º a resposta do queryAllGroups (traz participantes +
+      // phoneNumber de todos; a lista já guardou em cache), que responde em
+      // ~2s. A consulta individual (queryAndUpdateGroupMetadataById) fica de
+      // último recurso: na prática ela trava ~40s logo após conectar.
       if (!parts.length) {
         try {
           const cache = window.__crmGroupsQuery
@@ -2978,6 +2971,16 @@ app.post('/api/tools/groups/members', async (req, res) => {
           if (g?.participants?.length) parts = g.participants
           if (g && !meta) meta = { subject: g.subject }
         } catch (e) {}
+      }
+      if (!parts.length) {
+        try {
+          await Promise.race([
+            window.require('WAWebGroupQueryJob').queryAndUpdateGroupMetadataById({ id: wid }),
+            new Promise(r => setTimeout(r, 15000)),
+          ])
+        } catch (e) {}
+        meta = read() || meta
+        parts = toParts(meta)
       }
       if (!parts.length) return { error: 'Grupo não encontrado neste chip (ou você não participa mais dele).' }
       const toWid = v => { if (!v) return null; if (typeof v === 'string') { try { return W.createWid(v) } catch (e) { return null } } return v }
