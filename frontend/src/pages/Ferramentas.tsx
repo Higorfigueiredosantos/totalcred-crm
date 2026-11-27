@@ -2120,13 +2120,19 @@ function FiltroTab() {
 
 // ── GRUPOS TAB ────────────────────────────────────────────────────────────────
 
-type Group = { id: string; name: string; memberCount: number | string }
-type Member = { number: string; name: string }
+type Group = { id: string; name: string; memberCount: number | string; isAnnounce?: boolean; isCommunity?: boolean }
+type Member = { number: string | null; name: string; lid?: string | null; isAdmin?: boolean }
+type GroupChip = { id: string; number: string | null }
 
 function GruposTab() {
   const [groups, setGroups] = useState<Group[]>([])
   const [loadingGroups, setLoadingGroups] = useState(false)
+  const [groupsError, setGroupsError] = useState('')
+  const [groupChips, setGroupChips] = useState<GroupChip[]>([])
+  const [groupChipId, setGroupChipId] = useState('')
+  const [groupFilter, setGroupFilter] = useState('')
   const [members, setMembers] = useState<Member[]>([])
+  const [membersError, setMembersError] = useState('')
   const [selectedGroup, setSelectedGroup] = useState<Group | null>(null)
   const [loadingMembers, setLoadingMembers] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -2134,27 +2140,47 @@ function GruposTab() {
   const [searchLinks, setSearchLinks] = useState<string[]>([])
   const [searching, setSearching] = useState(false)
 
-  async function loadGroups() {
+  async function loadGroups(chipId = groupChipId) {
     setLoadingGroups(true)
-    const r = await fetch('/api/tools/groups/list')
-    const d = await r.json()
-    setGroups(d.groups || [])
-    if (d.error) alert(d.error)
+    setGroupsError('')
+    try {
+      const r = await fetch(`/api/tools/groups/list${chipId ? `?chipId=${encodeURIComponent(chipId)}` : ''}`)
+      const d = await r.json()
+      setGroups(d.groups || [])
+      setGroupChips(d.chips || [])
+      if (d.chipId) setGroupChipId(d.chipId)
+      if (d.error) setGroupsError(d.error)
+    } catch (e: any) {
+      setGroupsError(e?.message || 'Falha ao carregar grupos')
+    }
     setLoadingGroups(false)
   }
+
+  // Carrega sozinho ao abrir a aba — antes só carregava clicando em "Carregar".
+  useEffect(() => { loadGroups('') }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function loadMembers(group: Group) {
     setSelectedGroup(group)
     setLoadingMembers(true)
     setMembers([])
-    const r = await fetch('/api/tools/groups/members', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ groupId: group.id })
-    })
-    const d = await r.json()
-    setMembers(d.members || [])
+    setMembersError('')
+    try {
+      const r = await fetch('/api/tools/groups/members', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ groupId: group.id, chipId: groupChipId || undefined })
+      })
+      const d = await r.json()
+      setMembers(d.members || [])
+      if (d.error) setMembersError(d.error)
+    } catch (e: any) {
+      setMembersError(e?.message || 'Falha ao carregar membros')
+    }
     setLoadingMembers(false)
   }
+
+  const filteredGroups = groupFilter.trim()
+    ? groups.filter(g => g.name.toLowerCase().includes(groupFilter.trim().toLowerCase()))
+    : groups
 
   async function searchGroups() {
     if (!searchQuery.trim()) return alert('Digite um tema para buscar.')
@@ -2172,7 +2198,10 @@ function GruposTab() {
   }
 
   function exportMembers() {
-    downloadCSV([['Número', 'Nome'], ...members.map(m => [m.number, m.name])], `membros_${selectedGroup?.name}.csv`)
+    downloadCSV(
+      [['Número', 'Nome', 'Admin'], ...members.filter(m => m.number).map(m => [m.number!, m.name || '', m.isAdmin ? 'sim' : ''])],
+      `membros_${selectedGroup?.name}.csv`,
+    )
   }
 
   return (
@@ -2184,25 +2213,52 @@ function GruposTab() {
             <h2 className="text-sm font-semibold text-white">Meus Grupos</h2>
             <p className="text-xs text-gray-400 mt-0.5">Grupos do chip conectado</p>
           </div>
-          <button onClick={loadGroups} disabled={loadingGroups}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-200 text-xs rounded-lg">
-            <RefreshCw size={12} className={loadingGroups ? 'animate-spin' : ''} /> Carregar
-          </button>
+          <div className="flex items-center gap-2">
+            {groupChips.length > 1 && (
+              <select value={groupChipId} onChange={e => { setGroupChipId(e.target.value); setSelectedGroup(null); setMembers([]); loadGroups(e.target.value) }}
+                className="bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none">
+                {groupChips.map(c => <option key={c.id} value={c.id}>{c.id}{c.number ? ` (${c.number})` : ''}</option>)}
+              </select>
+            )}
+            <button onClick={() => loadGroups()} disabled={loadingGroups}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-200 text-xs rounded-lg">
+              <RefreshCw size={12} className={loadingGroups ? 'animate-spin' : ''} /> Atualizar
+            </button>
+          </div>
         </div>
 
-        {groups.length === 0 ? (
-          <p className="text-xs text-gray-500 text-center py-4">Clique em "Carregar" para listar os grupos do chip conectado.</p>
+        {groupsError && (
+          <p className="text-xs text-red-400 bg-red-400/10 rounded-lg px-3 py-2">{groupsError}</p>
+        )}
+
+        {groups.length > 0 && (
+          <div className="flex items-center justify-between gap-2">
+            <input value={groupFilter} onChange={e => setGroupFilter(e.target.value)}
+              placeholder={`Filtrar ${groups.length} grupos...`}
+              className="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-green-500" />
+            <span className="text-[11px] text-gray-500 shrink-0">{filteredGroups.length} de {groups.length}</span>
+          </div>
+        )}
+
+        {loadingGroups && groups.length === 0 ? (
+          <p className="text-xs text-gray-500 text-center py-4 flex items-center justify-center gap-2">
+            <RefreshCw size={12} className="animate-spin" /> Carregando grupos do chip...
+          </p>
+        ) : groups.length === 0 ? (
+          <p className="text-xs text-gray-500 text-center py-4">{groupsError ? 'Nenhum grupo carregado.' : 'Esse chip não participa de nenhum grupo.'}</p>
         ) : (
-          <div className="space-y-1.5 max-h-52 overflow-y-auto">
-            {groups.map(g => (
-              <div key={g.id} className="flex items-center justify-between bg-gray-900 rounded-lg px-3 py-2">
-                <div className="flex items-center gap-2">
-                  <Users size={13} className="text-gray-500" />
-                  <span className="text-sm text-gray-200">{g.name}</span>
-                  <span className="text-xs text-gray-500">{g.memberCount} membros</span>
+          <div className="space-y-1.5 max-h-72 overflow-y-auto">
+            {filteredGroups.map(g => (
+              <div key={g.id} className={`flex items-center justify-between rounded-lg px-3 py-2 ${selectedGroup?.id === g.id ? 'bg-green-900/30 border border-green-800/50' : 'bg-gray-900'}`}>
+                <div className="flex items-center gap-2 min-w-0">
+                  <Users size={13} className="text-gray-500 shrink-0" />
+                  <span className="text-sm text-gray-200 truncate">{g.name}</span>
+                  <span className="text-xs text-gray-500 shrink-0">{g.memberCount} membros</span>
+                  {g.isCommunity && <span className="text-[9px] bg-indigo-500/20 text-indigo-300 px-1.5 py-0.5 rounded shrink-0">Comunidade</span>}
+                  {g.isAnnounce && <span className="text-[9px] bg-gray-700 text-gray-400 px-1.5 py-0.5 rounded shrink-0">Só admins</span>}
                 </div>
                 <button onClick={() => loadMembers(g)}
-                  className="text-xs text-green-400 hover:text-green-300">
+                  className="text-xs text-green-400 hover:text-green-300 shrink-0 ml-2">
                   Ver membros
                 </button>
               </div>
@@ -2226,13 +2282,23 @@ function GruposTab() {
                 <button onClick={() => { setSelectedGroup(null); setMembers([]) }} className="text-gray-500 hover:text-gray-300"><X size={14} /></button>
               </div>
             </div>
-            <div className="max-h-40 overflow-y-auto">
+            {membersError && <p className="text-xs text-red-400 bg-red-400/10 rounded-lg px-3 py-2">{membersError}</p>}
+            {!loadingMembers && members.some(m => !m.number) && (
+              <p className="text-[11px] text-yellow-400/80">
+                {members.filter(m => !m.number).length} membro(s) com número oculto pelo WhatsApp (privacidade) — ficam fora da exportação.
+              </p>
+            )}
+            <div className="max-h-64 overflow-y-auto">
               {loadingMembers ? (
                 <p className="text-xs text-gray-500 text-center py-4">Carregando membros...</p>
               ) : (
                 <div className="grid grid-cols-2 gap-1">
                   {members.map((m, i) => (
-                    <div key={i} className="text-xs font-mono text-gray-300 bg-gray-900 rounded px-2 py-1">{m.number}</div>
+                    <div key={i} className="text-xs bg-gray-900 rounded px-2 py-1 flex items-center gap-1.5 min-w-0">
+                      <span className={`font-mono shrink-0 ${m.number ? 'text-gray-300' : 'text-gray-600'}`}>{m.number || 'oculto'}</span>
+                      {m.name && <span className="text-gray-500 truncate">{m.name}</span>}
+                      {m.isAdmin && <span className="text-[9px] bg-green-500/20 text-green-300 px-1 rounded shrink-0 ml-auto">admin</span>}
+                    </div>
                   ))}
                 </div>
               )}

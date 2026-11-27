@@ -2870,32 +2870,86 @@ app.post('/api/tools/filter', async (req, res) => {
   }
 })
 
-app.get('/api/tools/groups/list', async (_req, res) => {
-  const readyIds = Object.keys(chipSessions).filter(id => chipSessions[id].isReady)
-  if (readyIds.length === 0) return res.json({ groups: [], error: 'Nenhum chip conectado' })
+// Grupos lidos direto das coleções do WhatsApp Web, sem client.getChats() /
+// getChatById(): esses passam cada conversa pelo getChatModel do
+// whatsapp-web.js, que quebra em conversa individual no formato LID
+// ("DataError: ... IDBObjectStore: No key", erro minificado "r") — UMA conversa
+// problemática derrubava a lista inteira e a tela de Grupos ficava vazia.
+// Participantes hoje vêm como LID (ex.: 41949130154212@lid); o número de
+// telefone real vem de participant.phoneNumber / WAWebApiContact — antes a
+// rota devolvia id.user (o LID), que não serve pra nada no CSV.
+function pickGroupsChip(chipId) {
+  const readyIds = Object.keys(chipSessions).filter(id => chipSessions[id]?.isReady && chipSessions[id]?.client)
+  const id = chipId && readyIds.includes(chipId) ? chipId : readyIds[0]
+  return { id, readyIds }
+}
+
+app.get('/api/tools/groups/list', async (req, res) => {
+  const { id: chipId, readyIds } = pickGroupsChip(req.query.chipId)
+  if (!chipId) return res.json({ groups: [], chips: [], error: 'Nenhum chip conectado' })
   try {
-    const client = chipSessions[readyIds[0]].client
-    const chats = await client.getChats()
-    const groups = chats.filter(c => c.isGroup && c.name).map(g => ({
-      id: g.id._serialized, name: g.name,
-      memberCount: Array.isArray(g.participants) ? g.participants.length : '?'
-    }))
-    res.json({ groups })
+    const groups = await withTimeout(chipSessions[chipId].client.pupPage.evaluate(() => {
+      const C = window.require('WAWebCollections')
+      return C.Chat.getModelsArray()
+        .filter(c => c.id?.server === 'g.us')
+        .map(c => {
+          const meta = c.groupMetadata
+          const parts = meta?.participants
+          const count = parts ? (parts.length ?? parts.getModelsArray?.().length) : null
+          return {
+            id: c.id._serialized,
+            name: c.formattedTitle || c.name || meta?.subject || c.id.user,
+            memberCount: count ?? '?',
+            isAnnounce: !!meta?.announce,
+            isCommunity: !!meta?.isParentGroup,
+          }
+        })
+    }), 30000, 'timeout lendo grupos do WhatsApp Web')
+    groups.sort((a, b) => String(a.name).localeCompare(String(b.name), 'pt-BR'))
+    res.json({ groups, chipId, chips: readyIds.map(id => ({ id, number: chipSessions[id].number || null })) })
   } catch (e) {
-    res.status(500).json({ groups: [], error: e.message })
+    res.status(500).json({ groups: [], chipId, chips: readyIds.map(id => ({ id, number: chipSessions[id].number || null })), error: e.message })
   }
 })
 
 app.post('/api/tools/groups/members', async (req, res) => {
-  const { groupId } = req.body
-  const readyIds = Object.keys(chipSessions).filter(id => chipSessions[id].isReady)
-  if (readyIds.length === 0) return res.json({ members: [] })
+  let { groupId, chipId: wantedChip } = req.body || {}
+  const { id: chipId } = pickGroupsChip(wantedChip)
+  if (!chipId) return res.json({ members: [], error: 'Nenhum chip conectado' })
+  if (!groupId) return res.status(400).json({ members: [], error: 'groupId é obrigatório' })
+  groupId = String(groupId)
+  if (!groupId.includes('@')) groupId = `${groupId.replace(/\D/g, '')}@g.us`
   try {
-    const client = chipSessions[readyIds[0]].client
-    const chat = await client.getChatById(groupId)
-    if (!chat || !Array.isArray(chat.participants)) return res.json({ members: [] })
-    const members = chat.participants.filter(p => p.id?.user).map(p => ({ number: p.id.user, name: p.id.user }))
-    res.json({ members })
+    const out = await withTimeout(chipSessions[chipId].client.pupPage.evaluate(async (gid) => {
+      const C = window.require('WAWebCollections')
+      const W = window.require('WAWebWidFactory')
+      let api = null; try { api = window.require('WAWebApiContact') } catch (e) {}
+      const wid = W.createWid(gid)
+      let meta = C.Chat.get(gid)?.groupMetadata || C.GroupMetadata.get(gid)
+      // Grupo ainda sem participantes carregados → busca no servidor.
+      if (!meta?.participants?.length) {
+        try { meta = await C.GroupMetadata.find(wid) } catch (e) {}
+      }
+      if (!meta?.participants) return { error: 'Grupo não encontrado neste chip (ou você não participa mais dele).' }
+      const parts = meta.participants.getModelsArray ? meta.participants.getModelsArray() : Array.from(meta.participants)
+      const members = parts.map(pt => {
+        const id = pt.id
+        let pn = pt.phoneNumber || null
+        if (!pn && id?.server === 'lid') { try { pn = api?.getPhoneNumber?.(id) || null } catch (e) {} }
+        if (!pn && id?.server === 'c.us') pn = id
+        const contact = (pn && C.Contact.get(pn._serialized || pn)) || C.Contact.get(id._serialized)
+        return {
+          number: pn ? (pn.user || String(pn._serialized || pn).split('@')[0]) : null,
+          lid: id?.server === 'lid' ? id.user : null,
+          name: contact?.name || contact?.pushname || contact?.verifiedName || '',
+          isAdmin: !!(pt.isAdmin || pt.isSuperAdmin),
+        }
+      })
+      return { members, subject: meta.subject || null }
+    }, groupId), 45000, 'timeout lendo membros do grupo')
+    if (out.error) return res.status(404).json({ members: [], error: out.error })
+    const unresolved = out.members.filter(m => !m.number).length
+    res.json({ members: out.members, subject: out.subject, chipId, unresolved })
   } catch (e) {
     res.status(500).json({ members: [], error: e.message })
   }

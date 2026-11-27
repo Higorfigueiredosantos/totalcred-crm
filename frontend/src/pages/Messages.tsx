@@ -402,7 +402,7 @@ export default function Messages() {
       })
       const d = await r.json()
       if (Array.isArray(d.members)) {
-        setGroupMembers(d.members.map((m: any) => m.id?.user || m.number || String(m)))
+        setGroupMembers(d.members.map((m: any) => m.number || m.id?.user).filter(Boolean))
       }
     } catch {}
     setLoadingMembers(false)
