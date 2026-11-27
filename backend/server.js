@@ -2891,15 +2891,27 @@ app.get('/api/tools/groups/list', async (req, res) => {
     const groups = await withTimeout(chipSessions[chipId].client.pupPage.evaluate(async () => {
       const C = window.require('WAWebCollections')
       // Logo após escanear o QR o WhatsApp Web só baixa os participantes de
-      // cada grupo sob demanda (75 de 88 vinham com "0 membros"). queryAllGroups
-      // é a mesma consulta que o WhatsApp usa pra sincronizar todos de uma vez.
+      // cada grupo sob demanda (75 de 88 vinham com "0 membros"), e nem
+      // queryAllGroups preenche a coleção — mas ele DEVOLVE todos os grupos
+      // com participantes (+ phoneNumber). Guarda a resposta 60s em
+      // window.__crmGroupsQuery pra rota de membros reaproveitar.
       const missing = C.Chat.getModelsArray().some(c => c.id?.server === 'g.us' && !c.groupMetadata?.participants?.length)
+      const fromQuery = new Map()
       if (missing) {
         try {
-          await Promise.race([
-            window.require('WAWebGroupQueryJob').queryAllGroups(),
-            new Promise(r => setTimeout(r, 25000)),
-          ])
+          const cache = window.__crmGroupsQuery
+          let list = cache && Date.now() - cache.at < 60000 ? cache.list : null
+          if (!list) {
+            list = await Promise.race([
+              window.require('WAWebGroupQueryJob').queryAllGroups(),
+              new Promise(r => setTimeout(() => r(null), 25000)),
+            ])
+            if (Array.isArray(list)) window.__crmGroupsQuery = { at: Date.now(), list }
+          }
+          for (const g of list || []) {
+            const gid = g?.id?._serialized || String(g?.id || '')
+            if (gid) fromQuery.set(gid, g.participants?.length || 0)
+          }
         } catch (e) { /* segue com o que tiver */ }
       }
       return C.Chat.getModelsArray()
@@ -2907,7 +2919,7 @@ app.get('/api/tools/groups/list', async (req, res) => {
         .map(c => {
           const meta = c.groupMetadata
           const parts = meta?.participants
-          const count = parts ? (parts.length ?? parts.getModelsArray?.().length) : null
+          const count = (parts ? (parts.length ?? parts.getModelsArray?.().length) : 0) || fromQuery.get(c.id._serialized) || null
           return {
             id: c.id._serialized,
             name: c.formattedTitle || c.name || meta?.subject || c.id.user,
@@ -2951,11 +2963,27 @@ app.post('/api/tools/groups/members', async (req, res) => {
         } catch (e) {}
         meta = read()
       }
-      if (!meta?.participants) return { error: 'Grupo não encontrado neste chip (ou você não participa mais dele).' }
-      const parts = meta.participants.getModelsArray ? meta.participants.getModelsArray() : Array.from(meta.participants)
+      let parts = meta?.participants ? (meta.participants.getModelsArray ? meta.participants.getModelsArray() : Array.from(meta.participants)) : []
+      // Ainda vazio → usa a resposta do queryAllGroups (traz participantes +
+      // phoneNumber de todos os grupos), a mesma que a lista guardou.
+      if (!parts.length) {
+        try {
+          const cache = window.__crmGroupsQuery
+          let list = cache && Date.now() - cache.at < 60000 ? cache.list : null
+          if (!list) {
+            list = await Promise.race([window.require('WAWebGroupQueryJob').queryAllGroups(), new Promise(r => setTimeout(() => r(null), 25000))])
+            if (Array.isArray(list)) window.__crmGroupsQuery = { at: Date.now(), list }
+          }
+          const g = (list || []).find(x => (x?.id?._serialized || String(x?.id || '')) === gid)
+          if (g?.participants?.length) parts = g.participants
+          if (g && !meta) meta = { subject: g.subject }
+        } catch (e) {}
+      }
+      if (!parts.length) return { error: 'Grupo não encontrado neste chip (ou você não participa mais dele).' }
+      const toWid = v => { if (!v) return null; if (typeof v === 'string') { try { return W.createWid(v) } catch (e) { return null } } return v }
       const members = parts.map(pt => {
-        const id = pt.id
-        let pn = pt.phoneNumber || null
+        const id = toWid(pt.id) || {}
+        let pn = toWid(pt.phoneNumber)
         if (!pn && id?.server === 'lid') { try { pn = api?.getPhoneNumber?.(id) || null } catch (e) {} }
         if (!pn && id?.server === 'c.us') pn = id
         const contact = (pn && C.Contact.get(pn._serialized || pn)) || C.Contact.get(id._serialized)
@@ -2966,7 +2994,7 @@ app.post('/api/tools/groups/members', async (req, res) => {
           isAdmin: !!(pt.isAdmin || pt.isSuperAdmin),
         }
       })
-      return { members, subject: meta.subject || null }
+      return { members, subject: meta?.subject || null }
     }, groupId), 45000, 'timeout lendo membros do grupo')
     if (out.error) return res.status(404).json({ members: [], error: out.error })
     const unresolved = out.members.filter(m => !m.number).length
