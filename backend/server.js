@@ -2888,8 +2888,20 @@ app.get('/api/tools/groups/list', async (req, res) => {
   const { id: chipId, readyIds } = pickGroupsChip(req.query.chipId)
   if (!chipId) return res.json({ groups: [], chips: [], error: 'Nenhum chip conectado' })
   try {
-    const groups = await withTimeout(chipSessions[chipId].client.pupPage.evaluate(() => {
+    const groups = await withTimeout(chipSessions[chipId].client.pupPage.evaluate(async () => {
       const C = window.require('WAWebCollections')
+      // Logo após escanear o QR o WhatsApp Web só baixa os participantes de
+      // cada grupo sob demanda (75 de 88 vinham com "0 membros"). queryAllGroups
+      // é a mesma consulta que o WhatsApp usa pra sincronizar todos de uma vez.
+      const missing = C.Chat.getModelsArray().some(c => c.id?.server === 'g.us' && !c.groupMetadata?.participants?.length)
+      if (missing) {
+        try {
+          await Promise.race([
+            window.require('WAWebGroupQueryJob').queryAllGroups(),
+            new Promise(r => setTimeout(r, 25000)),
+          ])
+        } catch (e) { /* segue com o que tiver */ }
+      }
       return C.Chat.getModelsArray()
         .filter(c => c.id?.server === 'g.us')
         .map(c => {
@@ -2899,7 +2911,7 @@ app.get('/api/tools/groups/list', async (req, res) => {
           return {
             id: c.id._serialized,
             name: c.formattedTitle || c.name || meta?.subject || c.id.user,
-            memberCount: count ?? '?',
+            memberCount: count ? count : '?', // 0 = ainda não carregado, não "grupo vazio"
             isAnnounce: !!meta?.announce,
             isCommunity: !!meta?.isParentGroup,
           }
@@ -2925,10 +2937,19 @@ app.post('/api/tools/groups/members', async (req, res) => {
       const W = window.require('WAWebWidFactory')
       let api = null; try { api = window.require('WAWebApiContact') } catch (e) {}
       const wid = W.createWid(gid)
-      let meta = C.Chat.get(gid)?.groupMetadata || C.GroupMetadata.get(gid)
-      // Grupo ainda sem participantes carregados → busca no servidor.
+      const GM = C.GroupMetadata || C.WAWebGroupMetadataCollection
+      const read = () => C.Chat.get(gid)?.groupMetadata || GM?.get?.(gid)
+      let meta = read()
+      // Grupo ainda sem participantes carregados → busca no servidor (mesma
+      // consulta que o WhatsApp Web faz ao abrir o grupo).
       if (!meta?.participants?.length) {
-        try { meta = await C.GroupMetadata.find(wid) } catch (e) {}
+        try {
+          await Promise.race([
+            window.require('WAWebGroupQueryJob').queryAndUpdateGroupMetadataById({ id: wid }),
+            new Promise(r => setTimeout(r, 40000)),
+          ])
+        } catch (e) {}
+        meta = read()
       }
       if (!meta?.participants) return { error: 'Grupo não encontrado neste chip (ou você não participa mais dele).' }
       const parts = meta.participants.getModelsArray ? meta.participants.getModelsArray() : Array.from(meta.participants)
